@@ -29,12 +29,48 @@ This directory decomposes it into **40 atomic, topologically ordered chunks**.
    `completion_date`, and append an implementation note recording outcomes, trade-offs, and
    anything the next chunk must know.
 
+## Verified environment (resolved by chunk 01, 2026-09-09)
+
+Do not re-derive these. Every later chunk may rely on them.
+
+**Interpreter:** Python **3.14.3** — no fallback needed. `requires-python = ">=3.14"`.
+
+**Pins:** `fastapi==0.141.1`, `uvicorn[standard]==0.52.4`, `pydantic==2.13.5`,
+`pydantic-settings==2.15.0`, `python-multipart==0.0.32`, `httpx==0.28.1`, `litellm==1.100.0`,
+`mcp==2.2.0`, `pandas==3.0.5`, `pyarrow==25.0.1`, `numpy==2.5.3`, `scikit-learn==1.9.0`,
+`statsmodels==0.15.0`, `matplotlib==3.11.1`, `joblib==1.6.0`.
+Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1`,
+`ruff==0.16.6`, `pandas-stubs==3.0.5.260730`.
+
+**pandas 3.0 behaviour — verified empirically, and a trap for chunks 06, 08, 09, 10, 17:**
+
+| Fact | Consequence |
+|---|---|
+| String columns have dtype **`str`**, not `object` | **Never** detect strings with `dtype == object`. Use `pandas.api.types.is_string_dtype`. A role-inference function written against pandas 2 conventions fails silently here. |
+| Copy-on-write is **always on**, cannot be disabled | Helps D22's immutable-artifact rule; tools cannot accidentally mutate a caller's frame through a view. Never rely on mutation-through-view. |
+| Datetimes default to `datetime64[us]`, not `[ns]` | Assert on `[us]` in fixtures; temporal splits and datetime-part extraction must not hardcode `[ns]`. |
+| Parquet round-trip preserves `str`, `category`, `datetime64[us]`, `bool` exactly | Chunk 06 can assert full dtype equality after round-trip rather than tolerating drift. |
+| `Pandas4Warning` exists as a deprecation category | With `filterwarnings = ["error"]`, touching a pandas-4-deprecated API fails the suite. That is intended. |
+
+**Tooling notes carried forward:**
+- `[tool.mypy] plugins = ["pydantic.mypy"]` is required — without it mypy rejects
+  `Settings(_env_file=...)`.
+- `filterwarnings = ["error"]` is viable with **zero** ignores. Keep it that way; fix the cause,
+  do not suppress.
+- macOS `grep` is BSD, so `grep -P` is unavailable. Use `grep -c $'^\t'` for tab assertions.
+- `plan/` is excluded from ruff scope — it is spec markdown with illustrative fences.
+
+**Precedent set in chunk 01:** a pydantic `value_error` may be re-classified into a
+user-facing category when the two differ (a present-but-blank `STATLAB_MCP_TOKEN` is reported
+as *missing*, because that is what the user needs to hear). Reuse this pattern rather than
+inventing a second convention.
+
 ## Phase A — Foundation (01–06)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 01 | [`01_foundation.md`](./01_foundation.md) — repo skeleton, pinned deps (Task 0), config, Makefile | untouched | — |
-| 02 | `02_core_types.md` — `ToolResult`/`ToolError` envelope, `error_class` taxonomy, `ArtifactRef`, `NodeSpec`, `NodeResult`, `GatePolicy`, domain error hierarchy | untouched | 01 |
+| 01 | [`01_foundation.md`](./01_foundation.md) — repo skeleton, pinned deps (Task 0), config, Makefile | completed | — |
+| 02 | [`02_core_types.md`](./02_core_types.md) — `ToolResult` envelope, `error_class` taxonomy + retry budget, `ArtifactRef`/`ArtifactKind`, `NodeSpec`, `NodeResult`, `GatePolicy`, structured error hierarchy. **Introduces `contracts/statlab_contracts/`** — a third dependency-free package for wire types, so the envelope cannot drift between the two processes | untouched | 01 |
 | 03 | `03_data_contract.md` — `DataContract` Pydantic tree (§4.1), validation against a real frame, JSON round-trip | untouched | 02 |
 | 04 | `04_candidate_spec.md` — `CandidateSpec`, `PreprocessingSpec`, `FeatureSpec`, `EstimatorSpec`, canonical spec-hash, dedupe + baseline + family-cap rules (D28) | untouched | 02, 03 |
 | 05 | `05_persistence_sqlite.md` — schema DDL (§10.2), WAL + `busy_timeout`, migration runner, typed repository functions | untouched | 02 |
