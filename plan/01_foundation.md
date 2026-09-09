@@ -1,8 +1,59 @@
 ---
-status: untouched
+status: completed
 dependencies: []
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-09
+implementation_notes: |
+  Interpreter: Python 3.14.3 won outright on the first attempt. No fallback needed — every
+  package in the dependency set (including statsmodels 0.15.0 and litellm 1.100.0, the two
+  named risks) installed and imported cleanly via `uv pip install`.
+
+  Pinned versions (see pyproject.toml for the authoritative list): fastapi==0.141.1,
+  uvicorn[standard]==0.52.4, pydantic==2.13.5, pydantic-settings==2.15.0,
+  python-multipart==0.0.32, httpx==0.28.1, litellm==1.100.0, mcp==2.2.0, pandas==3.0.5,
+  pyarrow==25.0.1, numpy==2.5.3, scikit-learn==1.9.0, statsmodels==0.15.0,
+  matplotlib==3.11.1, joblib==1.6.0; dev: pytest==9.1.1, pytest-cov==7.1.0,
+  pytest-asyncio==1.4.0, mypy==2.3.1, ruff==0.16.6, pandas-stubs==3.0.5.260730.
+
+  filterwarnings=["error"] was fully viable with zero ignores added. The one warning
+  encountered (python-multipart's legacy `multipart` shim emits PendingDeprecationWarning
+  on import) was resolved by testing the real module name `python_multipart` instead of
+  the deprecated alias — not by suppressing anything.
+
+  Deviations from the literal spec text (all within chunk 01 §1's stated resolution
+  authority, none change a fixed signature):
+  - mypy needed `plugins = ["pydantic.mypy"]` added to [tool.mypy]. Without it, mypy
+    cannot see BaseSettings' private `_env_file` kwarg on the synthesized subclass
+    __init__ and reports false call-arg errors on `Settings(_env_file=...)`.
+  - `class Settings(BaseSettings)` / `class ToolSettings(BaseSettings)` each need
+    `# type: ignore[explicit-any]` — pydantic_settings.BaseSettings' own public signature
+    uses Any, which disallow_any_explicit flags at the subclass definition line
+    regardless of our code. Both ignores carry an inline justification.
+  - test_dependencies.py's D1 list uses "python_multipart", not "multipart" — the latter
+    is a deprecated compatibility shim that warns under filterwarnings=["error"].
+  - Removed the tomllib/tomli fallback import: dead code once pinned to Python 3.14, and
+    mypy correctly flagged the unused-ignore/missing-stub it produced.
+  - ensure_writable's "path exists and is not a directory" check had to move *before* the
+    mkdir() call, not after. Path.mkdir(parents=True, exist_ok=True) raises
+    FileExistsError itself when the target exists as a file, so the original ordering
+    made the dedicated check unreachable (a real bug in the spec's illustrated code, not
+    a test gap — found via the coverage requirement doing its job). Mirrored the fix in
+    both config.py and settings.py.
+  - Added a `_token_not_blank` field_validator on `mcp_token` in both Settings and
+    ToolSettings, and extended `_missing_env_vars` to classify that specific value_error
+    as "missing". Spec gap: `STATLAB_MCP_TOKEN=` (present, empty string) is NOT a pydantic
+    "missing" error — it satisfies a bare `SecretStr` field. The DoD's own hand-verification
+    command (`STATLAB_MCP_TOKEN= make check-env`) sets exactly this case and expects
+    non-zero exit naming the variable, so blank had to be treated as equivalent to absent.
+  - grep -Pc (PCRE) is not available in BSD grep on macOS; used `grep -c $'^\t' Makefile`
+    (bash ANSI-C quoting) as the portable equivalent — same non-zero-count assertion.
+  - Excluded plan/ from ruff's target (extend-exclude) — it contains markdown with
+    illustrative Python code fences that are not implementation code and are out of this
+    chunk's scope to reformat.
+
+  Chunk 02 should know: NodeResult/NodeSpec/ArtifactRef/ToolResult/ToolError do not exist
+  yet, as expected. `StatlabError`/`ConfigError` are the only members of the error
+  hierarchy so far; chunk 02 extends the same errors.py module rather than creating a
+  second one, per §3.3's instruction embedded in this chunk's spec.
 ---
 
 # Chunk 01 — Foundation: dependency resolution, configuration, tooling
@@ -24,7 +75,7 @@ This chunk implements **Task 0** and **M0** from `PLAN.md` §2.1 / §13.
 /Users/nandordukat/Documents/Egyetem/MSc/Semester_2/Onlab/
 ├── PLAN.md                 # master architecture, read-only for this chunk
 ├── plan/                   # this directory
-├── pyproject.toml          # EXISTS, minimal: name="onlab", requires-python=">=3.14", dependencies=[]
+├── pyproject.toml          # EXISTS, minimal: name="modelling-agent", requires-python=">=3.14", dependencies=[]
 ├── .venv/                  # EXISTS, Python 3.14.3
 └── .idea/                  # IDE files, ignore
 ```
@@ -142,7 +193,7 @@ pins, no ranges, no `~=`**.
 
 ```toml
 [project]
-name = "onlab"
+name = "modelling-agent"
 version = "0.1.0"
 description = "LLM-driven statistical modelling workbench"
 requires-python = ">=3.14"          # or ">=3.12" per the fallback rule

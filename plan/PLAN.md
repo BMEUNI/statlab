@@ -3,6 +3,11 @@
 > Living document. Compiled into a hand-off prompt for a coding agent in §16.
 > Status: **COMPLETE v1.7** — 31 decisions locked, all 21 questions resolved.
 
+**Project name: `modelling-agent`.** This is the canonical name for the `pyproject.toml`
+package, the repository root in illustrative layouts throughout this document, and any
+future distribution artifact. Do not use `onlab` or any other placeholder — it appears
+nowhere in the codebase from chunk 01 onward.
+
 ---
 
 ## 1. What we are building
@@ -169,7 +174,7 @@ regardless of dataset size, prevents hallucinated values, and is what makes runs
 ### 3.2 Repository layout
 
 ```
-onlab/
+modelling-agent/
 ├── PLAN.md
 ├── pyproject.toml
 ├── backend/
