@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from statlab_contracts.artifacts import ArtifactRef
 
 _STATLAB_VARS = (
     "STATLAB_MCP_TOKEN",
@@ -59,3 +60,14 @@ def valid_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("STATLAB_DATA_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("STATLAB_DB_PATH", str(tmp_path / "statlab.db"))
     return tmp_path
+
+
+@pytest.fixture
+def ref() -> ArtifactRef:
+    """A syntactically valid, properly typed artifact ref for tests that need one.
+
+    Shared here rather than per test file: `ArtifactRef` is a `NewType`, so
+    `init_typed = true` (chunk 02 §6) makes mypy enforce it at every `ArtifactMeta`/
+    `NodeResult` construction site, and every chunk from 06 onward constructs artifacts.
+    """
+    return ArtifactRef("a_0123456789abcdef")

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, parse_artifact_ref
-
-VALID_REF = "a_0123456789abcdef"
-
+from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef, parse_artifact_ref
 
 # --- parse_artifact_ref -----------------------------------------------------------------
 
@@ -45,24 +42,24 @@ def test_parse_artifact_ref_invalid(value: str) -> None:
 # --- ArtifactMeta ------------------------------------------------------------------------
 
 
-def test_artifact_meta_minimal_valid() -> None:
+def test_artifact_meta_minimal_valid(ref: ArtifactRef) -> None:
     """A13."""
-    meta = ArtifactMeta(ref=VALID_REF, kind="dataframe")
+    meta = ArtifactMeta(ref=ref, kind="dataframe")
     assert meta.label is None
     assert meta.rows is None
     assert meta.cols is None
 
 
-def test_artifact_meta_all_fields() -> None:
+def test_artifact_meta_all_fields(ref: ArtifactRef) -> None:
     """A14."""
     meta = ArtifactMeta(
-        ref=VALID_REF,
+        ref=ref,
         kind="model",
         label="fitted random forest",
         rows=100,
         cols=5,
     )
-    assert meta.ref == VALID_REF
+    assert meta.ref == ref
     assert meta.kind == "model"
     assert meta.label == "fitted random forest"
     assert meta.rows == 100
@@ -83,59 +80,63 @@ _ALL_KINDS: tuple[ArtifactKind, ...] = (
 
 
 @pytest.mark.parametrize("kind", _ALL_KINDS)
-def test_artifact_meta_every_kind_constructs(kind: ArtifactKind) -> None:
+def test_artifact_meta_every_kind_constructs(ref: ArtifactRef, kind: ArtifactKind) -> None:
     """A15."""
-    meta = ArtifactMeta(ref=VALID_REF, kind=kind)
+    meta = ArtifactMeta(ref=ref, kind=kind)
     assert meta.kind == kind
 
 
-def test_artifact_meta_unknown_kind_rejected() -> None:
-    """A16."""
+def test_artifact_meta_unknown_kind_rejected(ref: ArtifactRef) -> None:
+    """A16: a deliberately invalid Literal — model_validate, not a typed kwarg, since
+    `init_typed = true` makes mypy correctly reject `kind="spreadsheet"` as a constructor
+    argument. `model_validate` takes untyped input by design, matching what actually happens
+    when this value arrives over the wire.
+    """
     with pytest.raises(ValidationError):
-        ArtifactMeta(ref=VALID_REF, kind="spreadsheet")
+        ArtifactMeta.model_validate({"ref": ref, "kind": "spreadsheet"})
 
 
-def test_artifact_meta_negative_rows_rejected() -> None:
+def test_artifact_meta_negative_rows_rejected(ref: ArtifactRef) -> None:
     """A17."""
     with pytest.raises(ValidationError):
-        ArtifactMeta(ref=VALID_REF, kind="dataframe", rows=-1)
+        ArtifactMeta(ref=ref, kind="dataframe", rows=-1)
 
 
-def test_artifact_meta_negative_cols_rejected() -> None:
+def test_artifact_meta_negative_cols_rejected(ref: ArtifactRef) -> None:
     """A18."""
     with pytest.raises(ValidationError):
-        ArtifactMeta(ref=VALID_REF, kind="dataframe", cols=-1)
+        ArtifactMeta(ref=ref, kind="dataframe", cols=-1)
 
 
-def test_artifact_meta_zero_rows_valid() -> None:
+def test_artifact_meta_zero_rows_valid(ref: ArtifactRef) -> None:
     """A19: an empty frame is a real, reportable outcome."""
-    meta = ArtifactMeta(ref=VALID_REF, kind="dataframe", rows=0)
+    meta = ArtifactMeta(ref=ref, kind="dataframe", rows=0)
     assert meta.rows == 0
 
 
-def test_artifact_meta_label_too_long_rejected() -> None:
+def test_artifact_meta_label_too_long_rejected(ref: ArtifactRef) -> None:
     """A20."""
     with pytest.raises(ValidationError):
-        ArtifactMeta(ref=VALID_REF, kind="dataframe", label="x" * 121)
+        ArtifactMeta(ref=ref, kind="dataframe", label="x" * 121)
 
 
-def test_artifact_meta_extra_field_rejected() -> None:
+def test_artifact_meta_extra_field_rejected(ref: ArtifactRef) -> None:
     """A21."""
     with pytest.raises(ValidationError):
-        ArtifactMeta(ref=VALID_REF, kind="dataframe", bogus=1)  # type: ignore[call-arg]  # deliberately invalid extra field under test
+        ArtifactMeta(ref=ref, kind="dataframe", bogus=1)  # type: ignore[call-arg]  # deliberately invalid extra kwarg under test
 
 
-def test_artifact_meta_mutation_rejected() -> None:
+def test_artifact_meta_mutation_rejected(ref: ArtifactRef) -> None:
     """A22."""
-    meta = ArtifactMeta(ref=VALID_REF, kind="dataframe")
+    meta = ArtifactMeta(ref=ref, kind="dataframe")
     with pytest.raises(ValidationError):
         meta.rows = 5  # type: ignore[misc]  # deliberately mutating a frozen model under test
 
 
-def test_artifact_meta_json_round_trip() -> None:
+def test_artifact_meta_json_round_trip(ref: ArtifactRef) -> None:
     """A23."""
     meta = ArtifactMeta(
-        ref=VALID_REF,
+        ref=ref,
         kind="table",
         label="coefficients",
         rows=12,

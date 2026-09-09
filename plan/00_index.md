@@ -97,6 +97,22 @@ Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1
 - macOS `grep` is BSD, so `grep -P` is unavailable. Use `grep -c $'^\t'` for tab assertions.
 - `plan/` is excluded from ruff scope — it is spec markdown with illustrative fences.
 
+**Test-fixture pattern for later chunks (from chunk 02's addendum).** Under `init_typed = true`,
+a fixture helper written as `def _spec(**overrides: object)` forces a `**dict` construction and
+therefore an `# type: ignore[arg-type]`. Write helpers with **typed keyword parameters and
+defaults** instead:
+
+```python
+def _spec(*, name: str = "intake", kind: NodeKind = "SHARED", ...) -> NodeSpec:
+    return NodeSpec(name=name, kind=kind, ...)
+```
+
+No suppression, and callers like `_spec(kind="PER_CANDIDATE")` get checked. Chunks 22, 27 and 28
+all need `NodeSpec` fixtures — use the typed form, not the `**overrides` form that survives in
+`tests/test_domains_base.py`. Two suppressions there are accepted and need no change: a
+deliberately invalid literal passed to a plain function (`retry_budget("nonsense")`, an inherent
+type violation for a runtime defensive test) and one `__file__` narrowing case.
+
 **Precedent set in chunk 01:** a pydantic `value_error` may be re-classified into a
 user-facing category when the two differ (a present-but-blank `STATLAB_MCP_TOKEN` is reported
 as *missing*, because that is what the user needs to hear). Reuse this pattern rather than

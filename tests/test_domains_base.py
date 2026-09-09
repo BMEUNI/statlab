@@ -96,7 +96,7 @@ _FAILURE = Failure(error_class="bug", message="boom")
 def _result(**overrides: object) -> NodeResult:
     defaults: dict[str, object] = {"status": "completed"}
     defaults.update(overrides)
-    return NodeResult(**defaults)
+    return NodeResult.model_validate(defaults)
 
 
 _MATRIX: list[

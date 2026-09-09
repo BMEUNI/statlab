@@ -7,7 +7,8 @@ import typing
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
+from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef
 from statlab_contracts.envelope import (
     RETRY_BUDGET,
     TOOL_RESULT_ADAPTER,
@@ -33,24 +34,23 @@ def test_tool_success_empty_defaults() -> None:
 
 def test_tool_success_nested_summary_preserved() -> None:
     """E2."""
-    summary = {"a": {"b": [1, 2.5, "x", None, True]}}
+    summary: dict[str, JsonValue] = {"a": {"b": [1, 2.5, "x", None, True]}}
     result = ToolSuccess(summary=summary)
     assert result.summary == summary
 
 
-def test_tool_success_artifacts_list_coerced_to_tuple() -> None:
-    """E3."""
-    from statlab_contracts.artifacts import ArtifactMeta
-
-    meta = ArtifactMeta(ref="a_0123456789abcdef", kind="dataframe")
-    result = ToolSuccess(artifacts=[meta])
+def test_tool_success_artifacts_list_coerced_to_tuple(ref: ArtifactRef) -> None:
+    """E3: asserts a wire behaviour — a JSON array is what actually arrives in production,
+    passing a Python list by kwarg never happens."""
+    meta = ArtifactMeta(ref=ref, kind="dataframe")
+    result = ToolSuccess.model_validate({"artifacts": [meta.model_dump()]})
     assert isinstance(result.artifacts, tuple)
     assert result.artifacts == (meta,)
 
 
 def test_tool_success_warnings_list_coerced_to_tuple() -> None:
-    """E4."""
-    result = ToolSuccess(warnings=["careful"])
+    """E4: same rationale as E3."""
+    result = ToolSuccess.model_validate({"warnings": ["careful"]})
     assert isinstance(result.warnings, tuple)
     assert result.warnings == ("careful",)
 
@@ -58,7 +58,7 @@ def test_tool_success_warnings_list_coerced_to_tuple() -> None:
 def test_tool_success_ok_false_rejected() -> None:
     """E5."""
     with pytest.raises(ValidationError):
-        ToolSuccess(ok=False)
+        ToolSuccess.model_validate({"ok": False})
 
 
 def test_tool_success_extra_field_rejected() -> None:
@@ -134,7 +134,7 @@ def test_failure_blank_message_rejected() -> None:
 def test_failure_unknown_error_class_rejected() -> None:
     """E10."""
     with pytest.raises(ValidationError):
-        Failure(error_class="oops", message="m")
+        Failure.model_validate({"error_class": "oops", "message": "m"})
 
 
 def test_failure_empty_field_errors_on_tool_param_rejected() -> None:
@@ -146,7 +146,9 @@ def test_failure_empty_field_errors_on_tool_param_rejected() -> None:
 def test_failure_field_errors_non_string_value_rejected() -> None:
     """E12."""
     with pytest.raises(ValidationError):
-        Failure(error_class="tool_param", message="m", field_errors={"k": 1})
+        Failure.model_validate(
+            {"error_class": "tool_param", "message": "m", "field_errors": {"k": 1}}
+        )
 
 
 # --- RETRY_BUDGET / retry_budget / is_retryable --------------------------------------------

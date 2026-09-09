@@ -66,6 +66,40 @@ implementation_notes: |
   Final numbers: 248 tests total (129 new + 119 from chunk 01, unmodified except T9's amended
   docstring), 100% line and branch coverage project-wide, mypy clean on 21 source files (up
   from 11), ruff clean.
+
+  ADDENDUM (§6), applied as a separate hardening pass before chunk 03: `[tool.pydantic-mypy]
+  init_typed = true` was added. The earlier note above ("the plugin does not statically enforce
+  a BaseModel's Literal-typed field...") was true only because init_typed defaults to false;
+  with it on, mypy DOES check constructor kwarg types against declared field types, including
+  Literal values and, critically, `ArtifactRef` (a `NewType` over `str`) — so
+  `ArtifactMeta(ref="a_0123456789abcdef")` (a bare string where a validated ref is required) is
+  now a caught `[arg-type]` error, closing the one gap in this chunk that actually mattered:
+  the NewType had been decorative until now, and artifact refs flow through every remaining
+  chunk. Fixed the resulting 26 test-file errors (zero in production code) three ways, now the
+  standing convention for every later chunk:
+  (1) negative tests asserting an invalid Literal/type now use `Model.model_validate({...})`
+      instead of typed kwargs — this is also more accurate, since a wire message arrives
+      untyped and `model_validate` is what actually receives it in production;
+  (2) list-to-tuple coercion tests (`artifacts=[...]`, `warnings=[...]`) also switched to
+      `model_validate` with a JSON-shaped dict, for the same reason — passing a Python list by
+      typed kwarg never happens on the wire, only a JSON array does;
+  (3) every test needing a valid `ArtifactRef` now takes it via a shared `ref` fixture in
+      `tests/conftest.py` (returns `ArtifactRef("a_0123456789abcdef")`) rather than a bare
+      string or a per-file `ArtifactRef(...)` wrap. Placed in the shared conftest rather than
+      per-test-file because chunk 06's artifact registry and every chunk downstream of it will
+      need the same fixture. One case (`test_domains_base.py`'s parametrised NodeResult
+      matrix) needed the helper function itself switched to `model_validate` rather than fixing
+      11 call sites individually — the smaller and correct diff when the un-typed data is
+      already a `dict[str, object]` being unpacked with `**`.
+  Zero `# type: ignore[arg-type]` were added in this pass; the three that already existed
+  before it (a plain function's Literal parameter, a `Path | None` narrowing branch, and one
+  plain-dataclass `**dict` unpack) remain genuinely necessary — confirmed via
+  `warn_unused_ignores = true` reporting no unused-ignore errors after the change. Hand-verified
+  both guards directly: `ArtifactMeta(kind="spreadsheet")` now reports
+  `error: Argument "kind" to "ArtifactMeta" has incompatible type "Literal['spreadsheet']"; ...
+  [arg-type]`, and `ArtifactMeta(ref="raw string")` reports `error: Argument "ref" to
+  "ArtifactMeta" has incompatible type "str"; expected "ArtifactRef"  [arg-type]`. Test count
+  and coverage unchanged (248 tests, 100%) since this was a type-checking-only hardening pass.
 ---
 
 # Chunk 02 — Core types: the wire envelope, error taxonomy, and node interfaces
