@@ -733,9 +733,14 @@ A tool returns exactly one of two shapes. Tools **do not raise** across the MCP 
 { "ok": false,
   "error_class": "tool_param",                      // transient | tool_param | data | bug
   "message": "valid_size + test_size must be < 0.9",
-  "field_errors": { "valid_size": "0.5 with test_size=0.5 leaves no training rows" },
-  "retryable": false }
+  "field_errors": { "valid_size": "0.5 with test_size=0.5 leaves no training rows" } }
 ```
+
+**There is no `retryable` field.** Retryability is a pure function of `error_class` (see
+`RETRY_BUDGET` below), so carrying it on the wire would be duplicated state that can disagree
+with its own source of truth. A tool also cannot know it: whether a retry is still permitted
+depends on how many attempts have already happened, which is the recovery handler's state, not
+the tool's. Chunk 31 derives it with `is_retryable(error_class)`.
 
 `error_class` is the **only** field the recovery handler (§5) dispatches on, and the taxonomy is
 shared with the LLM layer (D18) so one classifier serves both:
@@ -746,6 +751,11 @@ shared with the LLM layer (D18) so one classifier serves both:
 | `tool_param` | schema-valid but semantically wrong args | return `field_errors` to the agent, one repair attempt, max 2 |
 | `data` | the data cannot support the request (constant target, empty split) | escalate to the user **even in auto mode** — not repairable by retrying |
 | `bug` | unexpected exception | escalate with traceback; traceback goes to the server log, **never** into `message` or the event stream |
+
+If a `tool_param` failure genuinely cannot be fixed by changing arguments — no numeric column
+exists, so no scaler can be fitted — it is **not** `tool_param`, it is `data`. The taxonomy
+already separates "your arguments were wrong" from "the data cannot support this", so no case
+needs a per-failure retryability override.
 
 `field_errors` is mandatory for `tool_param` and absent otherwise. This is what makes §6.5's
 single repair retry mechanical rather than a guess.

@@ -340,7 +340,14 @@ def test_t8_bind_guard_mentions_flag(
 
 
 def test_t9_boundary_isolation() -> None:
-    """T9. No imported name in statlab_tools.settings resolves to a module under statlab."""
+    """T9 (amended by chunk 02). No imported name in statlab_tools.settings resolves to a
+    module under `statlab.` — D13: the MCP server must stay independently deployable.
+
+    `statlab_contracts` is now permitted where it previously would not have been anything to
+    permit: it is the shared wire contract (chunk 02 §1), has no dependencies of its own, and
+    both processes are meant to import it. Importing `statlab.*` (the backend package) is not,
+    and remains forbidden by this test.
+    """
     import statlab_tools.settings as mod
 
     for name, value in vars(mod).items():

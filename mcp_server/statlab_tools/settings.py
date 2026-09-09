@@ -37,7 +37,7 @@ class ToolSettingsError(Exception):
         return f"{self.message} (caused by {type(self.cause).__name__}: {self.cause})"
 
 
-class ToolSettings(BaseSettings):  # type: ignore[explicit-any]  # pydantic_settings.BaseSettings's own public signature uses Any; not our code to fix
+class ToolSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )

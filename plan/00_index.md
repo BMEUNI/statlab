@@ -54,7 +54,29 @@ Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1
 
 **Tooling notes carried forward:**
 - `[tool.mypy] plugins = ["pydantic.mypy"]` is required — without it mypy rejects
-  `Settings(_env_file=...)`.
+  `Settings(_env_file=...)`, and constructor kwargs on every model go unchecked.
+- **`disallow_any_explicit` is incompatible with the pydantic mypy plugin and must stay off.**
+  Verified empirically on mypy 2.3.1 + pydantic 2.13.5: *every* `BaseModel` subclass trips
+  `explicit-any`, including `class Trivial(BaseModel): a: int`. The plugin synthesizes
+  `__init__(**data: Any)` for each model, and the flag correctly flags the synthesized `Any`.
+  This is not about `JsonValue` or recursive unions — those were a red herring.
+
+  **Resolution (chunk 02, binding project-wide):** drop the flag; keep the plugin; enforce
+  "zero `Any`" with a source-level test asserting the token `Any` appears nowhere in our three
+  packages. This is *stronger* than the flag was, because it inspects our source text and
+  therefore cannot be defeated by a class-line `# type: ignore`. It also keeps the plugin's
+  real value — a constructor typo like `M(alhpa=1)` is still caught as `[call-arg]`.
+
+  Consequence: chunk 01's two class-line `# type: ignore[explicit-any]` on `Settings` and
+  `ToolSettings` **must be deleted**. With the flag gone they are unused, and
+  `warn_unused_ignores = true` turns an unused ignore into an error — so the cleanup is
+  self-enforcing rather than something to remember.
+
+  Rejected alternative: a class-line ignore on every model. Fifty-plus blanket suppressions,
+  each silencing any genuine explicit `Any` inside its class, is worse than no flag at all.
+- `pydantic.JsonValue` is the correct type for arbitrary JSON payloads (`summary` fields). It
+  validates JSON-serialisability, which `dict[str, object]` does not — `object` would move a
+  failure from parse time to serialise time.
 - `filterwarnings = ["error"]` is viable with **zero** ignores. Keep it that way; fix the cause,
   do not suppress.
 - macOS `grep` is BSD, so `grep -P` is unavailable. Use `grep -c $'^\t'` for tab assertions.
@@ -70,7 +92,7 @@ inventing a second convention.
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
 | 01 | [`01_foundation.md`](./01_foundation.md) — repo skeleton, pinned deps (Task 0), config, Makefile | completed | — |
-| 02 | [`02_core_types.md`](./02_core_types.md) — `ToolResult` envelope, `error_class` taxonomy + retry budget, `ArtifactRef`/`ArtifactKind`, `NodeSpec`, `NodeResult`, `GatePolicy`, structured error hierarchy. **Introduces `contracts/statlab_contracts/`** — a third dependency-free package for wire types, so the envelope cannot drift between the two processes | untouched | 01 |
+| 02 | [`02_core_types.md`](./02_core_types.md) — `ToolResult` envelope, `error_class` taxonomy + retry budget, `ArtifactRef`/`ArtifactKind`, `NodeSpec`, `NodeResult`, `GatePolicy`, structured error hierarchy. **Introduces `contracts/statlab_contracts/`** — a third dependency-free package for wire types, so the envelope cannot drift between the two processes | completed | 01 |
 | 03 | `03_data_contract.md` — `DataContract` Pydantic tree (§4.1), validation against a real frame, JSON round-trip | untouched | 02 |
 | 04 | `04_candidate_spec.md` — `CandidateSpec`, `PreprocessingSpec`, `FeatureSpec`, `EstimatorSpec`, canonical spec-hash, dedupe + baseline + family-cap rules (D28) | untouched | 02, 03 |
 | 05 | `05_persistence_sqlite.md` — schema DDL (§10.2), WAL + `busy_timeout`, migration runner, typed repository functions | untouched | 02 |

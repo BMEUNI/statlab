@@ -36,7 +36,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend/statlab", "mcp_server/statlab_tools"]
+packages = ["backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_contracts"]
 
 [tool.uv]
 package = true
@@ -50,7 +50,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["backend/statlab", "mcp_server/statlab_tools"]
+source = ["backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_contracts"]
 
 [tool.coverage.report]
 fail_under = 100
@@ -69,10 +69,9 @@ plugins = ["pydantic.mypy"]
 strict = true
 warn_unreachable = true
 warn_unused_ignores = true
-disallow_any_explicit = true
 disallow_any_generics = true
 no_implicit_reexport = true
-files = ["backend", "mcp_server", "tests"]
+files = ["backend", "mcp_server", "contracts", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["litellm.*", "statsmodels.*", "sklearn.*", "matplotlib.*", "joblib.*", "mcp.*"]

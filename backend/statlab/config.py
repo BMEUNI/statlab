@@ -13,7 +13,7 @@ from statlab.errors import ConfigError
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
-class Settings(BaseSettings):  # type: ignore[explicit-any]  # pydantic_settings.BaseSettings's own public signature uses Any; not our code to fix
+class Settings(BaseSettings):
     """Backend settings, read from environment then `.env`.
 
     `extra="ignore"` is deliberate: the process environment legitimately contains hundreds of

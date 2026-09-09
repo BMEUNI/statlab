@@ -1,8 +1,71 @@
 ---
-status: untouched
+status: completed
 dependencies: [01]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-09
+implementation_notes: |
+  `disallow_any_explicit` (§3.0): confirmed root cause is NOT JsonValue or recursive unions —
+  every BaseModel subclass trips it, including `class Trivial(BaseModel): a: int`, because the
+  pydantic mypy plugin synthesizes `__init__(**data: Any)` per model and the flag correctly
+  flags that synthesized Any. Removed the flag entirely; kept `plugins = ["pydantic.mypy"]`
+  (hand-verified it still reports `[call-arg]` on `ToolSuccess(summry={})`, naming the typo).
+  Replaced with tests/test_no_explicit_any.py: a source-text regex scan over
+  backend/statlab, mcp_server/statlab_tools, contracts/statlab_contracts for the bare token
+  `Any`, with two self-check tests (Y2 matches a known-Any line; Y4 asserts the walk found > 0
+  files) so the scan cannot silently pass by scanning nothing. Decision on the comment case
+  (Y3): a bare `Any` inside a `#` comment DOES count as a violation — the detector is a text
+  scan, not a parser, and carving out a comment exception would make the guarantee gameable
+  (move the real annotation into a trailing comment to escape it).
+
+  pydantic.JsonValue itself was then used for summary fields exactly as originally specified,
+  with zero suppressions, once the flag was gone — confirming it was never JsonValue's fault.
+
+  N9 (metrics with a non-float value): pinned by test. Pydantic's lax numeric coercion accepts
+  a numeric string ("0.9" -> 0.9, coerced to float) but rejects a genuinely non-numeric string
+  ("not-a-number" -> ValidationError). Both branches are asserted in
+  test_node_result_metrics_non_float_value_pinned.
+
+  X10 (no error module imports a heavy library): kept as a subprocess check
+  (sys.executable -c "...") rather than an in-process sys.modules diff, because the test
+  session already imports pandas/httpx/mcp via other test files' fixtures, which would
+  contaminate an in-process check. A subprocess gives a clean interpreter where only
+  statlab.errors (and its statlab_contracts dependency) has been imported before the assertion.
+
+  statlab_contracts/ deviation from PLAN.md §3.2's two-package layout: justified because
+  ToolResult crosses the backend/mcp_server process boundary that chunk 01's D13 (T9/T10)
+  established as import-forbidden in both directions. Two independent definitions of the same
+  wire envelope would drift silently (a parse succeeding on a shape neither producer nor
+  consumer actually agreed on) rather than loudly, unlike chunk 01's six-line loopback guard,
+  which is policy duplicated on purpose because its drift is visible and harmless. Both
+  backend/statlab and mcp_server/statlab_tools may import statlab_contracts; neither may
+  import the other; statlab_contracts imports nothing but pydantic and stdlib (enforced by
+  test_contracts_imports_only_pydantic_and_stdlib, mirroring the amended T9).
+
+  Mid-chunk correction: `Failure.retryable` (and its `_retryable_matches_class` validator) was
+  removed after implementation. It was duplicated state — fully determined by `error_class` via
+  RETRY_BUDGET, so the validator could only ever agree with its own source of truth or be a
+  bug — and it directly contradicted PLAN.md §6.1.1's own failure-envelope example, which is how
+  the redundancy surfaced. Retryability is now derived only via `retry_budget(error_class)` and
+  `is_retryable(error_class)` in statlab_contracts.envelope; a tool cannot state it because a
+  tool cannot know it (whether a retry is still permitted depends on how many attempts already
+  happened, which is the recovery handler's state in chunk 31, not the tool's). `Failure` now
+  rejects an unexplained `retryable=` kwarg via `extra="forbid"` rather than silently accepting
+  and ignoring it — hand-verified: `Failure(error_class="data", message="m", retryable=True)`
+  raises `ValidationError` with `extra_forbidden`, naming the field. PLAN.md §6.1.1 was updated
+  to match (no `retryable` in the example JSON, with an explanatory note).
+
+  mypy + pydantic-plugin quirk worth flagging to chunk 03: the plugin does not statically
+  enforce a BaseModel's `Literal`-typed field against its declared value set, nor coerce/reject
+  type mismatches on constructor kwargs the way a plain dataclass or function would — e.g.
+  `ArtifactMeta(kind="spreadsheet")` and `Failure(error_class="oops", ...)` both type-check
+  clean under mypy --strict and only fail at runtime via ValidationError. Every
+  ValidationError-triggering test in this chunk therefore needed no `# type: ignore` at all;
+  ignores were only needed for the plain-dataclass NodeSpec cases and for genuinely-mutating
+  frozen-model/dataclass tests. Do not add speculative type-ignores to a
+  ValidationError-expecting pydantic constructor call without checking mypy first.
+
+  Final numbers: 248 tests total (129 new + 119 from chunk 01, unmodified except T9's amended
+  docstring), 100% line and branch coverage project-wide, mypy clean on 21 source files (up
+  from 11), ruff clean.
 ---
 
 # Chunk 02 — Core types: the wire envelope, error taxonomy, and node interfaces
@@ -59,7 +122,8 @@ See `plan/00_index.md` → "Verified environment". The ones that bind this chunk
   do not substitute: `pydantic.JsonValue`, discriminated unions on a `Literal[True]`/
   `Literal[False]` field, `ConfigDict(frozen=True, extra="forbid")`, `NewType` over `str` inside
   a validated model, and `TypeAdapter` for a union alias.
-- `mypy==2.3.1` with `strict = true`, `disallow_any_explicit = true`, `plugins = ["pydantic.mypy"]`.
+- `mypy==2.3.1` with `strict = true` and `plugins = ["pydantic.mypy"]`. **`disallow_any_explicit`
+  is removed by this chunk** — see §3.0. Do not re-add it.
 - `filterwarnings = ["error"]` — keep it green with zero new ignores.
 
 ### Design constraint that shapes this chunk
@@ -102,12 +166,15 @@ function, an IO call, or a pandas import in it, that is the signal the type belo
 | create | `backend/statlab/domains/__init__.py` |
 | create | `backend/statlab/domains/base.py` |
 | **modify** | `backend/statlab/errors.py` — append only, change nothing existing |
-| **modify** | `pyproject.toml` — register the new package in three places |
+| **modify** | `pyproject.toml` — register the new package in three places **and remove `disallow_any_explicit`** (§3.0) |
+| **modify** | `backend/statlab/config.py` — delete the class-line `# type: ignore[explicit-any]` (§3.0) |
+| **modify** | `mcp_server/statlab_tools/settings.py` — delete the class-line `# type: ignore[explicit-any]` (§3.0) |
 | **modify** | `tests/test_tool_settings.py` — amend the T9 boundary assertion |
 | create | `tests/test_contracts_artifacts.py` |
 | create | `tests/test_contracts_envelope.py` |
 | create | `tests/test_domains_base.py` |
 | create | `tests/test_errors_extended.py` |
+| create | `tests/test_no_explicit_any.py` |
 
 Do **not** create in this chunk: `graph/`, `llm/`, `db.py`, `storage.py`, any `Domain` instance,
 any concrete `NodeSpec` list, or `tools/`. Chunk 22 owns the engine, chunk 27 owns the
@@ -121,6 +188,8 @@ packages = ["backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_co
 
 [tool.mypy]
 files = ["backend", "mcp_server", "contracts", "tests"]
+# and DELETE this line entirely:
+#   disallow_any_explicit = true
 
 [tool.coverage.run]
 source = ["backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_contracts"]
@@ -138,6 +207,36 @@ hack.
 ---
 
 ## 3. Implementation Spec
+
+### 3.0 Resolve the `disallow_any_explicit` conflict FIRST
+
+Chunk 01 set `disallow_any_explicit = true`. That flag is **incompatible with the pydantic mypy
+plugin** and must be removed before you write any model. Verified empirically on this exact
+toolchain: every `BaseModel` subclass trips `explicit-any`, including
+`class Trivial(BaseModel): a: int`, because the plugin synthesizes `__init__(**data: Any)` per
+model and the flag correctly flags that synthesized `Any`. It is not about `JsonValue` or
+recursive unions.
+
+Do these four things, in order:
+
+1. **Delete `disallow_any_explicit = true`** from `[tool.mypy]` in `pyproject.toml`. Keep every
+   other strict setting, and keep `plugins = ["pydantic.mypy"]` — it is what catches a
+   constructor typo like `ToolSuccess(summry={})` as `[call-arg]`, which matters more here than
+   the flag did.
+2. **Delete the two now-unused class-line ignores** left by chunk 01:
+   - `backend/statlab/config.py:16` — `class Settings(BaseSettings):  # type: ignore[explicit-any] ...`
+   - `mcp_server/statlab_tools/settings.py:40` — same pattern on `ToolSettings`
+
+   With the flag gone these are unused, and `warn_unused_ignores = true` makes an unused ignore
+   an **error** — so mypy will fail until you remove them. Self-enforcing; do not work around it.
+3. **Add `tests/test_no_explicit_any.py`** (spec in §4.5) to recover the guarantee at source
+   level. This is stronger than the flag was: it inspects our source text, so it cannot be
+   defeated by a class-line ignore.
+4. Confirm `make typecheck` is clean before continuing.
+
+Then use `pydantic.JsonValue` for `summary` fields as originally specified. Do **not** substitute
+`dict[str, object]`: `object` accepts non-JSON-serialisable values, moving a failure from parse
+time to serialise time, which is exactly wrong for a wire type.
 
 ### 3.1 `contracts/statlab_contracts/artifacts.py`
 
@@ -252,6 +351,22 @@ data        — the data cannot support the request. NOT repairable by retrying;
 bug         — an unexpected exception. Escalate with a traceback (server log only).
 """
 
+def retry_budget(error_class: ErrorClass) -> int:
+    """Attempts permitted for this class. The single source of truth for retryability."""
+    return RETRY_BUDGET[error_class]
+
+
+def is_retryable(error_class: ErrorClass) -> bool:
+    """Whether retrying could possibly help. Derived, never carried on the wire.
+
+    `Failure` deliberately has no `retryable` field: it would be fully determined by
+    `error_class`, so it could only ever agree or be a bug. A tool also cannot know the answer,
+    because "may I retry" depends on how many attempts already happened — the recovery
+    handler's state (chunk 31), not the tool's.
+    """
+    return retry_budget(error_class) > 0
+
+
 RETRY_BUDGET: Final[dict[ErrorClass, int]] = {
     "transient": 3,
     "tool_param": 2,
@@ -274,7 +389,6 @@ class Failure(BaseModel):
     error_class: ErrorClass
     message: str = Field(min_length=1)
     field_errors: dict[str, str] | None = None
-    retryable: bool = False
 
     @model_validator(mode="after")
     def _field_errors_iff_tool_param(self) -> Failure:
@@ -282,14 +396,6 @@ class Failure(BaseModel):
 
         This is what makes chunk 21's single repair retry mechanical: the agent is handed
         per-field reasons, not a prose blob to re-interpret.
-        """
-
-    @model_validator(mode="after")
-    def _retryable_matches_class(self) -> Failure:
-        """`retryable` must agree with RETRY_BUDGET — true iff the budget is above zero.
-
-        Prevents a tool from marking a `data` error retryable and sending the handler into a
-        loop that cannot succeed.
         """
 
 
@@ -328,20 +434,16 @@ Exact validator semantics:
 | `data` / `bug` | `None` | ✅ |
 | `data` / `bug` | anything | ❌ |
 
-| `error_class` | `retryable` | Valid? |
-|---|---|---|
-| `transient` | `True` | ✅ |
-| `transient` | `False` | ❌ |
-| `tool_param` | `True` | ✅ |
-| `tool_param` | `False` | ❌ |
-| `data` | `False` | ✅ |
-| `data` | `True` | ❌ |
-| `bug` | `False` | ✅ |
-| `bug` | `True` | ❌ |
+**`Failure` has no `retryable` field, deliberately.** An earlier draft of this spec carried one
+plus a validator asserting it agreed with `RETRY_BUDGET`. That validator was a checksum over
+duplicated state: a field fully determined by `error_class` can only ever agree or be a bug, so
+it adds validation burden and zero information. It also contradicted `PLAN.md` §6.1.1's own
+example, which is how the redundancy was found.
 
-Note `retryable` defaults to `False`, so a `transient` failure must set it explicitly. That is
-intentional: the default is the safe direction, and the validator forces the author to be
-deliberate.
+Retryability is derived at the one place that needs it via `is_retryable(error_class)`. A
+`Failure` therefore cannot misreport it, because it cannot state it. If a `tool_param` failure
+truly cannot be fixed by changing arguments, it is a `data` failure — the taxonomy already draws
+that line, so no per-failure override is needed.
 
 Use `tuple[...]` rather than `list[...]` for `artifacts` and `warnings`. Rationale: `frozen=True`
 freezes attribute assignment but not list contents, so a `list` field on a frozen model is
@@ -550,7 +652,7 @@ It must assert that no name in either contracts module resolves to a module star
 
 ## 4. Test Suite Spec
 
-Target: **~85 new tests**. Existing 119 must still pass untouched (except T9's amended body).
+Target: **~86 new tests**. Existing 119 must still pass untouched (except T9's amended body).
 
 ### 4.1 `tests/test_contracts_artifacts.py` (~20)
 
@@ -608,7 +710,12 @@ A12 exists because `re.match(r"...$")` accepts a trailing newline; use `\Z` or
 **`Failure` — `field_errors` rule**, parametrised across the §3.2 matrix (8 rows), each asserting
 valid construction or `ValidationError`, and for failures that the message names `field_errors`.
 
-**`Failure` — `retryable` rule**, parametrised across the §3.2 matrix (8 rows), same shape.
+**No `retryable` field**
+
+| # | Case | Expect |
+|---|---|---|
+| E8a | `Failure(..., retryable=True)` | `ValidationError` — `extra="forbid"` rejects the removed field, so a stale producer fails loudly rather than being silently ignored |
+| E8b | `retryable` absent from serialised JSON | assert the key is not in `model_dump()` nor in `dump_json()` |
 
 | # | Case | Expect |
 |---|---|---|
@@ -623,7 +730,10 @@ valid construction or `ValidationError`, and for failures that the message names
 |---|---|---|
 | E13 | exhaustive over `ErrorClass` | every literal in `ErrorClass` is a key; no extra keys. Derive the literal set via `typing.get_args`, do not hardcode it — the point is that adding a class without a budget fails |
 | E14 | values | `transient == 3`, `tool_param == 2`, `data == 0`, `bug == 0` |
-| E15 | budget agrees with `retryable` | for each class, `RETRY_BUDGET[c] > 0` iff a `Failure` with `retryable=True` validates |
+| E15 | `retry_budget` delegates | `retry_budget(c) == RETRY_BUDGET[c]` for every class |
+| E15a | `is_retryable` | `True` for `transient`/`tool_param`, `False` for `data`/`bug` |
+| E15b | `is_retryable` agrees with the budget | `is_retryable(c) == (retry_budget(c) > 0)` for every class, derived via `get_args` |
+| E15c | unknown class | `retry_budget("nonsense")` raises `KeyError` — assert it is not silently defaulted to 0, which would make an unmapped class look non-retryable instead of failing
 
 **`TOOL_RESULT_ADAPTER` discrimination**
 
@@ -696,12 +806,31 @@ X10 needs a subprocess (`sys.executable -c`) because the test session already im
 Keep it, or drop it and instead assert on the module's source text with a comment explaining why.
 Either is acceptable; do not silently omit it.
 
+### 4.5 `tests/test_no_explicit_any.py` (~4)
+
+Replaces `disallow_any_explicit` (§3.0) with a stricter, source-level guarantee.
+
+```python
+_ANY_TOKEN = re.compile(r"(?<![\w.])Any(?![\w])")
+_PACKAGES = ("backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_contracts")
+```
+
+| # | Test | Assertion |
+|---|---|---|
+| Y1 | no `Any` in any package source | walk every `*.py` under `_PACKAGES`; assert no line matches `_ANY_TOKEN`. Failure message must name file and line so it is actionable |
+| Y2 | the detector actually works | run `_ANY_TOKEN` against `"def f(x: Any) -> Any: ..."` and assert it matches — a guard test that never silently passes because the regex broke |
+| Y3 | the detector does not false-positive | assert it does **not** match `"Anything"`, `"anyway"`, `"typing.Anyx"`, or a comment containing `"# Any"`… decide and pin the comment case explicitly |
+| Y4 | the walk found files | assert the number of scanned files is > 0, so a wrong path cannot make Y1 vacuously pass |
+
+Y2 and Y4 exist because Y1 alone is a test that passes when it is broken. A source-scanning
+assertion with no self-check is worse than none: it reports success whether or not it looked.
+
 ---
 
 ## 5. Definition of Done
 
 **Tests**
-- [ ] `make test` exits 0. Total ≥ **204** tests (119 existing + ~85 new).
+- [ ] `make test` exits 0. Total ≥ **205** tests (119 existing + ~86 new).
 - [ ] Coverage **100 %** line and branch on `contracts/statlab_contracts/artifacts.py`,
       `contracts/statlab_contracts/envelope.py`, `backend/statlab/domains/base.py`, and the
       appended half of `backend/statlab/errors.py`. Whole-project coverage stays at 100 %.
@@ -709,14 +838,19 @@ Either is acceptable; do not silently omit it.
 - [ ] Chunk 01's tests pass unmodified except T9, whose amended body is justified in a docstring.
 
 **Static analysis**
-- [ ] `make typecheck` exits 0. `mypy --strict` with `disallow_any_explicit` — so `JsonValue`
-      must satisfy it. If it does not, define a recursive JSON alias locally and record why.
+- [ ] `disallow_any_explicit` is **gone** from `pyproject.toml`; the two chunk-01 class-line
+      ignores are **deleted**; `make typecheck` exits 0 with no unused-ignore errors.
+- [ ] `tests/test_no_explicit_any.py` passes, including its self-check tests Y2 and Y4.
+- [ ] The pydantic plugin still catches a bad constructor kwarg — verify once by hand with a
+      throwaway `ToolSuccess(summry={})` and confirm mypy reports `[call-arg]`.
 - [ ] `make lint` exits 0.
 - [ ] `mypy` sees the new `contracts` package (it appears in the "source files" count, which must
       rise from 11).
 
 **Type behaviour verified by test, not by inspection**
-- [ ] Both `Failure` validators reject every invalid combination in §3.2's two matrices.
+- [ ] The `field_errors` validator rejects every invalid combination in §3.2's matrix.
+- [ ] `Failure` has no `retryable` field, and passing one raises `ValidationError`.
+- [ ] `is_retryable` and `retry_budget` agree with `RETRY_BUDGET` for every `ErrorClass`.
 - [ ] All three `NodeResult` validators reject every invalid row in §3.3's matrix.
 - [ ] `RETRY_BUDGET` is exhaustive over `ErrorClass`, checked via `typing.get_args`.
 - [ ] `TOOL_RESULT_ADAPTER` round-trips both branches losslessly, asserted on serialised JSON.
@@ -743,8 +877,8 @@ what this chunk defines.
 
 ### Stop and ask if
 
-- `JsonValue` fails `disallow_any_explicit` **and** a hand-rolled recursive alias also fails —
-  that would force a typing decision affecting every summary field in the project.
-- The `retryable`-agrees-with-`RETRY_BUDGET` validator turns out to conflict with a real case
-  from `PLAN.md` §6.1.1 — better to re-read the decision than to weaken the invariant.
+- Anything in §3.0 does not play out as described — that resolution is already verified on this
+  toolchain, so a deviation means something else changed.
+- A real case appears that needs per-failure retryability independent of `error_class` — that
+  would mean the taxonomy itself is wrong, which is a `PLAN.md` decision, not a chunk detail.
 - Making `contracts` importable requires anything beyond the three `pyproject.toml` edits.
