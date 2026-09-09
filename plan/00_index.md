@@ -74,6 +74,21 @@ Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1
 
   Rejected alternative: a class-line ignore on every model. Fifty-plus blanket suppressions,
   each silencing any genuine explicit `Any` inside its class, is worse than no flag at all.
+- **`[tool.pydantic-mypy] init_typed = true` is required project-wide** (chunk 02 addendum).
+  Without it the plugin synthesizes `__init__(**data: Any)`, so **constructor argument types are
+  never checked**: `ArtifactMeta(kind="spreadsheet")` and `Failure(error_class="oops")` both
+  type-check clean, and — worse — a `NewType` like `ArtifactRef` is completely unenforced, making
+  it decorative. Verified: with `init_typed = true` all three become `[arg-type]` errors, while
+  `Model.model_validate({...})` stays unchecked because a dict is not statically inspected.
+
+  **Convention that follows:** construct with **kwargs** in production and positive tests, so
+  types are checked; use **`model_validate({...})`** in negative tests that deliberately pass
+  invalid values. The second is the more honest test anyway — real input arrives as a dict parsed
+  from JSON, which is exactly the path `model_validate` exercises.
+
+  `disallow_any_explicit` stays off regardless. With `init_typed` it would pass, but its only
+  unique contribution over the source-text scan is flagging third-party `Any` leakage we cannot
+  fix and would suppress. The scan is stronger for our own code.
 - `pydantic.JsonValue` is the correct type for arbitrary JSON payloads (`summary` fields). It
   validates JSON-serialisability, which `dict[str, object]` does not — `object` would move a
   failure from parse time to serialise time.

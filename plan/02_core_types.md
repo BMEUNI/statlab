@@ -869,6 +869,65 @@ assertion with no self-check is worse than none: it reports success whether or n
       the `statlab_contracts` deviation from `PLAN.md` §3.2 with its justification.
 - [ ] `plan/00_index.md` chunk 02 row → `completed`.
 
+---
+
+## 6. Addendum — adopt `init_typed` before chunk 03
+
+Discovered after chunk 02 was implemented and committed. Do this as a **separately gated step**
+before starting chunk 03; it is a hardening pass over existing code, not new functionality.
+
+### Why
+
+The pydantic mypy plugin defaults to synthesizing `__init__(**data: Any)`, so **no constructor
+argument type is statically checked**. Three consequences, all verified on this toolchain:
+
+1. `ArtifactMeta(kind="spreadsheet")` type-checks clean.
+2. `Failure(error_class="oops", ...)` type-checks clean.
+3. `ArtifactMeta(ref="a_0123456789abcdef")` type-checks clean even though `ref` is declared
+   `ArtifactRef`, a `NewType` over `str`. **The `NewType` is therefore decorative** — the one
+   thing it exists to prevent, passing a bare string where a validated ref is required, is
+   exactly what it fails to catch.
+
+Point 3 is the reason this cannot wait. Artifact IDs flow through every tool, node and API
+response in the remaining 38 chunks. Enforcing the `NewType` costs 26 test-site edits now and
+grows more expensive with every chunk that adds an unchecked construction.
+
+### Changes
+
+1. Add to `pyproject.toml`:
+   ```toml
+   [tool.pydantic-mypy]
+   init_typed = true
+   ```
+   Do **not** re-add `disallow_any_explicit`; `tests/test_no_explicit_any.py` already covers our
+   code more strongly.
+
+2. Fix the 26 resulting errors — all in test files, **zero in production code**:
+   - **Negative tests** (deliberately invalid values: `kind="spreadsheet"`, `error_class="oops"`,
+     `ok=False` on `ToolSuccess`, a non-string `field_errors` value) → switch to
+     `Model.model_validate({...})`. No `type: ignore`.
+   - **`ref` arguments** → wrap properly: `ArtifactRef("a_0123456789abcdef")`, or add a
+     `conftest.py` fixture returning a correctly typed ref and use it everywhere.
+   - **List-to-tuple coercion tests** (`artifacts=[...]`, `warnings=[...]`) → these assert a
+     *wire* behaviour, so use `model_validate` with a JSON-shaped dict. That is what actually
+     happens in production; passing a Python list by kwarg never does.
+   - Remove any now-unneeded `# type: ignore`; `warn_unused_ignores = true` will flag stragglers.
+
+3. Do not weaken a signature to make a test compile. If a test cannot be expressed without
+   `type: ignore`, it is a `model_validate` case.
+
+### Definition of Done for the addendum
+
+- [ ] `init_typed = true` present; `make typecheck` exits 0 on all 21 files.
+- [ ] Zero `# type: ignore` added for `[arg-type]`. Any surviving ignore has an inline
+      justification and is not an `arg-type` suppression.
+- [ ] `make test` still green at the same count, coverage still 100 %.
+- [ ] Hand-verify the guard now works: temporarily write `ArtifactMeta(kind="spreadsheet")` with
+      kwargs, confirm mypy reports `[arg-type]`, then delete it.
+- [ ] `ArtifactRef` is enforced: `ArtifactMeta(ref="raw string")` is a mypy error.
+
+---
+
 ### Explicitly out of scope
 
 No `Domain` aggregate, no concrete spine, no `RunState`, no `graph/`, no `llm/`, no artifact
