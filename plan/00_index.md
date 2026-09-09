@@ -124,7 +124,7 @@ inventing a second convention.
 |---|---|---|---|
 | 01 | [`01_foundation.md`](./01_foundation.md) — repo skeleton, pinned deps (Task 0), config, Makefile | completed | — |
 | 02 | [`02_core_types.md`](./02_core_types.md) — `ToolResult` envelope, `error_class` taxonomy + retry budget, `ArtifactRef`/`ArtifactKind`, `NodeSpec`, `NodeResult`, `GatePolicy`, structured error hierarchy. **Introduces `contracts/statlab_contracts/`** — a third dependency-free package for wire types, so the envelope cannot drift between the two processes | completed | 01 |
-| 03 | `03_data_contract.md` — `DataContract` Pydantic tree (§4.1), validation against a real frame, JSON round-trip | untouched | 02 |
+| 03 | [`03_data_contract.md`](./03_data_contract.md) — `DataContract` Pydantic tree (§4.1): 10 models, 9 closed vocabularies, 28 consistency rules, JSON round-trip. Lives in `contracts/` (it crosses the process boundary), **not** `backend/` as §3.2 says. Validation against a real *frame* is chunk 08's `validate_contract` tool — this chunk validates the contract against itself | untouched | 02 |
 | 04 | `04_candidate_spec.md` — `CandidateSpec`, `PreprocessingSpec`, `FeatureSpec`, `EstimatorSpec`, canonical spec-hash, dedupe + baseline + family-cap rules (D28) | untouched | 02, 03 |
 | 05 | `05_persistence_sqlite.md` — schema DDL (§10.2), WAL + `busy_timeout`, migration runner, typed repository functions | untouched | 02 |
 | 06 | `06_artifact_store.md` — run-folder layout (§10.1), parquet/joblib/png/json IO, artifact registry, `locked` flag, hard-link fork copy, prune-on-success | untouched | 02, 05 |
