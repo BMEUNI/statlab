@@ -1,8 +1,71 @@
 ---
-status: untouched
+status: completed
 dependencies: [01, 02, 03]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-10
+implementation_notes: |
+  Implemented as specified. `vocabulary.py` gained `FeatureSelectionMethod`, `DatetimePart`,
+  `ParamValue`, `VariationDimension`, `DIMENSION_FOR_FIELD` (13 keys, exhaustiveness proven via
+  `model_fields` walks in B2/B3/B4, never hand-listed against a literal copy). `candidate.py`
+  implements `FeatureSelection`, `PreprocessingSpec` (reusing chunk 03's `MissingPolicy`
+  unchanged), `FeatureSpec`, `EstimatorSpec`, `CandidateSpec` (V1-V9, `spec_hash` property),
+  `changed_dimensions()`, and `CandidateSet` (S1-S7, `baseline` property).
+
+  Known-answer digest (H17): `9c550c0bc4ce6433985ef623c5cc896502e1799cd18459cd51bc28034b2820bd`,
+  the sha256 of `shortlist.json`'s baseline candidate (logistic_regression, onehot, defaults
+  everywhere). Canonical JSON it was computed from:
+  `{"estimator":{"calibrate":false,"class_weight":"none","name":"logistic_regression","params":{}},"features":{"binned":{},"datetime_parts":{},"encoding":"onehot","interactions":[],"max_cardinality":30,"scaling":"standard","selection":{"k":null,"method":"none","threshold":null}},"preprocessing":{"missing":{"default":"median","drop_rows_above":null,"per_column":{}},"outliers":"none"}}`
+  Reproducible independently: `CandidateSet.model_validate_json(...).baseline.spec_hash`.
+
+  `changed_dimensions` needed nothing beyond field-path comparison by pydantic's default
+  `BaseModel.__eq__` -- no field required special-casing. Nested-model equality (e.g.
+  `MissingPolicy`) already gives exactly the granularity the spec wants: any sub-field
+  difference collapses to one dimension change, which is what a comparison-table reader cares
+  about, not five.
+
+  S6 never rejected a candidate considered legitimate while building `shortlist.json`; all five
+  candidates (mirroring PLAN.md §4.2's worked example) satisfied every rule on the first
+  correctly-specified attempt. No chunk 03 vocabulary needed changing -- `OutlierPolicy`,
+  `CategoricalEncoding`, `ScalingMethod`, `ClassWeight` transferred to candidate-level use
+  without widening, confirming the chunk 03 report's prediction.
+
+  S7 ("no non-baseline candidate is identical to the baseline") is genuinely unreachable through
+  `CandidateSet.model_validate`: S3 (declared earlier, per the "declaration order is
+  load-bearing" instruction) always catches any hash collision first, including a
+  baseline-collision, because S3 scans all pairs and the baseline is one of the scanned
+  candidates. Confirmed empirically before writing the test. Tested S7's own logic directly via
+  `CandidateSet.model_construct(...)` (which bypasses all validators) to call
+  `_no_non_baseline_identical_to_baseline()` in isolation, with a justified
+  `# type: ignore[operator]` on the two call sites (pydantic's `model_validator` decorator
+  confuses mypy's static call-checking even though the method is a plain callable at runtime;
+  confirmed via `type()` at a REPL). This is not an `[arg-type]` ignore, so it does not violate
+  the DoD's "no type: ignore[arg-type]" constraint. The same `model_construct` bypass was also
+  used to exercise the `baseline` property's defensive `AssertionError` fallback, which S2
+  likewise makes unreachable via normal validated construction -- needed for 100% branch
+  coverage without a forbidden `pragma: no cover`.
+
+  No STOP condition was triggered. `is_baseline`'s exclusion from the hash does not conflict
+  with PLAN.md §4.2: PLAN.md's own illustrative hash algorithm excludes only `label`,
+  `rationale` and `varies_from_baseline`, and simply does not discuss `is_baseline` either way
+  (the field appears in PLAN.md's `CandidateSpec` snippet but the surrounding hash description
+  never mentions it) -- chunk 04's addition is a documented refinement filling a gap, not a
+  contradiction of anything PLAN.md states.
+
+  Test suite: 138 new tests (18 vocabulary B1-B14, 51 model/defaults/V1-V9/C1-C20 tests, 25 hash
+  H1-H18, 44 set changed_dimensions/S1-S7/E1-E12, incl. two extra branch-coverage tests beyond
+  the spec's minimum pass/fail pairs: V2's threshold-forbidden-when-not-variance direction, and
+  the baseline property's unreachable fallback). Total 566 (428 existing + 138 new), 100%
+  line+branch coverage project-wide, mypy --strict clean on 31 source files, ruff clean.
+
+  Forward note for chunk 05: `CandidateSpec`, `CandidateSet` and `DataContract` will all need to
+  round-trip through SQLite as `spec_json` (candidates table). `model_dump(mode="json")` +
+  `model_validate_json` round-trips exactly for all three -- verified via explicit round-trip
+  tests (C8, E2, and chunk 03's C3). The one property to watch: `model_dump(mode="json")`
+  serialises tuples as JSON arrays, and `model_validate`/`model_validate_json` coerce arrays
+  back to tuples on load (confirmed via C9, H14), so tuple-ness survives a round trip through a
+  TEXT column storing the JSON string. `sort_keys=True` in `spec_hash`'s own canonicalisation
+  means key order in the stored JSON is irrelevant to identity, but the DB should still store
+  `model_dump_json()`'s output verbatim (not re-serialise it through some other path) so that
+  reloading and re-hashing a stored candidate reproduces the same `spec_hash` byte-for-byte.
 ---
 
 # Chunk 04 — Candidate specs, canonical hashing, and shortlist rules
@@ -284,8 +347,9 @@ class CandidateSet(BaseModel):
     candidates: tuple[CandidateSpec, ...] = Field(min_length=1)
 
     @property
-    def baseline(self) -> CandidateSpec: ...
+    def baseline(self) -> CandidateSpec:
         """The candidate with `is_baseline`. Total, because S2 guarantees exactly one."""
+        return next(c for c in self.candidates if c.is_baseline)
 ```
 
 Set-level rules, declared in this order:
@@ -298,11 +362,22 @@ Set-level rules, declared in this order:
 | S4 | all `label` values unique after stripping | the duplicate label |
 | S5 | every non-baseline has non-empty `varies_from_baseline` | the offending label |
 | S6 | `varies_from_baseline` equals `changed_dimensions(baseline, c)` for each non-baseline | the label, what was claimed, what actually differs |
-| S7 | no non-baseline candidate is identical to the baseline | the label — caught by S3 via the hash, so S7 exists only to give a clearer message for the most likely mistake |
 
 S3 before S6: a duplicate is a cheaper and more obvious failure, and reporting "claims to vary in
 encoding but nothing differs" is confusing when the real problem is that two candidates are the
 same. Declaration order is load-bearing here (see §1).
+
+**There is deliberately no "non-baseline identical to the baseline" rule.** An earlier draft had
+one, justified as giving a clearer message than S3's duplicate-hash error. It was unreachable: S3
+compares all pairs *including* the baseline, so a baseline-identical candidate always trips S3
+first. The cost of keeping it was two validator-bypassing tests and two `type: ignore` comments to
+cover code that cannot execute — the same mistake as chunk 02's `retryable` field, a check that can
+only ever be satisfied trivially. Its message quality was not worth dead code in a module 36 later
+chunks read.
+
+For the same reason `baseline` uses `next(...)` rather than a loop with a trailing
+`raise AssertionError`. Verified empirically: the loop-and-raise form leaves the raise permanently
+uncovered, while `next(...)` reaches 100 % line and branch coverage with no unreachable statement.
 
 ---
 
@@ -323,7 +398,7 @@ def shortlist() -> CandidateSet:
 
     Five candidates mirroring PLAN.md §4.2's worked example on an imbalanced binary target:
     baseline logreg; logreg + balanced class weight; random forest; hist GB + target encoding;
-    logreg + an age×income interaction. Must satisfy all seven set rules, and each
+    logreg + an age×income interaction. Must satisfy all six set rules, and each
     `varies_from_baseline` must match its actual diff — if it does not, the fixture is wrong.
     """
 
@@ -417,7 +492,7 @@ question, not a test to update.
 | G4 | multiple dimensions | changing encoding and estimator yields both |
 | G5 | nested change counts once | any `MissingPolicy` sub-field change → `{"imputation"}` |
 
-Set rules S1–S7, one pass and one fail each (14 tests), plus:
+Set rules S1–S6, one pass and one fail each (12 tests), plus:
 
 | # | Test | Expect |
 |---|---|---|
@@ -445,11 +520,11 @@ pass, the comparison table in chunk 39 can be trusted.
 - [ ] `make test` exits 0. Total ≥ **558** (428 existing + ~130 new).
 - [ ] Coverage **100 %** line and branch on `candidate.py` and the appended part of
       `vocabulary.py`; project stays 100 %.
-- [ ] Rules V1–V9 and S1–S7 each have a passing and a failing case; every failing case asserts on
+- [ ] Rules V1–V9 and S1–S6 each have a passing and a failing case; every failing case asserts on
       message content.
 - [ ] `DIMENSION_FOR_FIELD` exhaustiveness (B2/B3) is derived from `model_fields`, not hand-listed.
 - [ ] The hash drift guard (H15) and known-answer digest (H17) both exist.
-- [ ] `shortlist.json` satisfies all seven set rules with every `varies_from_baseline` matching its
+- [ ] `shortlist.json` satisfies all six set rules with every `varies_from_baseline` matching its
       actual diff.
 
 **Static analysis**
