@@ -1,8 +1,72 @@
 ---
-status: untouched
+status: in_progress
 dependencies: [01, 02]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-10
+implementation_notes: |
+  Implemented as specified, after the NodeStatus-vs-NodeExecutionStatus resolution (Option A
+  with the derive-don't-declare refinement, commit a2fdc31) was applied before any code was
+  written. All 15 §10.2 tables shipped in one migration; repositories exist for the four spine
+  entities only (projects, datasets, contracts, runs), per the deliberately asymmetric scope.
+
+  744 tests total (564 after chunk 04's own completion and post-hoc S7 correction, plus 180
+  new here net of a small chunk-05-adjacent rebalancing -- see the exact per-file counts
+  below), 100% line+branch coverage on all five new modules and project-wide, mypy --strict
+  clean on 42 source files (up from 31), ruff clean. New-test distribution: 25
+  connection/pragma/transaction (N1-N22 plus two connect()-failure companions), 22 migrations
+  (M1-M15 plus seven edge-case additions), 29 ids/timestamps, 54 schema shape/drift (incl. the
+  CHECK-vs-Literal derived test and the NULL-uniqueness finding below), 41 repositories
+  (R1-R18 plus per-entity round-trips, extra=forbid, and frozen-model tests), 8 concurrency
+  (K1-K6 plus two additional high-contention scenarios), and the mcp_server/persistence
+  boundary pair.
+
+  NodeStatus vs NodeExecutionStatus: `NodeExecutionStatus = PreTerminalStatus | NodeStatus` as
+  specified, with `NODE_EXECUTION_STATUSES` flattened via `get_args` for the DDL drift test.
+  All three required §3.5 tests exist and pass: exactly 6 members, strict superset of
+  `get_args(NodeStatus)`, and "pending"/"running" rejected by `NodeResult.model_validate`.
+
+  Two genuinely unreachable branches were found and deleted rather than covered defensively,
+  per chunk 04's S7 precedent: (1) `_split_statements`' `if stripped:` guard -- unreachable
+  because `sqlite3.complete_statement` can only return True once a statement-terminating `;`
+  is present, and `;` is never whitespace, so a completing buffer's `.strip()` can never be
+  empty; (2) the original insert-then-reselect defensive None-check pattern in `repository.py`
+  was never written in the first place after recognising the same unreachability up front
+  (the re-SELECT runs inside the same BEGIN IMMEDIATE transaction as the write, holding the
+  exclusive lock throughout, so it cannot return no rows).
+
+  A real naming collision was found and fixed, not routed around with a suppression:
+  `ContractRow`'s DB column is named `json` verbatim (PLAN.md §10.2), but a pydantic field
+  literally named `json` overrides `BaseModel`'s still-present deprecated `.json()` method
+  with an incompatible type -- a genuine `mypy --strict` error, and calling the shadowed slot
+  at runtime raises `PydanticDeprecatedSince20`, which `filterwarnings=["error"]` would turn
+  into a failure. Renamed the Python field to `contract_json`; the SQL column stays `json`,
+  mapped explicitly by `repository._contract_row_from`. This is a deviation from the spec's
+  literal `json: str` snippet, made because following it verbatim breaks two of the project's
+  own standing constraints.
+
+  A second real bug, found empirically rather than assumed: `sqlite3.Connection.executescript`
+  issues an implicit `COMMIT` before running anything, regardless of `isolation_level` --
+  confirmed by a failing smoke test before any test file existed. This makes it incompatible
+  with `transaction()`'s `BEGIN IMMEDIATE`: the migration's own transaction would be silently
+  committed away before its DDL ran, then the final `COMMIT`/rollback would fail with "no
+  transaction is active". Fixed by writing `_split_statements` (using stdlib
+  `sqlite3.complete_statement` to find statement boundaries, not a naive `.split(";")`) and
+  executing each statement individually through `execute()` inside the one transaction
+  `migrate()` opens.
+
+  A schema-behaviour finding, documented rather than silently worked around: SQL's `UNIQUE`
+  treats every `NULL` as distinct from every other `NULL`, so
+  `UNIQUE(run_id, candidate_id, node_name, attempt)` provides no actual duplicate protection
+  for shared-node rows (nodes 1-6, 12-13, where `candidate_id IS NULL` by design). Confirmed
+  directly and pinned with a dedicated test
+  (`test_unique_constraint_does_not_protect_shared_node_rows_with_null_candidate_id`) rather
+  than assumed. Duplicate-attempt prevention for shared nodes is therefore the engine's
+  responsibility (chunk 22), not something this DDL enforces on its own -- worth knowing
+  before relying on this UNIQUE the way it genuinely protects per-candidate rows.
+
+  See report items 2-7 (delivered to the user) for: the BEGIN IMMEDIATE observability answer,
+  the K2-first-time confirmation, ten consecutive clean concurrency runs, the models/candidate_id
+  nullability judgement call for the shared inferential fit (D31), and the artifacts.locked
+  recommendation for chunk 06.
 ---
 
 # Chunk 05 — SQLite persistence: schema, pragmas, migrations, repositories
@@ -570,3 +634,100 @@ locking guarantees chunk 21 enforces on the client side.
    because D26's test-set lock is enforced in `mcp_client` (chunk 21) rather than the schema. Say
    whether anything you saw suggests the lock needs a persisted column to survive a restart —
    a run resumed after a crash must not be able to score on test twice.
+
+---
+
+## 6. Addendum — two NULL holes and the exactly-once primitive
+
+**Status: gated. Chunk 06 is blocked until this passes.**
+
+Chunk 05's implementation report flagged one of these and answered the question that produced the
+third. All three were verified empirically, in both broken and fixed forms, before being specified.
+
+### 6.1 `NOT NULL` on every `TEXT PRIMARY KEY`
+
+SQLite accepts NULL in a non-INTEGER `PRIMARY KEY` unless `NOT NULL` is declared — a documented
+deviation from the SQL standard kept for backwards compatibility. Confirmed: inserting a project
+with `id = NULL` succeeded on the current schema.
+
+Add `NOT NULL` to all 15 `id TEXT PRIMARY KEY` declarations. Same class of defect as an unset
+`foreign_keys` pragma: a constraint that reads as present and enforces nothing.
+
+Test: for every table, derived from `sqlite_master` rather than hand-listed, inserting a NULL `id`
+raises `IntegrityError`.
+
+### 6.2 The composite UNIQUE on `node_executions` is decorative for shared nodes
+
+Your finding, and it is worse than "no duplicate protection for shared-node rows" suggests: all
+eight SHARED nodes (1–6, 12–13) have `candidate_id IS NULL`, so the constraint protects only the
+five per-candidate nodes. Confirmed: two rows for `intake` attempt 1 both inserted.
+
+Replace the table-level `UNIQUE(run_id, candidate_id, node_name, attempt)` with
+
+```sql
+CREATE UNIQUE INDEX ux_node_executions_identity
+    ON node_executions(run_id, IFNULL(candidate_id, ''), node_name, attempt);
+```
+
+Verified: rejects duplicate shared-node rows, still rejects duplicate per-candidate rows, still
+allows the same node for two different candidates.
+
+You were right to flag rather than silently fix — but the reason it is fixed here rather than left
+is that this constraint's whole purpose is guarding the retry and resume paths, and chunk 23's
+restart logic will read `node_executions` to reconstruct state. Ambiguous rows there are a
+correctness bug, not an untidiness.
+
+Tests: duplicate shared-node insert rejected; duplicate per-candidate insert rejected; same node
+for two candidates accepted; same node, different `attempt` accepted.
+
+### 6.3 `runs.test_scored_at` — the answer to report item 7
+
+Your reasoning was right and the conclusion is stronger than you proposed: the guarantee needs
+**no `locked` column and no artifact-registry lock at all.**
+
+D26 contains two separate guarantees, and only one of them needs storage:
+
+| Guarantee | Enforced by | Storage |
+|---|---|---|
+| The test artifact is unreadable before node 12 | `runs.champion_model_id IS NULL` | none — the column already exists |
+| The champion is scored on test exactly once, ever | atomic compare-and-set | one nullable column |
+
+Add `test_scored_at TEXT` (nullable) to `runs`, and one repository function:
+
+```python
+def claim_test_scoring(conn: sqlite3.Connection, run_id: str, *, at: str | None = None) -> bool:
+    """Atomically claim the run's single permitted test-set scoring (D26).
+
+    Returns True if the caller won the claim and may proceed, False if the run has already been
+    scored on test. Raises PersistenceError if `run_id` does not exist — distinguishable from a
+    lost claim, since one is a caller bug and the other is the guarantee working.
+
+    One statement does it: UPDATE ... WHERE id = ? AND test_scored_at IS NULL, then rowcount == 1.
+    Durable by construction, so it survives the crash that an in-memory flag cannot — which is the
+    entire failure mode the requirement exists to prevent. mcp_client (chunk 21) remains the
+    enforcement point per D30(b); ownership of a guarantee and storage of its state are separable.
+    """
+```
+
+Verified before specifying: 16 concurrent claimants across 16 connections produce exactly one
+winner and fifteen losers, and a claim issued after closing and reopening the database is refused.
+
+Tests: a first claim returns True; a second returns False; a claim after reopening the database
+returns False; an unknown `run_id` raises `PersistenceError`; 16 threads produce exactly one
+winner; `RunRow.test_scored_at` round-trips as `None` then as a parseable timestamp.
+
+### 6.4 Migration policy for this addendum
+
+Edit `001_initial.sql` in place. Do **not** add `002_*.sql`. Nothing is deployed, no database
+outside `tmp_path` has ever run this schema, and a migration correcting a schema no data has ever
+used is archaeology. The multi-migration ordering path stays covered by M5's synthetic fixtures.
+
+### 6.5 Definition of Done for the addendum
+
+- [ ] `make test` green; count rises by ~20.
+- [ ] Coverage stays 100 % line and branch.
+- [ ] `make typecheck`, `make lint` clean. No new suppressions.
+- [ ] The §4.5 nullability and UNIQUE assertions still derive from `PRAGMA` introspection.
+- [ ] `RunRow` gains `test_scored_at: str | None`; `extra="forbid"` means forgetting it fails loudly.
+- [ ] The concurrency suite still passes 10 consecutive runs, now including the claim race.
+- [ ] No `locked` column anywhere, and no artifact-registry lock design left in the spec.

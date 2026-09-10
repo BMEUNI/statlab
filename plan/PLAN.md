@@ -1352,7 +1352,8 @@ projects(id, slug, name, created_at)
 datasets(id, project_id, filename, path, sha256, n_rows, n_cols, created_at)
 contracts(id, project_id, path, json, version, created_at)
 runs(id, project_id, contract_id, mode, status, current_node,
-     champion_model_id, forked_from_run_id, started_at, ended_at, config_json)
+     champion_model_id, forked_from_run_id, started_at, ended_at, config_json,
+     test_scored_at)
 sessions(id, project_id, title, created_at)
 messages(id, session_id, run_id, role, content, meta_json, ts)
 candidates(id, run_id, label, rationale, spec_json, varies_from_baseline_json,
@@ -1381,6 +1382,24 @@ completed}.
 exists once the node has stopped, and its validators (`skip_reason` iff skipped, `error` iff
 failed) have no meaning for a live row. The schema type is derived from the outcome type
 (`NodeExecutionStatus = PreTerminalStatus | NodeStatus`), not restated, so the two cannot drift.
+
+**`runs.test_scored_at` is how D26's "scored on test exactly once" survives a crash.** The
+guarantee is a durability requirement, so it cannot live in `mcp_client`'s process memory — a crash
+is precisely the failure mode it exists to prevent. It is enforced by one atomic compare-and-set,
+`UPDATE runs SET test_scored_at = ? WHERE id = ? AND test_scored_at IS NULL`, where `rowcount == 1`
+means the caller won and may proceed. Verified: 16 concurrent claimants produce exactly one winner,
+and a claim after reopening the database is refused. `mcp_client` remains the enforcement point
+(D30(b)); it just consults a durable column instead of a flag. No `locked` column and no artifact
+registry lock is needed — refusing a test read *before* node 12 is already derivable from
+`runs.champion_model_id IS NULL`.
+
+**Two SQLite NULL traps this schema must not fall into.** A non-INTEGER `PRIMARY KEY` accepts NULL
+unless `NOT NULL` is declared, and a composite `UNIQUE` spanning a nullable column enforces nothing
+on rows where that column is NULL, since SQL treats every NULL as distinct. The latter would make
+`UNIQUE(run_id, candidate_id, node_name, attempt)` decorative for all eight SHARED nodes, which have
+no candidate — so it is declared as
+`CREATE UNIQUE INDEX ... ON node_executions(run_id, IFNULL(candidate_id, ''), node_name, attempt)`.
+Both were verified empirically, in both the broken and fixed forms.
 
 Cancellation of a *running* node is deliberately not a seventh state: chunk 31 resolves a
 cancelled run's live rows to `failed` with the cancellation as the error, which needs no new
