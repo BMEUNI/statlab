@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from pydantic import JsonValue
+from statlab.persistence.db import connect, migrate
+from statlab.persistence.models import ProjectRow
+from statlab.persistence.repository import create_project
 from statlab_contracts.artifacts import ArtifactRef
 from statlab_contracts.candidate import (
     CandidateSet,
@@ -181,3 +185,36 @@ def shortlist_dict() -> dict[str, JsonValue]:
     text = (_CANDIDATE_FIXTURES_DIR / "shortlist.json").read_text(encoding="utf-8")
     result: dict[str, JsonValue] = json.loads(text)
     return result
+
+
+# --- Persistence (chunk 05) -------------------------------------------------------------------
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    """A file path for a fresh database. NOT ':memory:' -- WAL is unsupported there and every
+    pragma and concurrency assertion in this chunk would pass vacuously."""
+    return tmp_path / "statlab.db"
+
+
+@pytest.fixture
+def conn(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """An open, pragma-configured, unmigrated connection. Closed on teardown."""
+    connection = connect(db_path)
+    yield connection
+    connection.close()
+
+
+@pytest.fixture
+def migrated_db(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """An open connection with all migrations applied."""
+    connection = connect(db_path)
+    migrate(connection)
+    yield connection
+    connection.close()
+
+
+@pytest.fixture
+def project(migrated_db: sqlite3.Connection) -> ProjectRow:
+    """A persisted project, for tests needing a valid parent FK."""
+    return create_project(migrated_db, slug="test-project", name="Test Project")

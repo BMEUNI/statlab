@@ -106,3 +106,29 @@ class ArtifactLockedError(ArtifactError):
 
 class EngineError(StatlabError):
     """An invalid state transition in the run loop. Always a bug in our code."""
+
+
+class PersistenceError(StatlabError):
+    """Database operation failed. Wraps sqlite3 errors at the persistence boundary.
+
+    A plain subclass with no structured payload, per chunk 02's precedent (`ArtifactError`):
+    the message alone is what a caller needs, and `cause` already carries the original
+    `sqlite3.Error` for anyone who needs to inspect it.
+    """
+
+
+class MigrationError(PersistenceError):
+    """A migration could not be applied. Carries `version` and `name` because a caller (and
+    `make db-reset`) needs to say which migration failed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        version: int,
+        name: str,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, cause=cause)
+        self.version = version
+        self.name = name

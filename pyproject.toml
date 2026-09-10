@@ -38,6 +38,14 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["backend/statlab", "mcp_server/statlab_tools", "contracts/statlab_contracts"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Migrations are plain .sql files, not Python modules, so hatchling's default package
+# discovery (which only picks up importable code) would silently drop them from a built
+# wheel. `db.py`'s `_migrations_dir` locates them via `importlib.resources`, which requires
+# them to actually be inside the installed package -- this entry is what makes that true
+# for an installed distribution rather than only the editable/source checkout.
+"backend/statlab/persistence/migrations" = "statlab/persistence/migrations"
+
 [tool.uv]
 package = true
 

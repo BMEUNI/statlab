@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 dependencies: [01, 02]
 completion_date: 2026-09-10
 implementation_notes: |
@@ -53,20 +53,67 @@ implementation_notes: |
   executing each statement individually through `execute()` inside the one transaction
   `migrate()` opens.
 
-  A schema-behaviour finding, documented rather than silently worked around: SQL's `UNIQUE`
-  treats every `NULL` as distinct from every other `NULL`, so
-  `UNIQUE(run_id, candidate_id, node_name, attempt)` provides no actual duplicate protection
-  for shared-node rows (nodes 1-6, 12-13, where `candidate_id IS NULL` by design). Confirmed
-  directly and pinned with a dedicated test
-  (`test_unique_constraint_does_not_protect_shared_node_rows_with_null_candidate_id`) rather
-  than assumed. Duplicate-attempt prevention for shared nodes is therefore the engine's
-  responsibility (chunk 22), not something this DDL enforces on its own -- worth knowing
-  before relying on this UNIQUE the way it genuinely protects per-candidate rows.
+  A schema-behaviour finding, originally documented rather than worked around, was fixed by
+  §6.2 below after review: SQL's `UNIQUE` treats every `NULL` as distinct from every other
+  `NULL`, so the original `UNIQUE(run_id, candidate_id, node_name, attempt)` gave no actual
+  duplicate protection for shared-node rows (nodes 1-6, 12-13, where `candidate_id IS NULL` by
+  design) -- all eight SHARED nodes, not just "some" rows, since every one of them has a null
+  `candidate_id`. Confirmed directly (two rows for `intake` attempt 1 both inserted) before the
+  fix and reconfirmed after it.
 
   See report items 2-7 (delivered to the user) for: the BEGIN IMMEDIATE observability answer,
   the K2-first-time confirmation, ten consecutive clean concurrency runs, the models/candidate_id
   nullability judgement call for the shared inferential fit (D31), and the artifacts.locked
   recommendation for chunk 06.
+
+  --- §6 addendum (gated re-review, same day) ---
+
+  Three fixes, all edited into `001_initial.sql` in place (no `002_*.sql` -- nothing has ever
+  run this schema outside `tmp_path`, so a migration correcting it would be archaeology):
+
+  §6.1: all 15 `id TEXT PRIMARY KEY` columns gained `NOT NULL`. SQLite accepts NULL in a
+  non-INTEGER PRIMARY KEY unless declared otherwise -- confirmed broken (`id = NULL` inserted
+  cleanly) before the fix. Covered by a `sqlite_master`-derived parametrised sweep over all 15
+  tables, both at the `PRAGMA table_info` metadata level and behaviourally (`INSERT ... (id)
+  VALUES (NULL)` raises `IntegrityError`).
+
+  §6.2: the table-level `UNIQUE(run_id, candidate_id, node_name, attempt)` on `node_executions`
+  was replaced with `CREATE UNIQUE INDEX ux_node_executions_identity ON
+  node_executions(run_id, IFNULL(candidate_id, ''), node_name, attempt)`. Verified: rejects a
+  duplicate shared-node row (previously silently accepted), still rejects a duplicate
+  per-candidate row, still allows the same node/attempt for two different candidates, and
+  still allows the same shared node across two different attempts (a retry).
+
+  §6.3: `runs.test_scored_at TEXT` (nullable) added, plus `claim_test_scoring(conn, run_id, *,
+  at=None) -> bool` in `repository.py`: one `UPDATE runs SET test_scored_at = ? WHERE id = ?
+  AND test_scored_at IS NULL` (preceded by an existence check inside the same transaction, so
+  an unknown `run_id` raises `PersistenceError` rather than being indistinguishable from a lost
+  claim), `rowcount == 1` means the caller won. No `locked` column and no artifact-registry
+  lock design were added -- D26's "test unreadable before node 12" guarantee already exists as
+  `champion_model_id IS NULL`, and only the "scored exactly once, ever" guarantee needed
+  storage. Verified: 16 concurrent claimants across 16 connections produce exactly one True and
+  fifteen False; a claim after closing and reopening the database connection to the same file
+  sees the earlier claim (durability across a simulated restart, the property an in-memory
+  flag structurally cannot have).
+
+  None of the three fixes broke any test that survived unmodified -- two pre-existing tests
+  needed updates for reasons the fixes themselves predicted: the `runs` column-list test
+  needed `test_scored_at` appended, and the test that had documented the NULL/UNIQUE hole as a
+  known limitation was rewritten into three tests proving the hole is closed (duplicate shared
+  node rejected, same node two candidates allowed, same node two attempts allowed) plus a
+  dedicated regression test using the fixed index's exact name in its `IntegrityError` match.
+
+  The claim race needed nothing beyond the single `UPDATE ... WHERE ... AND test_scored_at IS
+  NULL` statement -- no retry loop, no advisory lock, no separate SELECT-then-UPDATE outside a
+  transaction. The existence check that precedes it (to distinguish "unknown run" from "lost
+  the claim", both of which leave `rowcount == 0` on the `UPDATE` alone) runs inside the same
+  `BEGIN IMMEDIATE` transaction as the `UPDATE`, so it adds no race window of its own.
+
+  Final numbers after the addendum: 785 tests (+41 over the 744 baseline, more than the "~20"
+  estimate because the NOT NULL fix's derived-not-hand-listed sweep costs 2 tests x 15 tables =
+  30 on its own), 100% line+branch coverage maintained, mypy --strict clean on 42 files (no
+  new source files, so the count is unchanged from the chunk's first pass), ruff clean, ten
+  consecutive clean runs of the concurrency suite including the new 16-thread claim race.
 ---
 
 # Chunk 05 — SQLite persistence: schema, pragmas, migrations, repositories
