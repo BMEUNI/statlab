@@ -20,7 +20,7 @@ duplicate them here.
 | mypy | `--strict` clean on 42 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `# type: ignore`, zero `pragma: no cover`, zero `Any` |
+| Suppressions | zero in production code; zero `pragma: no cover`; zero `Any`. 15 `# type: ignore` in tests, all legitimate — see below |
 | Git | local `master`, never pushed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
@@ -91,6 +91,16 @@ not read it:
   *every* `BaseModel`. `tests/test_no_explicit_any.py` replaces it and is stronger.
 - **No unreachable code, and therefore no `pragma: no cover`.** If a line cannot be reached, delete
   it. If you want to bypass a validator to reach a line, that line is the problem.
+- **`# type: ignore` is banned in production code and permitted in exactly one test situation:**
+  when a runtime test must deliberately violate a static type. Mutating a frozen model to prove it
+  raises, passing an invalid `Literal` to prove the runtime rejects it, or passing an extra kwarg to
+  prove `extra="forbid"` fires — mypy is *correct* to object in all three, so the suppression is the
+  test working, not the test cheating. There are 15, each with an inline justification naming why.
+  Precedent: chunk 02's `retry_budget("nonsense")`.
+
+  Do not "clean these up". Do challenge any new one that is not one of those three shapes — in
+  particular `arg-type` on a `**dict` construction, which means a test helper took
+  `**overrides: object` instead of typed keyword parameters.
 
 ---
 
