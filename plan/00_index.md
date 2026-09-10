@@ -120,6 +120,39 @@ user-facing category when the two differ (a present-but-blank `STATLAB_MCP_TOKEN
 as *missing*, because that is what the user needs to hear). Reuse this pattern rather than
 inventing a second convention.
 
+**MCP SDK 2.2.0 facts — verified empirically 2026-09-10; chunks 07–20 depend on these.**
+`mcp` 2.x is a breaking rename from 1.x. Four assumptions taken from the 1.x API were wrong, so do
+not re-derive any of this from memory:
+
+- **`FastMCP` no longer exists.** `from mcp.server.mcpserver import MCPServer`. The import error
+  itself names the migration guide.
+- Model attributes are **snake_case**: `Tool.input_schema` (not `inputSchema`),
+  `CallToolResult.is_error`, `.structured_content`, `.meta`. The *wire* JSON stays camelCase.
+- `@server.tool(description=..., meta={...})`. Parameters are declared as
+  `Annotated[T, Field(description=..., ge=..., le=...)]`, and the generated JSON Schema carries
+  `description`, `enum`, `minimum`/`maximum`, `default` and `required` — exactly what D23 requires,
+  with no hand-written schema.
+- **`meta` survives `tools/list`** and arrives as `Tool.meta`. That is how D12's `phase` /
+  `allow_in` reach `mcp_client` without a second registry.
+- A union return type is wrapped: `structured_content == {"result": {...}}`. Chunk 21 unwraps
+  `["result"]`.
+- `server.streamable_http_app(streamable_http_path="/mcp")` returns a **Starlette** app;
+  `@server.custom_route(path, methods=[...])` adds a plain HTTP route beside it.
+- **Static bearer auth is Starlette middleware, not `token_verifier`.** Passing `token_verifier`
+  without `auth=` raises `ValueError`, and `AuthSettings` requires `issuer_url` +
+  `resource_server_url` — the OAuth resource-server path. Declaring a fake issuer for a shared
+  secret would be a lie in config *and* would expose OAuth metadata endpoints.
+- **`httpx.ASGITransport` cannot test the authorised path.** The streamable-HTTP session manager
+  needs the ASGI lifespan, so an in-process request fails with
+  `RuntimeError: Task group is not initialized`. The 401 path *does* work in-process, because the
+  middleware short-circuits before the manager runs. Authorised tests run `uvicorn.Server` in a
+  thread, polling `srv.started`.
+- Client side: `create_mcp_http_client(headers={"Authorization": f"Bearer {token}"})` →
+  `streamable_http_client(url, http_client=...)` → `ClientSession(read, write)` → `initialize()`.
+  `StreamableHTTPTransport(url)` takes **only** a url; headers go on the http client.
+- `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
+  exist by design; do not "consolidate" them.
+
 ## Phase A — Foundation (01–06)
 
 | # | Chunk | Status | Depends on |
