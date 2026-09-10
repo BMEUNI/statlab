@@ -60,11 +60,14 @@ read them there rather than rediscovering. The two that will bite:
 - `filterwarnings = ["error"]` plus `Pandas4Warning` means a deprecated API is a hard test failure,
   not a warning.
 
-**Design question to settle while specifying it:** D24 prunes within-node intermediates on success
-only, never on failure. Hard links (D11) mean a pruned file may still be referenced by a forked run.
-Deleting a hard link is safe — the inode survives while any link remains — but the *registry rows*
-in both runs must stay consistent. Decide whether pruning is per-run or refcounted before writing
-the spec.
+**The D11×D24 design question is settled: pruning is per-run, with no refcounting.** Two
+independent reasons, both verified empirically before the spec was written. First, the sets do not
+intersect — hard-linked artifacts are node-*boundary* artifacts of a completed, halted parent, while
+pruned artifacts are within-node intermediates from the pruning run's own execution. Second, even if
+they did intersect, `unlink` removes a directory entry rather than an inode: after linking a parent
+artifact into a fork, unlinking either side leaves the other readable. A refcount would be a second
+bookkeeping system guarding something the filesystem already makes impossible. Tests P10 and P11
+pin both directions.
 
 ---
 
