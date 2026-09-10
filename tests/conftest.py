@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactRef
+from statlab_contracts.candidate import (
+    CandidateSet,
+    CandidateSpec,
+    EstimatorSpec,
+    FeatureSpec,
+    PreprocessingSpec,
+)
 from statlab_contracts.contract import DataContract
+from statlab_contracts.vocabulary import ClassWeight, ParamValue, VariationDimension
 
 _STATLAB_VARS = (
     "STATLAB_MCP_TOKEN",
@@ -104,5 +112,72 @@ def full_contract_dict() -> dict[str, JsonValue]:
     `full_contract` (a `DataContract` instance) because negative tests need a plain dict to
     mutate, not a frozen model."""
     text = (_CONTRACT_FIXTURES_DIR / "full.json").read_text(encoding="utf-8")
+    result: dict[str, JsonValue] = json.loads(text)
+    return result
+
+
+_CANDIDATE_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "candidates"
+
+
+def make_candidate(
+    *,
+    label: str = "candidate",
+    rationale: str = "a placeholder rationale long enough to satisfy the length floor",
+    is_baseline: bool = False,
+    preprocessing: PreprocessingSpec | None = None,
+    features: FeatureSpec | None = None,
+    estimator_name: str = "logistic_regression",
+    estimator_params: dict[str, ParamValue] | None = None,
+    class_weight: ClassWeight = "none",
+    calibrate: bool = False,
+    varies_from_baseline: tuple[VariationDimension, ...] = (),
+) -> CandidateSpec:
+    """Typed keyword-parameter helper, not `**overrides: object` -- that shape forces a
+    `**dict` construction and an `arg-type` suppression under `init_typed = true` (see
+    plan/00_index.md's test-fixture-pattern note; `test_domains_base.py`'s surviving
+    `**overrides` helper is not the pattern to copy here)."""
+    return CandidateSpec(
+        label=label,
+        rationale=rationale,
+        is_baseline=is_baseline,
+        preprocessing=preprocessing if preprocessing is not None else PreprocessingSpec(),
+        features=features if features is not None else FeatureSpec(),
+        estimator=EstimatorSpec(
+            name=estimator_name,
+            params=estimator_params if estimator_params is not None else {},
+            class_weight=class_weight,
+            calibrate=calibrate,
+        ),
+        varies_from_baseline=varies_from_baseline,
+    )
+
+
+@pytest.fixture
+def baseline_candidate() -> CandidateSpec:
+    """A cheap interpretable baseline: logistic_regression, one-hot, no engineering."""
+    return make_candidate(
+        label="baseline",
+        rationale="cheap interpretable baseline: reference point for whether complexity pays",
+        is_baseline=True,
+    )
+
+
+@pytest.fixture
+def shortlist() -> CandidateSet:
+    """Loaded from tests/fixtures/candidates/shortlist.json.
+
+    Five candidates mirroring PLAN.md §4.2's worked example on an imbalanced binary target:
+    baseline logreg; logreg + balanced class weight; random forest; hist GB + target encoding;
+    logreg + an age x income interaction. Must satisfy all seven set rules, and each
+    `varies_from_baseline` must match its actual diff -- if it does not, the fixture is wrong.
+    """
+    text = (_CANDIDATE_FIXTURES_DIR / "shortlist.json").read_text(encoding="utf-8")
+    return CandidateSet.model_validate_json(text)
+
+
+@pytest.fixture
+def shortlist_dict() -> dict[str, JsonValue]:
+    """The raw parsed `shortlist.json`, for tests that construct a one-field deviation."""
+    text = (_CANDIDATE_FIXTURES_DIR / "shortlist.json").read_text(encoding="utf-8")
     result: dict[str, JsonValue] = json.loads(text)
     return result

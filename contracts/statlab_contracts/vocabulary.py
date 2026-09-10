@@ -53,3 +53,60 @@ METRICS_FOR_TASK: dict[Task, frozenset[str]] = {
 }
 """Derived from the Literals via `get_args`, never hand-listed -- adding a metric to a Literal
 without adding it here is impossible by construction."""
+
+FeatureSelectionMethod = Literal["none", "variance", "mutual_info"]
+
+DatetimePart = Literal[
+    "year",
+    "month",
+    "day",
+    "dayofweek",
+    "hour",
+    "quarter",
+    "weekofyear",
+    "is_weekend",
+]
+"""Parts `add_datetime_parts` (chunk 17) can extract. Closed so a typo is a schema error."""
+
+ParamValue = str | int | float | bool | None | tuple[str | int | float | bool | None, ...]
+"""A single hyperparameter value. One level of nesting, deliberately non-recursive: sklearn
+params are scalars or flat sequences, and an unbounded recursive type buys nothing while
+defeating static typing (chunk 02's JsonValue lesson)."""
+
+VariationDimension = Literal[
+    "imputation",
+    "outliers",
+    "encoding",
+    "scaling",
+    "cardinality_handling",
+    "derived_features",
+    "feature_selection",
+    "estimator",
+    "hyperparameters",
+    "class_weight",
+    "calibration",
+]
+"""The axes along which one candidate may differ from the baseline (D26's
+`varies_from_baseline`). A closed vocabulary rather than free strings, so the comparison table
+can group by dimension and a typo cannot invent an axis."""
+
+DIMENSION_FOR_FIELD: dict[str, VariationDimension] = {
+    "preprocessing.missing": "imputation",
+    "preprocessing.outliers": "outliers",
+    "features.encoding": "encoding",
+    "features.scaling": "scaling",
+    "features.max_cardinality": "cardinality_handling",
+    "features.interactions": "derived_features",
+    "features.datetime_parts": "derived_features",
+    "features.binned": "derived_features",
+    "features.selection": "feature_selection",
+    "estimator.name": "estimator",
+    "estimator.params": "hyperparameters",
+    "estimator.class_weight": "class_weight",
+    "estimator.calibrate": "calibration",
+}
+"""Maps every hashed leaf field to the dimension it varies. Used to verify a candidate's
+declared `varies_from_baseline` against the actual diff (chunk 04 §3.4). Three fields map to
+`derived_features` because interactions, datetime parts and binning are one axis from a
+reader's point of view -- "this candidate engineered features" -- even though they are three
+mechanisms."""

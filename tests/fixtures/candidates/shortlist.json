@@ -1,0 +1,129 @@
+{
+  "candidates": [
+    {
+      "label": "c_01 logistic regression, one-hot, no engineering",
+      "rationale": "Mandatory baseline: cheap, interpretable reference point for whether the complexity of later candidates earns its keep.",
+      "is_baseline": true,
+      "preprocessing": {
+        "missing": { "default": "median", "per_column": {}, "drop_rows_above": null },
+        "outliers": "none"
+      },
+      "features": {
+        "encoding": "onehot",
+        "scaling": "standard",
+        "max_cardinality": 30,
+        "interactions": [],
+        "datetime_parts": {},
+        "binned": {},
+        "selection": { "method": "none", "k": null, "threshold": null }
+      },
+      "estimator": {
+        "name": "logistic_regression",
+        "params": {},
+        "class_weight": "none",
+        "calibrate": false
+      },
+      "varies_from_baseline": []
+    },
+    {
+      "label": "c_02 logreg + class_weight=balanced",
+      "rationale": "Positive rate is 3.1 percent; unweighted logistic regression will under-predict the minority class.",
+      "is_baseline": false,
+      "preprocessing": {
+        "missing": { "default": "median", "per_column": {}, "drop_rows_above": null },
+        "outliers": "none"
+      },
+      "features": {
+        "encoding": "onehot",
+        "scaling": "standard",
+        "max_cardinality": 30,
+        "interactions": [],
+        "datetime_parts": {},
+        "binned": {},
+        "selection": { "method": "none", "k": null, "threshold": null }
+      },
+      "estimator": {
+        "name": "logistic_regression",
+        "params": {},
+        "class_weight": "balanced",
+        "calibrate": false
+      },
+      "varies_from_baseline": ["class_weight"]
+    },
+    {
+      "label": "c_03 random forest, one-hot",
+      "rationale": "Four numeric features show non-monotonic relationships with the target in the PDP-style profile plots.",
+      "is_baseline": false,
+      "preprocessing": {
+        "missing": { "default": "median", "per_column": {}, "drop_rows_above": null },
+        "outliers": "none"
+      },
+      "features": {
+        "encoding": "onehot",
+        "scaling": "standard",
+        "max_cardinality": 30,
+        "interactions": [],
+        "datetime_parts": {},
+        "binned": {},
+        "selection": { "method": "none", "k": null, "threshold": null }
+      },
+      "estimator": {
+        "name": "random_forest_classifier",
+        "params": { "n_estimators": 300, "max_depth": null },
+        "class_weight": "none",
+        "calibrate": false
+      },
+      "varies_from_baseline": ["estimator", "hyperparameters"]
+    },
+    {
+      "label": "c_04 hist GB + target-encoded plan",
+      "rationale": "The plan column has 47 levels; one-hot would dilute it across 47 sparse columns, so target encoding is used instead.",
+      "is_baseline": false,
+      "preprocessing": {
+        "missing": { "default": "median", "per_column": {}, "drop_rows_above": null },
+        "outliers": "none"
+      },
+      "features": {
+        "encoding": "target",
+        "scaling": "standard",
+        "max_cardinality": 30,
+        "interactions": [],
+        "datetime_parts": {},
+        "binned": {},
+        "selection": { "method": "none", "k": null, "threshold": null }
+      },
+      "estimator": {
+        "name": "hist_gb_classifier",
+        "params": {},
+        "class_weight": "none",
+        "calibrate": false
+      },
+      "varies_from_baseline": ["encoding", "estimator"]
+    },
+    {
+      "label": "c_05 logreg + age x income interaction",
+      "rationale": "The correlation matrix shows both age and income matter, and the EDA narrative flagged a plausible interaction between them.",
+      "is_baseline": false,
+      "preprocessing": {
+        "missing": { "default": "median", "per_column": {}, "drop_rows_above": null },
+        "outliers": "none"
+      },
+      "features": {
+        "encoding": "onehot",
+        "scaling": "standard",
+        "max_cardinality": 30,
+        "interactions": [["age", "income"]],
+        "datetime_parts": {},
+        "binned": {},
+        "selection": { "method": "none", "k": null, "threshold": null }
+      },
+      "estimator": {
+        "name": "logistic_regression",
+        "params": {},
+        "class_weight": "none",
+        "calibrate": false
+      },
+      "varies_from_baseline": ["derived_features"]
+    }
+  ]
+}

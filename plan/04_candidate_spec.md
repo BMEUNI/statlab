@@ -8,7 +8,7 @@ implementation_notes: |
   `model_fields` walks in B2/B3/B4, never hand-listed against a literal copy). `candidate.py`
   implements `FeatureSelection`, `PreprocessingSpec` (reusing chunk 03's `MissingPolicy`
   unchanged), `FeatureSpec`, `EstimatorSpec`, `CandidateSpec` (V1-V9, `spec_hash` property),
-  `changed_dimensions()`, and `CandidateSet` (S1-S7, `baseline` property).
+  `changed_dimensions()`, and `CandidateSet` (S1-S6, `baseline` property).
 
   Known-answer digest (H17): `9c550c0bc4ce6433985ef623c5cc896502e1799cd18459cd51bc28034b2820bd`,
   the sha256 of `shortlist.json`'s baseline candidate (logistic_regression, onehot, defaults
@@ -28,20 +28,23 @@ implementation_notes: |
   `CategoricalEncoding`, `ScalingMethod`, `ClassWeight` transferred to candidate-level use
   without widening, confirming the chunk 03 report's prediction.
 
-  S7 ("no non-baseline candidate is identical to the baseline") is genuinely unreachable through
-  `CandidateSet.model_validate`: S3 (declared earlier, per the "declaration order is
-  load-bearing" instruction) always catches any hash collision first, including a
-  baseline-collision, because S3 scans all pairs and the baseline is one of the scanned
-  candidates. Confirmed empirically before writing the test. Tested S7's own logic directly via
-  `CandidateSet.model_construct(...)` (which bypasses all validators) to call
-  `_no_non_baseline_identical_to_baseline()` in isolation, with a justified
-  `# type: ignore[operator]` on the two call sites (pydantic's `model_validator` decorator
-  confuses mypy's static call-checking even though the method is a plain callable at runtime;
-  confirmed via `type()` at a REPL). This is not an `[arg-type]` ignore, so it does not violate
-  the DoD's "no type: ignore[arg-type]" constraint. The same `model_construct` bypass was also
-  used to exercise the `baseline` property's defensive `AssertionError` fallback, which S2
-  likewise makes unreachable via normal validated construction -- needed for 100% branch
-  coverage without a forbidden `pragma: no cover`.
+  A seventh set rule ("no non-baseline candidate is identical to the baseline") was specified
+  and implemented, then removed after review. It was genuinely unreachable through
+  `CandidateSet.model_validate`: S3 (declared earlier) already raises on any hash collision,
+  including a baseline collision, because S3 scans all pairs and the baseline is one of the
+  scanned candidates. The original justification -- "exists only to give a clearer message" --
+  was the same mistake as chunk 02's `retryable` field: a check that can only ever be satisfied
+  trivially, kept for cosmetic reasons. Its cost was two validator-bypassing tests and two
+  `type: ignore[operator]` comments to cover code that could never execute, inside a module 36
+  later chunks read and copy patterns from. Removed entirely: the validator, both tests, both
+  ignores. `CandidateSet` now enforces S1-S6, not S1-S7. `baseline` was changed from a
+  loop-with-trailing-`raise AssertionError` to `next(c for c in self.candidates if
+  c.is_baseline)` for the same reason -- the loop form left the raise permanently uncovered
+  (S2 makes it unreachable via validated construction), while `next(...)` reaches 100% line and
+  branch coverage with no unreachable statement and no defensive dead code to justify. Both
+  fixes delete code rather than adding any; `candidate.py` shrank from 169 to 159 statements
+  and from 64 to 56 branches, and `test_candidate_set.py` now contains zero `type: ignore` and
+  zero `model_construct` calls.
 
   No STOP condition was triggered. `is_baseline`'s exclusion from the hash does not conflict
   with PLAN.md §4.2: PLAN.md's own illustrative hash algorithm excludes only `label`,
@@ -50,11 +53,14 @@ implementation_notes: |
   never mentions it) -- chunk 04's addition is a documented refinement filling a gap, not a
   contradiction of anything PLAN.md states.
 
-  Test suite: 138 new tests (18 vocabulary B1-B14, 51 model/defaults/V1-V9/C1-C20 tests, 25 hash
-  H1-H18, 44 set changed_dimensions/S1-S7/E1-E12, incl. two extra branch-coverage tests beyond
-  the spec's minimum pass/fail pairs: V2's threshold-forbidden-when-not-variance direction, and
-  the baseline property's unreachable fallback). Total 566 (428 existing + 138 new), 100%
-  line+branch coverage project-wide, mypy --strict clean on 31 source files, ruff clean.
+  Test suite: 138 new tests as first written (18 vocabulary B1-B14, 51 model/defaults/
+  V1-V9/C1-C20 tests, 25 hash H1-H18, 44 set changed_dimensions/S1-S7/E1-E12, incl. two extra
+  branch-coverage tests beyond the spec's minimum pass/fail pairs: V2's
+  threshold-forbidden-when-not-variance direction, and a since-removed test covering the
+  since-removed S7 rule and `baseline`'s since-removed unreachable fallback). After the S7
+  removal above, 136 new tests remain (42 in `test_candidate_set.py`, down from 44). Total 564
+  (428 existing + 136 new), 100% line+branch coverage project-wide, mypy --strict clean on 31
+  source files, ruff clean, and zero `type: ignore` of any kind in `test_candidate_set.py`.
 
   Forward note for chunk 05: `CandidateSpec`, `CandidateSet` and `DataContract` will all need to
   round-trip through SQLite as `spec_json` (candidates table). `model_dump(mode="json")` +
