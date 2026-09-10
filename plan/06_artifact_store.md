@@ -1,8 +1,47 @@
 ---
-status: untouched
+status: in_progress
 dependencies: [01, 02, 05]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-10
+implementation_notes: |
+  Implemented as specified. `layout.py` (2 frozen dataclasses, stdlib+statlab_contracts only),
+  `storage.py` (layout creation, artifacts repository, fork, prune -- no pandas, no
+  statlab_tools), `mcp_server/statlab_tools/artifacts.py` (the one pandas module).
+  `ArtifactRow` added to persistence/models.py; `artifacts.pruned_at TEXT` added to
+  001_initial.sql in place (no 002 migration, same archaeology argument as chunk 05 §6.4).
+  Exactly one existing assertion broke (test_db_schema.py's artifacts column list), as
+  predicted.
+
+  All seven dtypes (str, category, int64, float64, bool, datetime64[us], Int64) round-trip
+  through parquet unchanged, measured. save_dataframe/load_dataframe needed zero dtype
+  handling. No refcounting was added for fork/prune: P10/P11 confirm both directions
+  empirically (fork then prune child -> parent survives; fork then prune parent -> child
+  survives), matching the two independent reasons in the spec (disjoint sets; unlink removes a
+  directory entry, not an inode). Felt no urge to add a guard while implementing -- the
+  filesystem behaviour is direct enough that the reasoning read as obviously correct before
+  any test ran, not just after.
+
+  pandas confirmed in exactly one module by grep across all three packages.
+
+  One spec inconsistency found, not silently resolved: §1's context table instructs wrapping
+  IO failures in ArtifactError (statlab.errors) inside mcp_server/statlab_tools/artifacts.py,
+  but §5's DoD checkbox says that module "imports no statlab.*" verbatim -- those two
+  instructions contradict for this one import. Kept the ArtifactError import (matches the
+  context table and the wrapping requirement stated four separate times in §3.3), and scoped
+  the A18 test to the boundary the rule is actually protecting: no statlab.persistence,
+  statlab.storage, or statlab.domains import (the backend's stateful modules), which is what
+  D26's "MCP server is stateless" is about. statlab.errors is a shared, dependency-free
+  taxonomy already imported by both processes elsewhere; it is not backend state.
+
+  Judgement call: create_artifact's minted id is independent of the ref used to build the
+  artifact's file path -- the caller must choose the ref/filename before knowing the row's own
+  id (which create_artifact mints internally). This is fine for chunk 06 (tests always write
+  the file first, using a locally chosen ref, then create the row), but the mismatch is worth
+  chunk 07's attention: see report item 7.
+
+  945 new tests (39 layout, 38 storage, 12 fork, 20 prune, 45 tool_artifacts, less overlaps),
+  total 955 (954 passed + 1 skipped -- F9, by spec, since nlink already proves the no-copy
+  claim without writing 200 MB). 100% line+branch coverage on all three new modules and
+  project-wide. mypy --strict clean on 50 source files (up from 42). ruff clean.
 ---
 
 # Chunk 06 — Artifact store: layout, registry, forks, pruning
@@ -66,7 +105,7 @@ that already knows how to read a frame beats a second parquet reader in another 
 | create | `backend/statlab/storage.py` |
 | create | `mcp_server/statlab_tools/artifacts.py` |
 | **modify** | `backend/statlab/persistence/models.py` — `ArtifactRow` |
-| **modify** | `backend/statlab/persistence/repository.py` — artifacts repository |
+| ~~modify~~ | ~~`persistence/repository.py`~~ — **corrected (§7.3)**: the artifacts repository belongs in `storage.py`, per `PLAN.md` §3.2 |
 | **modify** | `backend/statlab/persistence/migrations/001_initial.sql` — `artifacts.pruned_at` |
 | create | `tests/test_layout.py` |
 | create | `tests/test_storage.py` |
@@ -465,3 +504,148 @@ refcounting system.
    use — in particular whether returning `tuple[int, int]` from `save_dataframe` is what a tool
    needs to build an `ArtifactMeta`, or whether it should return the `ArtifactMeta` itself and take
    the label.
+
+---
+
+## 7. Addendum — boundary, ref identity, and the signature item 7 asked about
+
+**Status: gated. Chunk 07 is blocked until this passes.**
+
+Three of these come from the implementation report. Two are my spec errors; the third is a latent
+corruption my spec made unavoidable. The fourth adopts the report's own recommendation.
+
+### 7.1 The `statlab.errors` import is a real boundary violation, not a spec ambiguity
+
+My §1 table said to wrap IO failures in `ArtifactError`; my §5 DoD said the module imports no
+`statlab.*`. The report correctly identified the contradiction, but resolved it the wrong way —
+keeping the import and narrowing the test.
+
+The codebase already settled this, in the file next door. `ToolSettingsError`'s docstring, written in
+chunk 01:
+
+> Deliberately NOT `statlab.errors.ConfigError`: importing the backend package here would couple two
+> processes that must stay independently deployable (D13).
+
+So define `ToolArtifactError(Exception)` in `mcp_server/statlab_tools/artifacts.py`, mirroring that
+precedent, and drop the `statlab.errors` import. Six lines across a process boundary is cheaper than
+coupling — the same trade `config.py`'s `ponytail` comment already made for `Settings`.
+
+`backend/statlab/storage.py` keeps raising `ArtifactError` for fork and prune failures. Two classes,
+because they are two failure surfaces in two processes: the tool-side error becomes a `ToolFailure`
+envelope, the backend-side error propagates to the engine.
+
+**This slipped through because nothing was watching.** The existing boundary tests cover only
+`contracts/`. Add the two missing ones, in both directions:
+
+- No module under `mcp_server/` imports `statlab.*`.
+- No module under `backend/` imports `statlab_tools.*`.
+
+Source-scan style, same as `test_contracts_imports_only_pydantic_and_stdlib`. Restore A18 to the
+strict form; do not narrow it.
+
+### 7.2 `create_artifact` must take the ref, not mint one
+
+The report flagged this as "convention, not type-enforced". It is worse than that — I reproduced the
+divergence:
+
+```
+ref used for the filename : a_6ebb776d5c00e261
+id minted for the row     : a_61df42416c2c0d1c
+row.id == path stem       : False
+```
+
+The row's own id points at a file that does not exist, while `meta.ref` points at the real one. So
+`get_artifact(conn, ref)` for the ref a tool returned finds nothing, and the row that does exist
+references a path it does not own. Every registry lookup after that is wrong.
+
+My spec caused it: `create_artifact(conn, *, run_id, kind, path, meta, produced_by)` has no `ref`
+parameter, so minting was the only thing left to do.
+
+**An artifact ref is born exactly once, in the process that writes the file.** That is the MCP server
+— but `new_id` lives in `statlab.persistence.ids`, which the tool side must not import (§7.1). So:
+
+```python
+# contracts/statlab_contracts/artifacts.py
+def new_artifact_ref() -> ArtifactRef:
+    """Mint a fresh artifact ref. Lives here, beside ARTIFACT_ID_PATTERN and parse_artifact_ref,
+    because both processes mint refs and this is the only package both may import. `secrets`
+    is stdlib, so the contracts boundary holds."""
+    return ArtifactRef(f"a_{secrets.token_hex(8)}")
+```
+
+Verified: `secrets.token_hex(8)` satisfies `ARTIFACT_ID_PATTERN` (`^a_[0-9a-f]{16}\Z`).
+
+`statlab.persistence.ids.new_id` keeps the other thirteen prefixes — those name backend-only
+entities the tool side never creates. Delete `"a"` from its prefix constant so there is one way to
+mint an artifact ref, and add a test asserting `"a"` is absent.
+
+Then `create_artifact(conn, *, ref: ArtifactRef, run_id, kind, path, meta, produced_by)`.
+
+**Required invariant test, derived not asserted by convention:**
+`row.id == Path(row.path).stem` and `ArtifactMeta.model_validate_json(row.meta_json).ref == row.id`.
+Also add a guard in `create_artifact` raising `PersistenceError` when `meta.ref != ref` — the two
+arrive from the same caller and disagreeing means the caller is confused.
+
+### 7.3 My files table was wrong; your call was right
+
+The §2 table said modify `repository.py`; §3.2's code block put the artifacts functions in
+`storage.py`. You followed §3.2. That is correct — `PLAN.md` §3.2 assigns `storage.py` the
+"project/run folders, artifact registry" role explicitly, and the architecture table outranks my
+file list. §2 is now corrected. No code change.
+
+### 7.4 `save_*` returns `ArtifactMeta` — adopting your item 7 answer
+
+Your evidence decides it: thirty-plus call sites in tests each building
+`ArtifactMeta(ref=..., kind=..., rows=result[0], cols=result[1])` immediately after the save, with
+eighty-five tools coming. That is assembly the caller should not repeat, and every repetition is a
+chance for `kind` to disagree with the function that wrote the file.
+
+```python
+def save_dataframe(path: Path, frame: pd.DataFrame, *, ref: ArtifactRef,
+                   kind: ArtifactKind = "dataframe", label: str) -> ArtifactMeta: ...
+def save_model(path: Path, obj: object, *, ref: ArtifactRef,
+               kind: ArtifactKind, label: str) -> ArtifactMeta: ...
+def save_plot(path: Path, figure: Figure, *, ref: ArtifactRef, label: str) -> ArtifactMeta: ...
+def save_json(path: Path, payload: JsonValue, *, ref: ArtifactRef,
+              kind: ArtifactKind, label: str) -> ArtifactMeta: ...
+def save_text(path: Path, text: str, *, ref: ArtifactRef, label: str) -> ArtifactMeta: ...
+```
+
+`kind` stays explicit where one writer serves several kinds — `dataframe` and `predictions` are both
+parquet, `model`/`transformer`/`inferential_fit` are all joblib — because the tool knows which it
+produced and guessing from the extension would be a lie. `save_plot` and `save_text` have one kind
+each and hardcode it.
+
+`rows`/`cols` are populated only by `save_dataframe`; the others leave them `None`.
+
+**`path` stays a parameter** rather than being derived from `RunPaths`, because not every written
+file lives in `artifacts/` — §10.1 puts report plots under `report/plots/`. Instead, add the guard
+where both values are present: `save_*` raises `ToolArtifactError` unless `path.stem == ref`. Same
+shape as §7.2's guard and as the prune status check — one check where the two facts meet, rather than
+trust spread across every call site.
+
+The `load_*` functions are unchanged.
+
+### 7.5 Definition of Done for the addendum
+
+- [ ] `make test` green; expect roughly +25 net after the call-site churn.
+- [ ] Coverage stays 100 % line and branch.
+- [ ] `make typecheck`, `make lint` clean, no new suppressions.
+- [ ] `grep -rn 'statlab\.' mcp_server/` returns nothing; `grep -rn 'statlab_tools' backend/`
+      returns nothing. Both directions have a test.
+- [ ] A18 is back to the strict form.
+- [ ] `new_id` no longer accepts `"a"`, with a test.
+- [ ] `row.id == Path(row.path).stem` holds, tested.
+- [ ] `create_artifact` rejects `meta.ref != ref`.
+- [ ] Every `save_*` returns `ArtifactMeta` and rejects a `path`/`ref` mismatch.
+- [ ] No test builds an `ArtifactMeta` by hand immediately after a `save_*` call — if any still
+      does, the signature change did not land where it mattered.
+
+### Report back with
+
+1. Test count, coverage, mypy file count, ruff.
+2. The two boundary greps, verbatim.
+3. Whether removing `"a"` from `new_id` broke anything unexpected.
+4. How many test call sites the `save_*` change simplified, and whether any needed an
+   `ArtifactMeta` built by hand afterwards anyway — that would mean the signature is still wrong.
+5. Anything in §7 that was wrong or impossible.

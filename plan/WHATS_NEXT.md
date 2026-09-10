@@ -11,17 +11,17 @@ duplicate them here.
 
 ## State
 
-**5 of 40 chunks complete.** Phase A's schema work is done; `06` is next.
+**6 of 40 chunks complete.** Phase A done; `07` is next (MCP server foundation).
 
-| Verified at commit `4e31b96` | |
+| Verified at commit (post-chunk-06, uncommitted at write time) | |
 |---|---|
-| Tests | 785, all passing |
-| Coverage | 100 % line **and** branch (1048 stmts, 248 branches, 0 missed) |
-| mypy | `--strict` clean on 42 source files, `init_typed = true` |
+| Tests | 955 (954 passed, 1 skipped -- F9, by spec) |
+| Coverage | 100 % line **and** branch (1293 stmts, 272 branches, 0 missed) |
+| mypy | `--strict` clean on 50 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero in production code; zero `pragma: no cover`; zero `Any`. 15 `# type: ignore` in tests, all legitimate — see below |
-| Git | local `master`, never pushed, tree clean |
+| Suppressions | zero in production code; zero `pragma: no cover`; zero `Any`. `# type: ignore` in tests only, all in the three permitted shapes |
+| Git | local `master`, never pushed, tree clean before this chunk's edits |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -44,30 +44,32 @@ the assertion.
 
 ---
 
-## Next: chunk 06, artifact store
+## Chunk 06, complete: artifact store
 
-Scope is in `00_index.md`. Unblocked, and **smaller than originally specced** — chunk 05's
-`runs.test_scored_at` compare-and-set supersedes the planned `locked` flag, so the registry needs no
-lock of its own and no artifact-level lock column. See `PLAN.md` §10.2's note.
+Run-folder layout (`PLAN.md` §10.1), the artifacts registry (+`pruned_at`), hard-link fork
+copies (D11), prune-on-success (D24), and content IO (parquet/joblib/png/json/text) in
+`mcp_server/statlab_tools/artifacts.py` — the only module in the project that imports pandas.
 
-What it covers: run-folder layout (`PLAN.md` §10.1), parquet/joblib/png/json IO, the artifact
-registry, hard-link fork copies (D11), prune-on-success (D24).
+**The D11×D24 design question is closed, not just settled on paper.** P10/P11 confirmed both
+directions empirically: forking then pruning the child leaves the parent's file readable, and
+the reverse. No refcounting was added. All seven pandas 3.0 dtypes (`str`, `category`, `int64`,
+`float64`, `bool`, `datetime64[us]`, `Int64`) round-trip through parquet unchanged — measured,
+not assumed — so `save_dataframe`/`load_dataframe` carry no dtype-preservation logic.
 
-**First chunk to touch pandas.** The 3.0 facts are already verified and recorded in `00_index.md` —
-read them there rather than rediscovering. The two that will bite:
+**One spec inconsistency found and not silently resolved:** `06_artifact_store.md`'s own
+context table (§1) instructs wrapping IO failures in `ArtifactError` (`statlab.errors`) inside
+the pandas module, but its DoD (§5) says that module "imports no `statlab.*`" verbatim — those
+two lines contradict each other for this one import. Kept the `ArtifactError` import (the
+wrapping requirement appears four times in §3.3; the context table names the exact path), and
+narrowed the boundary test to what D26's "MCP server is stateless" is actually about: no
+`statlab.persistence`, `statlab.storage`, or `statlab.domains` import. `statlab.errors` is a
+shared, dependency-free taxonomy already crossing the boundary elsewhere, not backend state.
 
-- String columns have dtype `str`, **not** `object`. Any `dtype == object` check is wrong.
-- `filterwarnings = ["error"]` plus `Pandas4Warning` means a deprecated API is a hard test failure,
-  not a warning.
-
-**The D11×D24 design question is settled: pruning is per-run, with no refcounting.** Two
-independent reasons, both verified empirically before the spec was written. First, the sets do not
-intersect — hard-linked artifacts are node-*boundary* artifacts of a completed, halted parent, while
-pruned artifacts are within-node intermediates from the pruning run's own execution. Second, even if
-they did intersect, `unlink` removes a directory entry rather than an inode: after linking a parent
-artifact into a fork, unlinking either side leaves the other readable. A refcount would be a second
-bookkeeping system guarding something the filesystem already makes impossible. Tests P10 and P11
-pin both directions.
+Next: chunk 07 (MCP server foundation — Streamable HTTP app, bearer auth, the `@tool`
+decorator). `artifacts.py`'s function shapes are its first real consumer; see the chunk 06
+report's item 7 for the one open question worth resolving before or during 07: `create_artifact`
+mints its own id independent of the ref the caller used to build the file path, so a caller
+must pick that ref first and keep it consistent by convention rather than by the type system.
 
 ---
 
