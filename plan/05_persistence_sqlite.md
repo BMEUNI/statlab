@@ -31,7 +31,7 @@ Relevant existing surface:
 | `Settings.max_concurrent_runs` | same | `0` means unbounded (D17); not consumed here |
 | `ensure_writable` | same | `load_settings` already calls it on `db_path.parent` |
 | `StatlabError` | `backend/statlab/errors.py` | base for the new `PersistenceError` |
-| `NodeStatus` | `backend/statlab/domains/base.py` | **reuse, do not redefine** — see §3.5 |
+| `NodeStatus` | `backend/statlab/domains/base.py` | **derive the wider schema type from it** — see §3.5 |
 | `DataContract` | `contracts/statlab_contracts/contract.py` | stored in `contracts.json` |
 | `CandidateSpec` | `contracts/statlab_contracts/candidate.py` | its `spec_hash` is what §3.7 protects |
 
@@ -217,11 +217,41 @@ RunStatus = Literal["pending", "running", "awaiting_user", "paused", "failed",
 RunMode = Literal["guided", "autonomous"]
 ```
 
-**`NodeStatus` already exists** in `backend/statlab/domains/base.py` from chunk 02. Import it;
-do not define a second one. Verify its members equal `PLAN.md` §10.2's node set
-(`pending, running, awaiting_user, skipped, failed, completed`) and **report the comparison** — if
-they differ, stop and ask, because that is a real inconsistency between the spine and the schema
-rather than something to paper over.
+**`NodeStatus` (chunk 02) is deliberately narrower than the schema needs.** It is
+`Literal["completed", "skipped", "failed", "awaiting_user"]` — the *terminal outcome* a node hands
+back. `node_executions.status` is a *row lifecycle* and additionally needs `pending` and
+`running`, because `node.started` fires before any outcome exists. This was found during chunk 05
+review and `PLAN.md` §10.2 is now explicit about it.
+
+Do not widen `NodeStatus`, and do not restate six strings. Derive:
+
+```python
+PreTerminalStatus = Literal["pending", "running"]
+"""States a node_executions row occupies before the node stops. No NodeResult can carry these —
+a NodeResult only exists once the node has stopped, which is why its validators (skip_reason iff
+skipped, error iff failed) would be meaningless for them."""
+
+NodeExecutionStatus = PreTerminalStatus | NodeStatus
+"""A row's lifecycle state: pre-terminal states plus every terminal outcome NodeStatus defines.
+Derived, so adding a terminal outcome to NodeStatus flows into the schema vocabulary and §3.8's
+drift test catches the DDL that was not updated."""
+
+NODE_EXECUTION_STATUSES: Final[frozenset[str]] = frozenset(
+    get_args(PreTerminalStatus) + get_args(NodeStatus)
+)
+"""Flat member set, for the CHECK-constraint drift test. get_args on the union itself returns the
+two Literals rather than six strings, so the flattening is done once, here."""
+```
+
+Verified before specifying: this type-checks under `mypy --strict`, pydantic accepts every member
+and rejects non-members, and a `NodeStatus` value widens into `NodeExecutionStatus` without a cast
+— which the engine needs when it writes a `NodeResult.status` into a row.
+
+Required tests: `NODE_EXECUTION_STATUSES` has exactly 6 members; it is a strict superset of
+`get_args(NodeStatus)`; `pending` and `running` are **not** valid `NodeResult.status` values.
+
+Cancellation of a running node is not a seventh state — chunk 31 resolves live rows to `failed`
+with the cancellation as the error. Do not add one.
 
 Every status column carries a `CHECK (... IN (...))` constraint in the DDL. That duplicates the
 Literal in SQL text, which §3.8's drift test exists to police.
@@ -519,8 +549,6 @@ locking guarantees chunk 21 enforces on the client side.
 - [ ] `plan/00_index.md` chunk 05 row → `completed`.
 
 ### Stop and ask if
-
-- `NodeStatus` from chunk 02 does not match `PLAN.md` §10.2's node status set.
 - `BEGIN IMMEDIATE` cannot be asserted from Python without inspecting emitted SQL — I want to know
   what you could and could not observe rather than a test that pretends.
 - Any `PLAN.md` §10.2 column cannot be given a sensible type or constraint, which would mean the
@@ -531,7 +559,8 @@ locking guarantees chunk 21 enforces on the client side.
 ### Report back with
 
 1. Test count, coverage, mypy source-file count, ruff output.
-2. `NodeStatus` versus §10.2's node set — the actual comparison.
+2. Confirmation that `NodeExecutionStatus` derives from `NodeStatus` rather than restating it, and
+   that the three required tests in §3.5 exist.
 3. How you asserted `BEGIN IMMEDIATE`, and what was observable.
 4. Whether K2 (concurrent contract versioning) passed first time, and if not, what the transaction
    boundary bug was.

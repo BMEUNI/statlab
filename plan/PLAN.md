@@ -1370,8 +1370,21 @@ llm_calls(id, run_id, node_execution_id, signature, model, prompt_tokens,
 memory(id, project_id, key, value_json, source_run_id, ts)
 ```
 
-`status` enums: run ∈ {pending, running, awaiting_user, paused, failed, cancelled,
-completed}; node ∈ {pending, running, awaiting_user, skipped, failed, completed}.
+`status` enums: `runs.status` ∈ {pending, running, awaiting_user, paused, failed, cancelled,
+completed}; `node_executions.status` ∈ {pending, running, awaiting_user, skipped, failed,
+completed}.
+
+**Two node vocabularies, deliberately.** `node_executions.status` is a *row lifecycle* and needs
+`pending` and `running`, because `node.started` (§11.2) fires before any outcome exists.
+`NodeResult.status` (§4.3.1) is a *terminal outcome* and is the four-member subset
+{completed, skipped, failed, awaiting_user} — a `NodeResult` cannot carry `running`, since it only
+exists once the node has stopped, and its validators (`skip_reason` iff skipped, `error` iff
+failed) have no meaning for a live row. The schema type is derived from the outcome type
+(`NodeExecutionStatus = PreTerminalStatus | NodeStatus`), not restated, so the two cannot drift.
+
+Cancellation of a *running* node is deliberately not a seventh state: chunk 31 resolves a
+cancelled run's live rows to `failed` with the cancellation as the error, which needs no new
+vocabulary.
 
 ---
 
