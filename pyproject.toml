@@ -82,7 +82,7 @@ no_implicit_reexport = true
 files = ["backend", "mcp_server", "contracts", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "statsmodels.*", "sklearn.*", "matplotlib.*", "joblib.*", "mcp.*"]
+module = ["litellm.*", "statsmodels.*", "sklearn.*", "matplotlib.*", "joblib.*", "mcp.*", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
