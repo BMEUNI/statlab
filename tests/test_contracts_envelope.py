@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import typing
 from pathlib import Path
@@ -270,13 +271,20 @@ def test_tool_result_adapter_unknown_field_on_failure_rejected() -> None:
 
 
 def test_contracts_imports_only_pydantic_and_stdlib() -> None:
-    """E24, E25: statlab_contracts must stay dependency-free so both processes can import it."""
+    """E24, E25: statlab_contracts must stay dependency-free so both processes can import it.
+
+    Extended in chunk 03 to also cover `vocabulary.py` and `contract.py` -- the contract
+    schema must not import pandas or anything else beyond stdlib and pydantic, since it
+    crosses the same process boundary `envelope.py` does.
+    """
     import statlab_contracts.artifacts as artifacts_mod
+    import statlab_contracts.contract as contract_mod
     import statlab_contracts.envelope as envelope_mod
+    import statlab_contracts.vocabulary as vocabulary_mod
 
     stdlib_paths = {p for p in sys.path if "site-packages" not in p}
 
-    for mod in (artifacts_mod, envelope_mod):
+    for mod in (artifacts_mod, envelope_mod, vocabulary_mod, contract_mod):
         for name, value in vars(mod).items():
             if name.startswith("__"):
                 continue
@@ -307,3 +315,24 @@ def test_contracts_imports_only_pydantic_and_stdlib() -> None:
                 f"{name} in {mod.__name__} resolves to third-party module {module_name!r}, "
                 f"only pydantic is permitted"
             )
+
+
+def test_contracts_contract_does_not_import_pandas() -> None:
+    """Chunk 03: explicit, direct check that importing the contract schema never pulls
+    pandas into `sys.modules`. Subprocess-isolated (X10's pattern) because the pytest session
+    itself may already have pandas imported elsewhere, which would contaminate an in-process
+    check.
+    """
+    script = (
+        "import sys\n"
+        "import statlab_contracts.contract\n"
+        "import statlab_contracts.vocabulary\n"
+        "print('pandas' in sys.modules)\n"
+    )
+    result = subprocess.run(  # noqa: S603  # hardcoded literal script authored in this test
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False"

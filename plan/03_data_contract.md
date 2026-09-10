@@ -1,8 +1,65 @@
 ---
-status: untouched
+status: completed
 dependencies: [01, 02]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-09
+implementation_notes: |
+  Implemented as specified: `contracts/statlab_contracts/vocabulary.py` (9 closed vocabularies,
+  `TASK_FOR_TARGET_TYPE` and `METRICS_FOR_TASK` derived via `get_args`, never hand-listed) and
+  `contracts/statlab_contracts/contract.py` (10 models: DatasetOptions, TargetSpec,
+  FeatureRules, InferenceGoal, Objective, SplitRules, MissingPolicy, PreprocessingRules, Tuning,
+  ModellingRules, Constraints, DataContract — 12 classes total, matching the "10 models" count
+  when Tuning and InferenceGoal are counted as the two small helper models nested inside
+  ModellingRules/Objective rather than as top-level contract sections).
+
+  Deviation from PLAN.md §3.2 (placement): the contract lives in `contracts/statlab_contracts/`,
+  not `backend/statlab/`, because it crosses the process boundary exactly as chunk 02's
+  `ToolResult` does — chunk 08's `validate_contract(df, contract)` tool receives it, chunk 27's
+  intake node sends it. Recorded per the chunk's own instruction; PLAN.md §3.2's repo layout was
+  not otherwise touched (it already showed `contracts/` as a directory, chunk 02 established the
+  precedent).
+
+  `MissingPolicy` restructure: PLAN.md §4.1's original illustrative JSON mixed a `default` key,
+  per-column keys and a `drop_rows_above` key in one dict, requiring the implicit convention
+  "any key that is not one of two reserved names is a column name". Replaced with three explicit
+  fields (`default`, `per_column`, `drop_rows_above`) carrying the same information with no
+  convention to remember. PLAN.md §4.1 updated to match (the DoD's own housekeeping item).
+
+  All 28 rules (V1-V14, V14 enforced by field type `dict[str, ImputationStrategy]` rather than a
+  custom validator; X1-X14) implemented as `model_validator(mode="after")` pure checks — no
+  validator mutates or replaces `self`, per the frozen-model gotcha the assignment flagged.
+  `_resolved_task` is the sole place "which task is this?" is answered; X2, X3, X10, X11 all
+  call it. Verified pydantic's `model_validator(mode="after")` methods run in declaration order
+  and the first raised `ValueError` short-circuits the rest for that model — this made the D6
+  "one deviation, one error" guarantee hold even when a deviation could theoretically also
+  trigger a later-declared rule (e.g. narrowing `features.include` to exclude an inference
+  predictor also removes it from `features.exclude` in the same edit, which could have doubled
+  as an X14 violation too, but X13 alone fires because it is declared first).
+
+  Validator-ordering note beyond the two gotchas the assignment named: field validation
+  (`min_length`, `ge`, `gt`, the `Literal` checks) always completes before any `mode="after"`
+  model validator runs, confirmed empirically by relying on it throughout — e.g. `TargetSpec`'s
+  V1/V2/V3 can safely assume `self.type` is already a valid `TargetType | None` and never a
+  malformed string, so no defensive re-checking of field-level constraints was needed inside any
+  cross-field validator.
+
+  No rule was found to be unsatisfiable, and `full.json` (churn/binary-classification domain,
+  matching PLAN.md's own illustration) satisfies all 28 rules simultaneously without needing any
+  rule to be loosened. No STOP condition was triggered.
+
+  Test suite: 180 new tests (vs. ~125 targeted) — 10 vocabulary (B1-B10), 102 model/defaults/
+  bounds/enum tests, 67 consistency tests (V1-V14 and X1-X14 each pass+fail, several rules given
+  an extra branch-coverage test beyond the minimum pass+fail pair to reach 100% branch coverage
+  on `contract.py`), plus 1 additional boundary-isolation test (subprocess-isolated no-pandas
+  check). Total 428 (248 existing + 180 new), 100% line+branch coverage project-wide, mypy
+  --strict clean on 26 source files, ruff clean.
+
+  Forward note for chunk 04: `vocabulary.py`'s `CategoricalEncoding`, `ImputationStrategy`,
+  `ScalingMethod`, `OutlierPolicy`, `ColumnRole` and `SplitStrategy` are all directly reusable by
+  `CandidateSpec`/`FeatureSpec`/`PreprocessingSpec` — a candidate's per-field choice is exactly
+  one value from the same closed vocabulary the contract uses for its default. None of the nine
+  vocabularies needed widening to support a candidate-level override; the contract states a
+  *default*, a candidate states a *specific choice* from the same set, which is why the schema
+  was already sufficient without new Literals.
 ---
 
 # Chunk 03 — The data contract schema

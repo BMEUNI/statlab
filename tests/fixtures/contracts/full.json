@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "dataset": {
+    "delimiter": ",",
+    "encoding": "utf-8",
+    "decimal": ".",
+    "na_values": ["", "NA", "N/A", "-999"],
+    "header_row": 0
+  },
+  "target": {
+    "column": "churned",
+    "type": "binary",
+    "positive_class": 1,
+    "class_order": null
+  },
+  "features": {
+    "include": ["age", "plan", "signup_date", "satisfaction"],
+    "exclude": ["notes_free_text"],
+    "id_columns": ["customer_id"],
+    "roles": {
+      "age": "numeric",
+      "plan": "categorical",
+      "signup_date": "datetime",
+      "satisfaction": "ordinal"
+    },
+    "ordinal_levels": {
+      "satisfaction": ["low", "medium", "high"]
+    }
+  },
+  "objective": {
+    "task": "classification",
+    "primary_metric": "roc_auc",
+    "secondary_metrics": ["f1", "precision", "recall", "brier"],
+    "success_threshold": 0.8,
+    "inference_goals": [
+      {
+        "question": "Does plan tier affect churn?",
+        "predictors": ["plan"],
+        "alpha": 0.05
+      }
+    ]
+  },
+  "split": {
+    "strategy": "stratified",
+    "test_size": 0.2,
+    "valid_size": 0.2,
+    "time_column": null,
+    "group_column": null,
+    "seed": 42
+  },
+  "preprocessing": {
+    "missing": {
+      "default": "median",
+      "per_column": {
+        "plan": "most_frequent"
+      },
+      "drop_rows_above": 0.6
+    },
+    "outliers": "clip_iqr",
+    "scaling": "standard",
+    "categorical_encoding": "onehot",
+    "max_cardinality": 30,
+    "drop_constant": true,
+    "drop_duplicates": true
+  },
+  "modelling": {
+    "candidates": ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"],
+    "inferential_model": "logit",
+    "tuning": {
+      "method": "grid",
+      "cv_folds": 5,
+      "max_fit_seconds": 300
+    },
+    "class_weight": "balanced",
+    "calibrate": true
+  },
+  "constraints": {
+    "max_runtime_seconds": 1800,
+    "max_retune_loops": 2,
+    "max_candidates": 8,
+    "max_search_waves": 2,
+    "max_total_fit_seconds": 1200,
+    "random_seed": 42,
+    "interpretability_required": false
+  },
+  "notes": "Free-text domain context the agent should respect."
+}

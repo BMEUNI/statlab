@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactRef
+from statlab_contracts.contract import DataContract
 
 _STATLAB_VARS = (
     "STATLAB_MCP_TOKEN",
@@ -71,3 +74,35 @@ def ref() -> ArtifactRef:
     `NodeResult` construction site, and every chunk from 06 onward constructs artifacts.
     """
     return ArtifactRef("a_0123456789abcdef")
+
+
+_CONTRACT_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "contracts"
+
+
+@pytest.fixture
+def minimal_contract() -> DataContract:
+    """The D8 minimum: target.column and nothing else. Loaded from disk so the same JSON
+    exercises the real parse path and doubles as an example file."""
+    text = (_CONTRACT_FIXTURES_DIR / "minimal.json").read_text(encoding="utf-8")
+    return DataContract.model_validate_json(text)
+
+
+@pytest.fixture
+def full_contract() -> DataContract:
+    """Every field populated with a mutually consistent set of values, satisfying every rule
+    in chunk 03 §3.4-3.5. Used as the base for cross-group tests: copy the underlying dict with
+    one field changed via `model_validate(full_dict | {...})` so a failure names exactly one
+    deviation."""
+    text = (_CONTRACT_FIXTURES_DIR / "full.json").read_text(encoding="utf-8")
+    return DataContract.model_validate_json(text)
+
+
+@pytest.fixture
+def full_contract_dict() -> dict[str, JsonValue]:
+    """The raw parsed `full.json`, for tests that construct a one-field deviation via
+    `DataContract.model_validate({**full_contract_dict, ...})`. Kept separate from
+    `full_contract` (a `DataContract` instance) because negative tests need a plain dict to
+    mutate, not a frozen model."""
+    text = (_CONTRACT_FIXTURES_DIR / "full.json").read_text(encoding="utf-8")
+    result: dict[str, JsonValue] = json.loads(text)
+    return result

@@ -371,9 +371,9 @@ writing, but it obeys.
     "time_column": null, "group_column": null, "seed": 42
   },
   "preprocessing": {
-    "missing_policy": { "default": "median", "plan": "most_frequent",
-                        "drop_rows_above": 0.6 },
-    "outlier_policy": "clip_iqr",  // none | clip_iqr | winsorize | flag_only
+    "missing": { "default": "median", "per_column": { "plan": "most_frequent" },
+                 "drop_rows_above": 0.6 },
+    "outliers": "clip_iqr",        // none | clip_iqr | winsorize | flag_only
     "scaling": "standard",         // applies to the predictive matrix only
     "categorical_encoding": "onehot",
     "max_cardinality": 30,         // above this → target/frequency encoding
@@ -399,6 +399,15 @@ writing, but it obeys.
 node 1 warns on any column that is near-unique, constant, or correlates with the target
 above a threshold (a likely leak) — regardless of what the contract says. The agent reports;
 the user decides.
+
+**`preprocessing.missing` shape (chunk 03).** The illustrative JSON above uses three explicit
+fields — `default`, `per_column`, `drop_rows_above` — rather than one dict mixing a `default`
+key, per-column keys and a `drop_rows_above` key in the same namespace. That flatter shape
+requires the implicit convention "any key that is not one of two reserved names is a column
+name", which chunk 03 rejects for the same reason the plan rejects other encoded-string and
+implicit-convention shapes elsewhere: three explicit fields carry the same information with no
+convention to remember. `outlier_policy` is likewise named `outliers` on `PreprocessingRules`,
+for brevity and symmetry with the other three preprocessing sub-fields.
 
 **Contract → tool parameter precedence.** Several contract fields duplicate `load_csv` params
 (`delimiter`, `encoding`, `decimal`, `na_values`, `header_row`). The rule: **node 1 copies the
