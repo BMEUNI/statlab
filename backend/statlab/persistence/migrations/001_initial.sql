@@ -19,6 +19,10 @@
 --   §6.3 `runs.test_scored_at` added: the durable half of D26's test-set-scored-exactly-once
 --        guarantee (the other half, "unreadable before node 12", is already `champion_model_id
 --        IS NULL` and needed no new column).
+--   chunk 06: `artifacts.pruned_at TEXT` (nullable) added. Pruning sets it rather than deleting
+--        the row: deleting would break `tool_calls`' reference to the artifact id, and leaving
+--        a row whose `path` points at a missing file with no explanation makes deliberate
+--        pruning indistinguishable from data loss. Same reasoning as `test_scored_at`.
 
 CREATE TABLE projects (
     id         TEXT PRIMARY KEY NOT NULL,
@@ -156,7 +160,8 @@ CREATE TABLE artifacts (
     path        TEXT NOT NULL,
     meta_json   TEXT NOT NULL,
     produced_by TEXT NOT NULL,
-    ts          TEXT NOT NULL
+    ts          TEXT NOT NULL,
+    pruned_at   TEXT
 );
 
 CREATE INDEX idx_artifacts_run_id ON artifacts(run_id);

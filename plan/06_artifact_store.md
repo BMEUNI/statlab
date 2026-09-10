@@ -1,15 +1,15 @@
 ---
-status: in_progress
+status: completed
 dependencies: [01, 02, 05]
 completion_date: 2026-09-10
 implementation_notes: |
-  Implemented as specified. `layout.py` (2 frozen dataclasses, stdlib+statlab_contracts only),
-  `storage.py` (layout creation, artifacts repository, fork, prune -- no pandas, no
-  statlab_tools), `mcp_server/statlab_tools/artifacts.py` (the one pandas module).
-  `ArtifactRow` added to persistence/models.py; `artifacts.pruned_at TEXT` added to
-  001_initial.sql in place (no 002 migration, same archaeology argument as chunk 05 §6.4).
-  Exactly one existing assertion broke (test_db_schema.py's artifacts column list), as
-  predicted.
+  Implemented as specified, then corrected against the §7 addendum (four gated items, all
+  resolved). `layout.py` (2 frozen dataclasses, stdlib+statlab_contracts only), `storage.py`
+  (layout creation, artifacts repository, fork, prune -- no pandas, no statlab_tools),
+  `mcp_server/statlab_tools/artifacts.py` (the one pandas module). `ArtifactRow` added to
+  persistence/models.py; `artifacts.pruned_at TEXT` added to 001_initial.sql in place (no 002
+  migration, same archaeology argument as chunk 05 §6.4). Exactly one existing assertion broke
+  (test_db_schema.py's artifacts column list), as predicted.
 
   All seven dtypes (str, category, int64, float64, bool, datetime64[us], Int64) round-trip
   through parquet unchanged, measured. save_dataframe/load_dataframe needed zero dtype
@@ -22,26 +22,46 @@ implementation_notes: |
 
   pandas confirmed in exactly one module by grep across all three packages.
 
-  One spec inconsistency found, not silently resolved: §1's context table instructs wrapping
-  IO failures in ArtifactError (statlab.errors) inside mcp_server/statlab_tools/artifacts.py,
-  but §5's DoD checkbox says that module "imports no statlab.*" verbatim -- those two
-  instructions contradict for this one import. Kept the ArtifactError import (matches the
-  context table and the wrapping requirement stated four separate times in §3.3), and scoped
-  the A18 test to the boundary the rule is actually protecting: no statlab.persistence,
-  statlab.storage, or statlab.domains import (the backend's stateful modules), which is what
-  D26's "MCP server is stateless" is about. statlab.errors is a shared, dependency-free
-  taxonomy already imported by both processes elsewhere; it is not backend state.
+  §7.1: the statlab.errors import inside mcp_server/statlab_tools/artifacts.py was a real D13
+  boundary violation, not a spec ambiguity -- the first implementation kept the import and
+  narrowed the A18 boundary test to hide it, which was wrong. Fixed: defined
+  ToolArtifactError(Exception) in artifacts.py, mirroring ToolSettingsError's chunk-01
+  precedent exactly (own docstring names D13). storage.py keeps raising the backend's
+  ArtifactError for fork/prune -- two error classes for two failure surfaces in two processes.
+  A18 restored to the strict form (no statlab.* at all, not narrowed to
+  persistence/storage/domains). Added the missing reverse-direction test
+  (test_boundary_no_module_under_backend_imports_statlab_tools) and the missing forward one
+  (test_boundary_no_module_under_mcp_server_imports_statlab) -- the existing boundary tests
+  only ever covered contracts/, so this direction had no test watching it at all.
 
-  Judgement call: create_artifact's minted id is independent of the ref used to build the
-  artifact's file path -- the caller must choose the ref/filename before knowing the row's own
-  id (which create_artifact mints internally). This is fine for chunk 06 (tests always write
-  the file first, using a locally chosen ref, then create the row), but the mismatch is worth
-  chunk 07's attention: see report item 7.
+  §7.2: create_artifact minting its own id independently of the ref used to build the file
+  path was reproducible corruption, not a style risk -- row.id and the file's actual name
+  diverged, so get_artifact(ref) for the ref a tool returned found nothing. Fixed: added
+  new_artifact_ref() to statlab_contracts.artifacts (secrets.token_hex(8), same shape as
+  ARTIFACT_ID_PATTERN) as the one minter, callable from both processes since the tool side
+  writes the file and must not import statlab.persistence.ids. new_id("a") now raises
+  PersistenceError naming new_artifact_ref as the replacement; "a" was already absent from
+  PREFIXES so no other caller was affected -- confirmed by grep, zero other call sites used
+  new_id("a"). create_artifact now takes ref as a required parameter, uses it as the row id
+  directly, and raises PersistenceError if meta.ref != ref. Invariant tests added:
+  row.id == Path(row.path).stem, and ArtifactMeta.model_validate_json(row.meta_json).ref ==
+  row.id.
 
-  945 new tests (39 layout, 38 storage, 12 fork, 20 prune, 45 tool_artifacts, less overlaps),
-  total 955 (954 passed + 1 skipped -- F9, by spec, since nlink already proves the no-copy
-  claim without writing 200 MB). 100% line+branch coverage on all three new modules and
-  project-wide. mypy --strict clean on 50 source files (up from 42). ruff clean.
+  §7.3: no code change -- PLAN.md §3.2 assigns storage.py the artifact registry role
+  explicitly, confirmed correct against the architecture table.
+
+  §7.4: save_dataframe/save_model/save_plot/save_json/save_text now take ref (and kind, where
+  one writer serves several kinds: dataframe/predictions share parquet, model/transformer/
+  inferential_fit share joblib) and return ArtifactMeta directly instead of a bare shape
+  tuple / None. Each raises ToolArtifactError if path.stem != ref -- one guard where the two
+  facts meet, since path stays a parameter (report plots live under report/plots/, not
+  artifacts/, so it cannot be derived from RunPaths alone). Zero tests build an ArtifactMeta by
+  hand after a save_* call now (confirmed by grep on test_tool_artifacts.py); 36 call sites in
+  that file alone stopped needing the manual construction.
+
+  971 total tests (970 passed + 1 skipped -- F9, by spec, since nlink already proves the
+  no-copy claim without writing 200 MB), up from 955 before the addendum. 100% line+branch
+  coverage project-wide. mypy --strict clean on 50 source files. ruff clean.
 ---
 
 # Chunk 06 — Artifact store: layout, registry, forks, pruning

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from typing import Final, Literal, NewType
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -49,6 +50,17 @@ def parse_artifact_ref(value: str) -> ArtifactRef:
     if not ARTIFACT_ID_PATTERN.match(value):
         raise ValueError(f"{value!r} is not a valid artifact ref (expected a_<16 hex chars>)")
     return ArtifactRef(value)
+
+
+def new_artifact_ref() -> ArtifactRef:
+    """Mint a fresh artifact ref. Lives here, beside `ARTIFACT_ID_PATTERN` and
+    `parse_artifact_ref`, because both processes mint refs and this is the only package both
+    may import. `secrets` is stdlib, so the contracts boundary holds.
+
+    An artifact ref is born exactly once, in the process that writes the file -- usually the
+    MCP server, which must not import `statlab.persistence.ids.new_id`.
+    """
+    return ArtifactRef(f"a_{secrets.token_hex(8)}")
 
 
 class ArtifactMeta(BaseModel):

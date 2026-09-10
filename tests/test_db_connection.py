@@ -7,6 +7,7 @@ vacuously.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import time
@@ -411,3 +412,34 @@ def test_mcp_server_package_source_never_mentions_persistence() -> None:
     for path in mcp_server_root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert "statlab.persistence" not in text, f"{path} mentions statlab.persistence"
+
+
+def test_boundary_no_module_under_mcp_server_imports_statlab() -> None:
+    """Chunk 06 §7.1: this net had a hole -- the boundary tests only ever covered
+    `contracts/`, so `mcp_server/statlab_tools/artifacts.py` importing `statlab.errors` slipped
+    through review as a "spec ambiguity" instead of the D13 violation it was. Regex source-scan
+    every `.py` file under `mcp_server/` for `import statlab.` / `from statlab.` (the backend
+    package, prefix-matched so `statlab_contracts`/`statlab_tools` do not false-positive), so a
+    violation inside any function body is caught too, not just module-level names. Mirrors the
+    DoD's own `grep -rn 'statlab\\.' mcp_server/`."""
+    pattern = re.compile(r"^\s*(?:import|from)\s+statlab\.", re.MULTILINE)
+    mcp_server_root = Path(__file__).resolve().parent.parent / "mcp_server"
+    for path in mcp_server_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        match = pattern.search(text)
+        assert match is None, f"{path} imports across the boundary: {match}"
+
+
+def test_boundary_no_module_under_backend_imports_statlab_tools() -> None:
+    """The reverse direction of §7.1's rule: `backend/` must never import `statlab_tools.*`
+    either. `storage.py`'s docstring already states this; this test enforces it project-wide,
+    not just for that one file. Mirrors the DoD's own `grep -rn 'statlab_tools' backend/`, but
+    matched against actual `import`/`from` statements rather than a bare substring -- a
+    docstring explaining *why* a module does not import something (as `config.py`'s ponytail
+    comment does) legitimately contains the string without violating the boundary."""
+    pattern = re.compile(r"^\s*(?:import|from)\s+statlab_tools\b", re.MULTILINE)
+    backend_root = Path(__file__).resolve().parent.parent / "backend"
+    for path in backend_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        match = pattern.search(text)
+        assert match is None, f"{path} imports across the boundary: {match}"

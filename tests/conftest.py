@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from pydantic import JsonValue
 from statlab.persistence.db import connect, migrate
@@ -21,6 +22,7 @@ from statlab_contracts.candidate import (
     PreprocessingSpec,
 )
 from statlab_contracts.contract import DataContract
+from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import ClassWeight, ParamValue, VariationDimension
 
 _STATLAB_VARS = (
@@ -218,3 +220,34 @@ def migrated_db(db_path: Path) -> Iterator[sqlite3.Connection]:
 def project(migrated_db: sqlite3.Connection) -> ProjectRow:
     """A persisted project, for tests needing a valid parent FK."""
     return create_project(migrated_db, slug="test-project", name="Test Project")
+
+
+# --- Artifact store (chunk 06) ------------------------------------------------------------------
+
+
+@pytest.fixture
+def run_paths(tmp_path: Path) -> RunPaths:
+    """`RunPaths` rooted in `tmp_path`, layout already created. Never the real `data_dir`."""
+    from statlab.storage import ensure_run_layout
+
+    paths = RunPaths(data_dir=tmp_path / "data", slug="proj", run_id="r_test0000000000")
+    ensure_run_layout(paths)
+    return paths
+
+
+@pytest.fixture
+def sample_frame() -> pd.DataFrame:
+    """A frame covering every dtype the store must round-trip: `str`, `category`, `int64`,
+    `float64`, `bool`, `datetime64[us]`, `Int64` (nullable, with a null). If a dtype is missing
+    here, no test proves it survives storage."""
+    return pd.DataFrame(
+        {
+            "s": pd.array(["a", "b", "c"], dtype="str"),
+            "c": pd.Categorical(["x", "y", "x"]),
+            "i": pd.array([1, 2, 3], dtype="int64"),
+            "f": pd.array([1.5, 2.5, 3.5], dtype="float64"),
+            "b": pd.array([True, False, True], dtype="bool"),
+            "dt": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]),
+            "ni": pd.array([1, 2, pd.NA], dtype="Int64"),
+        }
+    )

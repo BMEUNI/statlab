@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta
 from statlab_contracts.contract import DataContract
 
 from statlab.domains.base import NodeStatus
@@ -132,3 +133,40 @@ class RunRow(BaseModel):
     `claim_test_scoring` wins the claim; set to the claim timestamp thereafter, never cleared.
     The other half of D26 ("test unreadable before node 12") needs no column -- it is already
     `champion_model_id IS NULL`."""
+
+
+class ArtifactRow(BaseModel):
+    """An `artifacts` row (chunk 06)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    run_id: str
+    kind: ArtifactKind
+    path: str
+    meta_json: str
+    produced_by: str
+    ts: str
+    pruned_at: str | None
+    """`None` until pruned. Set, never cleared, by `mark_pruned`/`prune_intermediates`.
+
+    Pruning sets this instead of deleting the row: deleting would break `tool_calls`'
+    reference to the artifact id, and a row whose `path` points at a missing file with no
+    explanation would make deliberate pruning indistinguishable from data loss. Same reasoning
+    that put `RunRow.test_scored_at` in the schema rather than in process memory.
+    """
+
+    def meta(self) -> ArtifactMeta:
+        """Parse the stored `meta_json`.
+
+        Raises
+        ------
+        PersistenceError
+            On invalid JSON, meaning the row predates a schema change or was hand-edited.
+        """
+        try:
+            return ArtifactMeta.model_validate_json(self.meta_json)
+        except ValidationError as exc:
+            raise PersistenceError(
+                f"artifact row {self.id!r} holds invalid meta JSON", cause=exc
+            ) from exc

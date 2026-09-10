@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from statlab.errors import PersistenceError
 from statlab.persistence.ids import PREFIXES, new_id, parse_ts, utc_now
-from statlab_contracts.artifacts import ARTIFACT_ID_PATTERN
+from statlab_contracts.artifacts import ARTIFACT_ID_PATTERN, new_artifact_ref
 
 # --- new_id ----------------------------------------------------------------------------------
 
@@ -49,10 +49,24 @@ def test_new_id_uniqueness_across_10000_calls() -> None:
     assert len(values) == 10_000
 
 
-def test_new_id_shape_matches_artifact_id_pattern_when_prefix_is_a() -> None:
-    """Same shape as chunk 02's `ARTIFACT_ID_PATTERN` so every id in the system reads alike."""
-    value = new_id("a")
-    assert ARTIFACT_ID_PATTERN.match(value)
+def test_new_id_rejects_prefix_a() -> None:
+    """§7.2: an artifact ref has exactly one minter, `new_artifact_ref`, in the process that
+    writes the file. `new_id("a")` would let a row's id and its file's name disagree, so it is
+    rejected here rather than merely omitted from `PREFIXES`."""
+    with pytest.raises(PersistenceError, match="new_artifact_ref"):
+        new_id("a")
+
+
+def test_new_artifact_ref_matches_artifact_id_pattern() -> None:
+    """§7.2: the one minter of artifact refs, in `statlab_contracts` so both processes may
+    import it (the tool side must not import `statlab.persistence.ids`)."""
+    ref = new_artifact_ref()
+    assert ARTIFACT_ID_PATTERN.match(ref)
+
+
+def test_new_artifact_ref_uniqueness_across_10000_calls() -> None:
+    values = {new_artifact_ref() for _ in range(10_000)}
+    assert len(values) == 10_000
 
 
 def test_prefixes_excludes_candidate_and_artifact() -> None:

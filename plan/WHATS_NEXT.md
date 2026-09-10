@@ -11,12 +11,12 @@ duplicate them here.
 
 ## State
 
-**6 of 40 chunks complete.** Phase A done; `07` is next (MCP server foundation).
+**6 of 40 chunks complete.** Phase A done; `07` is next (MCP server foundation), unblocked.
 
-| Verified at commit (post-chunk-06, uncommitted at write time) | |
+| Verified, uncommitted at write time | |
 |---|---|
-| Tests | 955 (954 passed, 1 skipped -- F9, by spec) |
-| Coverage | 100 % line **and** branch (1293 stmts, 272 branches, 0 missed) |
+| Tests | 971 (970 passed, 1 skipped -- F9, by spec) |
+| Coverage | 100 % line **and** branch (1322 stmts, 280 branches, 0 missed) |
 | mypy | `--strict` clean on 50 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
@@ -44,7 +44,7 @@ the assertion.
 
 ---
 
-## Chunk 06, complete: artifact store
+## Chunk 06, complete: artifact store (incl. §7 addendum)
 
 Run-folder layout (`PLAN.md` §10.1), the artifacts registry (+`pruned_at`), hard-link fork
 copies (D11), prune-on-success (D24), and content IO (parquet/joblib/png/json/text) in
@@ -56,20 +56,39 @@ the reverse. No refcounting was added. All seven pandas 3.0 dtypes (`str`, `cate
 `float64`, `bool`, `datetime64[us]`, `Int64`) round-trip through parquet unchanged — measured,
 not assumed — so `save_dataframe`/`load_dataframe` carry no dtype-preservation logic.
 
-**One spec inconsistency found and not silently resolved:** `06_artifact_store.md`'s own
-context table (§1) instructs wrapping IO failures in `ArtifactError` (`statlab.errors`) inside
-the pandas module, but its DoD (§5) says that module "imports no `statlab.*`" verbatim — those
-two lines contradict each other for this one import. Kept the `ArtifactError` import (the
-wrapping requirement appears four times in §3.3; the context table names the exact path), and
-narrowed the boundary test to what D26's "MCP server is stateless" is actually about: no
-`statlab.persistence`, `statlab.storage`, or `statlab.domains` import. `statlab.errors` is a
-shared, dependency-free taxonomy already crossing the boundary elsewhere, not backend state.
+**Accepted with a gated addendum, then closed.** The first pass had two real defects, both the
+same shape as this session's other findings — a guarantee that read as present while enforcing
+nothing:
+
+- The `statlab.errors` import inside the pandas module was a real D13 boundary violation, not
+  a spec ambiguity. `ToolSettingsError`'s own chunk-01 docstring had already settled this
+  exact question for `settings.py`; the fix mirrors it — `ToolArtifactError(Exception)`,
+  defined locally, `statlab.errors` import dropped. The boundary tests had only ever covered
+  `contracts/`, so neither direction between `backend/` and `mcp_server/` had a test; both
+  directions are required tests now.
+- `create_artifact` minted its own id independently of the ref used to build the file path.
+  Reproduced: the row's id pointed at a file that did not exist, while the real file's ref
+  went unregistered. `new_artifact_ref()` now lives in `statlab_contracts.artifacts` (the one
+  package both processes may import, `secrets.token_hex(8)`), is the only minter, and
+  `new_id("a")` raises rather than silently allowing a second one. `create_artifact` takes
+  `ref` and rejects a `meta.ref` that disagrees with it. Invariant tests:
+  `row.id == Path(row.path).stem`, `meta.ref == row.id`.
+
+`save_dataframe`/`save_model`/`save_plot`/`save_json`/`save_text` now return `ArtifactMeta`
+directly and take `ref`/`label` (and `kind`, where one writer serves several kinds). Zero test
+call sites build an `ArtifactMeta` by hand after a save now; 36 call sites in
+`test_tool_artifacts.py` alone stopped needing it.
+
+**The general lesson, worth carrying into every remaining chunk:** a test that confirms a
+guard exists is not the same as a test that demonstrates the failure the guard prevents.
+`UNIQUE` over a nullable column, a `PRIMARY KEY` accepting `NULL`, a boundary test covering one
+of three directions, a registry row whose id and path can silently disagree — all four read as
+correct and were green. The fix each time was the same shape as chunk 05's `IntegrityError`
+probes and this chunk's P10/P11: insert the duplicate, delete the parent, import across the
+boundary, mint the id twice — and check the property holds, not that the code exists.
 
 Next: chunk 07 (MCP server foundation — Streamable HTTP app, bearer auth, the `@tool`
-decorator). `artifacts.py`'s function shapes are its first real consumer; see the chunk 06
-report's item 7 for the one open question worth resolving before or during 07: `create_artifact`
-mints its own id independent of the ref the caller used to build the file path, so a caller
-must pick that ref first and keep it consistent by convention rather than by the type system.
+decorator), now unblocked.
 
 ---
 

@@ -37,7 +37,17 @@ def new_id(prefix: str) -> str:
     Same shape as chunk 02's `ARTIFACT_ID_PATTERN` (`^a_[0-9a-f]{16}$`) so every id in the
     system reads alike. 64 bits of `secrets.token_hex(8)` -- random, not sequential, because
     sequential ids would need a counter that two concurrent runs must coordinate on.
+
+    Raises
+    ------
+    PersistenceError
+        If `prefix == "a"`. Artifact refs have exactly one minter,
+        `statlab_contracts.artifacts.new_artifact_ref` -- the process that writes the file, not
+        this one. A second minter would let a row's id and its file's name disagree (chunk 06
+        §7.2).
     """
+    if prefix == "a":
+        raise PersistenceError("'a' is not a valid prefix: use new_artifact_ref() instead")
     return f"{prefix}_{secrets.token_hex(8)}"
 
 
