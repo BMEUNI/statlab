@@ -170,7 +170,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 07 | `07_mcp_server_foundation.md` — Streamable HTTP app, bearer auth, `@tool` decorator (registration, validation, envelope, timing, `heavy=` semaphore), `health`, `list_artifacts`, `describe_artifact` | untouched | 02, 06 |
+| 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | untouched | 01, 02, 06 |
 | 08 | `08_tools_intake.md` — `load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`, `detect_leaky_columns` | untouched | 03, 07 |
 | 09 | `09_tools_profiling.md` — 9 profiling tools incl. compute/render split | untouched | 07, 08 |
 | 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks | untouched | 07, 08 |
