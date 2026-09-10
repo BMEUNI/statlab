@@ -1,4 +1,6 @@
 ---
+
+> **Picking this up cold?** Read [`WHATS_NEXT.md`](./WHATS_NEXT.md) first — live state, the working loop, and the corrections made so far.
 status: in_progress
 dependencies: []
 completion_date: null
