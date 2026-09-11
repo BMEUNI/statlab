@@ -952,15 +952,21 @@ export_pipeline_script(run)                 → pipeline.py from tool log
     independently of the semaphore ordering that produced the run.
 ```
 
-**artifacts & reproducibility** — 6
+**artifacts & reproducibility** — 5
 ```
 list_artifacts(run)                                                    [v1]
 describe_artifact(artifact)                 head rows, shape, dtypes    [v1]
 compute_run_hash(run)                       inputs + tool-log digest
 snapshot_run(run)                           manifest.json + env capture
 prune_intermediate_artifacts(run, node)     within-node only, success only (D24)
-health()                                    liveness for `make dev`     [v1]
 ```
+
+> **`health` is not a tool.** It is an unauthenticated HTTP route (`GET /health` on the same
+> ASGI app, alongside `/mcp`), not an MCP tool call — a liveness probe that required an MCP
+> handshake (and the bearer token that comes with it, D13) would fail for reasons unrelated to
+> liveness, and `make dev` needs to poll it before an MCP client exists at all. Chunk 07
+> implements it in `statlab_tools/server.py`, returning the literal string `ok` and nothing
+> else. It was listed here as a `[v1]` tool through chunk 06; corrected at chunk 07.
 
 **Tuning policy:** `tune_estimator` runs `GridSearchCV` over an agent-proposed grid with
 `cv_folds` from the contract, bounded by `max_fit_seconds`. Budget exceeded → return

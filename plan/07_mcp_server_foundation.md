@@ -1,8 +1,66 @@
 ---
-status: untouched
+status: in_progress
 dependencies: [01, 02, 06]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-09-11
+implementation_notes: |
+  Implemented as specified. `tool.py` (the `@tool` decorator, `ToolParamError`/`ToolDataError`,
+  registration, exception classification, the D17 semaphore, `project`/`run` injection),
+  `server.py` (`create_app`, bearer middleware, `/health`), `__main__.py` (exit 2 on
+  `ToolSettingsError`), `tools/artifacts.py` (`list_artifacts`, `describe_artifact`).
+
+  1105 tests total (1104 passed, 1 skipped -- the pre-existing chunk 06 F9 skip; none newly
+  skipped this chunk). 100% line+branch coverage. mypy --strict clean on 60 source files
+  (up from 50). ruff clean.
+
+  Two production bugs found and fixed while writing tests, not left latent:
+  - `_failure_from_exception` used `exc.message` for `ToolArtifactError` instead of
+    `str(exc)`, silently dropping the path prefix `ToolArtifactError.__str__` adds -- a
+    transient-IO failure without the path it happened on. Found by T22 (unknown run
+    directory names the path).
+  - `describe_artifact`'s `head` rows put `pandas.Timestamp` cells straight into `summary`,
+    which is not a valid `JsonValue` -- fixed via duck-typing on `hasattr(value, "isoformat")`
+    rather than importing pandas into this module (the single-pandas-module rule from chunk 06
+    stays intact; only `mcp_server/statlab_tools/artifacts.py`, the content-IO module, imports
+    it).
+  - A third, structural issue surfaced only by the project-wide mypy run (not caught running
+    mypy file-by-file during development): `list_artifacts`/`describe_artifact` built
+    `summary` values as `list[dict[str, str]]`/`dict[str, str]` rather than typed against
+    `JsonValue`, which is structurally narrower than `dict[str, JsonValue]` requires. Fixed by
+    typing the intermediate collections as `JsonValue`/`dict[str, JsonValue]` directly.
+
+  Two real MCP SDK behaviours needed before the decorator worked at all, neither obvious from
+  the recorded facts:
+  - Every tool module has `from __future__ import annotations`, so raw
+    `inspect.signature(func).parameters[x].annotation` is a *string* at runtime. Fixed with
+    `get_type_hints(func, include_extras=True)` throughout `tool.py` -- without it, neither
+    the parameter-description check nor the served schema ever saw a real `Annotated`/`Field`.
+  - `structured_content` stays `None` unless the *actual* return-type annotation on the
+    registered callable is a real `ToolSuccess | ToolFailure` object, not a string and not
+    inherited from a `**kwargs`-typed wrapper. `_build_schema_fn` sets
+    `return_annotation=ToolSuccess | ToolFailure` explicitly on the signature it hands to the
+    SDK for exactly this reason.
+
+  One structural test-infrastructure incompatibility found and worked around, not swallowed:
+  `pytest-asyncio` resumes an async-generator fixture's teardown as a different `asyncio` task
+  than the one that ran setup, even within the same event loop -- confirmed with a minimal
+  bare `anyio.create_task_group()` reproduction, independent of anything MCP-specific. Any
+  fixture holding an `anyio` task-group-based context manager (streamable HTTP client,
+  `ClientSession`) open across its `yield` hits "Attempted to exit cancel scope in a different
+  task than it was entered in" on teardown. Fixed by making `mcp_session` a synchronous
+  fixture returning an `@asynccontextmanager` factory; every test opens its own session with
+  `async with mcp_session() as session:`, keeping the whole lifetime inside the test's own
+  task from start to finish.
+
+  A second, unrelated test-isolation bug: `tool.server` is a genuine module-level singleton
+  that both `test_tool_decorator.py`'s throwaway tools and the real `list_artifacts`/
+  `describe_artifact` register onto. Running the decorator tests before the session tests in
+  one process leaked throwaway names into M2's "exactly the two real tools" assertion. Fixed
+  with an autouse fixture in `test_tool_decorator.py` that monkeypatches `tool.server` to a
+  fresh, throwaway `MCPServer` per test.
+
+  `health` moved out of PLAN.md §6.3's tool catalogue into a note: it is an unauthenticated
+  HTTP route on the same ASGI app, not an MCP tool, and forcing an MCP handshake for a
+  liveness probe would defeat the point of having one.
 ---
 
 # Chunk 07 — MCP server foundation
@@ -361,3 +419,100 @@ not the registry, is what they report.
 6. Anything in the recorded MCP facts that did not hold.
 7. For chunk 08 (`load_csv`, `infer_column_roles`, `validate_contract`, …): does the decorator give
    a tool body everything it needs, or did you find yourself wanting something it does not provide?
+
+---
+
+## 8. Addendum — two corrections, one resolved question
+
+**Status: gated. Chunk 08 is blocked until this passes.**
+
+### 8.1 Use the public `create_mcp_http_client` path
+
+`tests/conftest.py:348` and `tests/test_server_mcp_session.py:269` import from
+`mcp.shared._httpx_utils`. That module is private by the leading underscore, so it carries no
+stability guarantee across patch releases — and the public path is right there in `00_index.md`'s
+recorded facts:
+
+```python
+from mcp.client.streamable_http import create_mcp_http_client
+```
+
+Verified: both names resolve to **the same object**, so this is a pure import change with no
+behavioural difference. Fix both sites. A private import is the kind of thing that survives until an
+SDK patch bump breaks the suite for a reason nobody remembers.
+
+### 8.2 Find the `RunPaths` parameter by type, not by name
+
+Your item 5 named this precisely: *"a naming convention resting on string matching rather than a
+type."* It is also a direct violation of `WHATS_NEXT.md`'s convention 5, **no implicit string
+conventions** — the same rule that rejected `"mutual_info_k20"` in chunk 04 and the
+any-unreserved-key-is-a-column-name shape in chunk 03. You were right to flag it; it is worth fixing
+rather than documenting.
+
+`tool.py:151` (`if name == "paths"`) and `tool.py:193` (`if name != "paths"`) become a lookup on the
+resolved annotation. You already call `get_type_hints(..., include_extras=True)`, so the type is in
+hand:
+
+```python
+_run_paths_params = [n for n, t in hints.items() if t is RunPaths]
+```
+
+Verified against five signatures. Type matching fixes three cases name matching gets wrong:
+
+| Signature | Name match | Type match |
+|---|---|---|
+| `def t(paths: RunPaths, ...)` | finds it | finds it |
+| `def t(p: RunPaths, ...)` | finds **nothing** — silently skips injection | finds `p` |
+| `def t(paths: Annotated[str, Field(...)])` | strips a **real wire parameter** | correctly finds none |
+| `def t(a: RunPaths, b: RunPaths)` | undetectable | finds two, so it can be rejected |
+
+The third row is a live footgun, not a hypothetical: a tool taking a list of file paths would have
+that parameter silently deleted from its schema, and the agent would then be unable to call it
+correctly with no indication why.
+
+**Raise at decoration time** when `needs_run=True` and the count is not exactly one, and when
+`needs_run=False` and the count is not zero. That converts a naming convention into a checked
+invariant, consistent with T3/T4 already failing the build for a missing description.
+
+The parameter may then be named anything. Keep `paths` by convention in the tools you have written —
+the point is that the decorator no longer *depends* on it.
+
+### 8.3 Resolved, do not change: keep the session-based transport
+
+`streamable_http_app(stateless_http=True)` exists and I tested it. **Keep the default.**
+
+D26's statelessness is a property of *tools* — no application state between calls — which is already
+true and enforced by the tools reading only artifacts. An MCP transport session holds protocol state
+(session id, negotiated version), which is a different thing and contradicts nothing. Measured cost
+of switching: `stateless_http=True` negotiated protocol revision **2025-11-25** against the
+session-based default's **2026-07-28**. Trading a newer protocol revision for a redundant restatement
+of a guarantee we already have is a bad trade.
+
+Recorded here so it is not re-litigated in a later chunk.
+
+### 8.4 Deferred to chunk 08, not resolved here
+
+Your item 7 stands: `load_csv` takes a filesystem path rather than an artifact ref, and whether that
+path needs its own validation shape — must resolve inside an allowed upload directory, no traversal —
+is chunk 08's decision. Note that §8.2 removes the incidental hazard, since a parameter named `path`
+or `paths` is now safe regardless.
+
+### 8.5 Definition of Done for the addendum
+
+- [ ] `make test` green; count roughly unchanged plus the new decoration-time tests.
+- [ ] Coverage stays 100 % line and branch.
+- [ ] `make typecheck`, `make lint` clean, no new suppressions.
+- [ ] `grep -rn 'mcp\.shared\._\|mcp\._' tests/ backend/ contracts/ mcp_server/` returns nothing.
+- [ ] No `== "paths"` or `!= "paths"` remains in `tool.py`.
+- [ ] New tests: a `RunPaths` parameter named something other than `paths` works; a tool with a
+      `str` parameter named `paths` keeps it on the wire; `needs_run=True` with zero and with two
+      `RunPaths` parameters each raise at decoration time; `needs_run=False` with one raises.
+- [ ] The two artifact tools still pass unchanged, proving this is a refactor.
+
+### Report back with
+
+1. Test count, coverage, mypy file count, ruff.
+2. Confirmation that the private-import grep is clean.
+3. Whether type-based detection needed anything beyond the `get_type_hints` call you already make.
+4. Whether any existing test had to change — if the two tools' tests needed edits, the refactor was
+   not behaviour-preserving and I want to know where.

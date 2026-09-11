@@ -150,6 +150,13 @@ not re-derive any of this from memory:
 - Client side: `create_mcp_http_client(headers={"Authorization": f"Bearer {token}"})` →
   `streamable_http_client(url, http_client=...)` → `ClientSession(read, write)` → `initialize()`.
   `StreamableHTTPTransport(url)` takes **only** a url; headers go on the http client.
+- **`from __future__ import annotations` makes every annotation a string at runtime**, so any code
+  reading a parameter's `Field` must use `get_type_hints(fn, include_extras=True)`. Applies to the
+  `@tool` decorator and anything later that introspects a tool signature.
+- `structured_content` populates only when the registered callable's **actual return-type object** is
+  the union — a stringified annotation is not enough. Chunk 07 hit this.
+- Import `create_mcp_http_client` from **`mcp.client.streamable_http`**, not
+  `mcp.shared._httpx_utils`. Both resolve to the same object; only one is public.
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
 
@@ -170,7 +177,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | untouched | 01, 02, 06 |
+| 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | completed | 01, 02, 06 |
 | 08 | `08_tools_intake.md` — `load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`, `detect_leaky_columns` | untouched | 03, 07 |
 | 09 | `09_tools_profiling.md` — 9 profiling tools incl. compute/render split | untouched | 07, 08 |
 | 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks | untouched | 07, 08 |

@@ -11,16 +11,16 @@ duplicate them here.
 
 ## State
 
-**6 of 40 chunks complete.** Phase A done; `07` is next (MCP server foundation), unblocked.
+**7 of 40 chunks complete.** Phase B started; `08` is next (intake tools).
 
 | Verified, uncommitted at write time | |
 |---|---|
-| Tests | 971 (970 passed, 1 skipped -- F9, by spec) |
-| Coverage | 100 % line **and** branch (1322 stmts, 280 branches, 0 missed) |
-| mypy | `--strict` clean on 50 source files, `init_typed = true` |
+| Tests | 1105 (1104 passed, 1 skipped -- chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (1536 stmts, 330 branches, 0 missed) |
+| mypy | `--strict` clean on 60 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero in production code; zero `pragma: no cover`; zero `Any`. `# type: ignore` in tests only, all in the three permitted shapes |
+| Suppressions | zero in production code; zero `pragma: no cover`; zero `Any` in `backend/`, `mcp_server/`, `contracts/`. `# type: ignore` in tests only, all in the three permitted shapes |
 | Git | local `master`, never pushed, tree clean before this chunk's edits |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
@@ -87,8 +87,61 @@ correct and were green. The fix each time was the same shape as chunk 05's `Inte
 probes and this chunk's P10/P11: insert the duplicate, delete the parent, import across the
 boundary, mint the id twice — and check the property holds, not that the code exists.
 
-Next: chunk 07 (MCP server foundation — Streamable HTTP app, bearer auth, the `@tool`
-decorator), now unblocked.
+## Chunk 07, complete: MCP server foundation (M1)
+
+Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health`, and the
+`@tool` decorator every later tool (~80 of them, chunks 08-20) inherits: registration,
+mandatory docstring + parameter-description enforcement at decoration time (D23), the uniform
+envelope, exception classification into `error_class`, timing, and the D17 fit semaphore. Two
+v1 tools, `list_artifacts`/`describe_artifact`, prove the decorator against real bodies.
+
+**M1 passed literally, not just by inference:** `python -m statlab_tools` starts and serves
+`/health`; a tokenless request to `/mcp` is rejected; an external MCP client (a real
+`ClientSession` over real HTTP, not `httpx.ASGITransport`) completes `tools/list` and a
+round-trip `call_tool`. M7 additionally proves the envelope chunk 02 defined is the one the
+server actually speaks: `structured_content["result"]` round-trips through
+`TOOL_RESULT_ADAPTER` for both the success and failure shapes.
+
+**Two production bugs found while writing tests, not left latent:**
+- `_failure_from_exception` used `exc.message` for `ToolArtifactError` instead of `str(exc)`,
+  silently dropping the path prefix `ToolArtifactError.__str__` adds — a transient-IO failure
+  reported with no path is a message the agent cannot act on. T22 (an unknown run directory
+  must name the path) caught it.
+- `describe_artifact`'s head rows put `pandas.Timestamp` cells straight into `summary`, which
+  is not a valid `JsonValue`. Fixed via `hasattr(value, "isoformat")` duck-typing rather than
+  importing pandas into the tools module — chunk 06's "pandas in exactly one module" rule
+  holds; only `mcp_server/statlab_tools/artifacts.py` (content IO) imports it.
+- A third, caught only by the *project-wide* mypy run, not file-by-file during development:
+  both tools built `summary` values as `list[dict[str, str]]`/`dict[str, str]`, structurally
+  narrower than the `dict[str, JsonValue]` `ToolSuccess.summary` actually requires. Fixed by
+  typing the intermediate collections against `JsonValue` directly. Worth remembering for
+  chunk 08 onward: **run `make typecheck` project-wide before trusting a file-scoped mypy
+  pass** — this one only surfaced once every new module was checked together.
+
+**Two MCP SDK behaviours the recorded facts didn't cover, both discovered empirically:**
+- Every tool module has `from __future__ import annotations` (project convention), so raw
+  `inspect.signature(func).parameters[x].annotation` is a *string* at runtime, not a real
+  `Annotated[...]` object. `get_type_hints(func, include_extras=True)` is required everywhere
+  `tool.py` reads a parameter's `Field` metadata — without it, neither the decoration-time
+  check nor the served schema ever see a real annotation.
+- `structured_content` stays `None` unless the registered callable's actual return-type
+  annotation is a real `ToolSuccess | ToolFailure` object, not inherited from a
+  `**kwargs`-typed wrapper and not left as a string. `_build_schema_fn` sets
+  `return_annotation=ToolSuccess | ToolFailure` explicitly for exactly this reason.
+
+**A structural pytest-asyncio incompatibility, reproduced independent of anything
+MCP-specific:** an async-generator fixture that holds an `anyio` task-group-based context
+manager open across its `yield` fails on teardown with "Attempted to exit cancel scope in a
+different task than it was entered in" — `pytest-asyncio` resumes the teardown segment as a
+different `asyncio` task than the one that ran setup, even within the same event loop.
+Confirmed with a bare `anyio.create_task_group()` fixture before touching any MCP code. Fixed
+by making `mcp_session` a *synchronous* fixture that returns an `@asynccontextmanager`
+factory; every test opens its own session with `async with mcp_session() as session:`, so the
+whole session lifetime stays inside the test's own task. Worth remembering for chunk 21
+(`mcp_client`) and any later fixture wrapping a real MCP session.
+
+Next: chunk 08 (`load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`,
+`detect_leaky_columns`) — the first tools written against this decorator for real.
 
 ---
 
