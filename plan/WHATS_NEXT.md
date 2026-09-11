@@ -11,12 +11,13 @@ duplicate them here.
 
 ## State
 
-**7 of 40 chunks complete.** Phase B started; `08` is next (intake tools).
+**7 of 40 chunks complete, including a gated addendum.** Phase B started; `08` is next
+(intake tools).
 
 | Verified, uncommitted at write time | |
 |---|---|
-| Tests | 1105 (1104 passed, 1 skipped -- chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (1536 stmts, 330 branches, 0 missed) |
+| Tests | 1112 (1111 passed, 1 skipped -- chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (1550 stmts, 338 branches, 0 missed) |
 | mypy | `--strict` clean on 60 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
@@ -142,6 +143,19 @@ whole session lifetime stays inside the test's own task. Worth remembering for c
 
 Next: chunk 08 (`load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`,
 `detect_leaky_columns`) — the first tools written against this decorator for real.
+
+**Addendum (§8), resolved.** The type-based `RunPaths` detection landed clean: `tool.py` now
+finds the parameter by `get_type_hints(...)[name] is RunPaths`, raises at decoration time on
+zero or two matches, and the two real tools needed no changes at all — direct proof the
+refactor was behaviour-preserving, not just an assertion of it.
+
+The public-import fix did not land, for a reason worth remembering past this chunk:
+`mcp.client.streamable_http.create_mcp_http_client` and `mcp.shared._httpx_utils`'s copy are
+the same object at runtime, but the former module never lists the name in an `__all__`, and
+this project's `pyproject.toml` sets `no_implicit_reexport = true` explicitly. Runtime-identity
+and mypy-strict-clean are two different questions, and an SDK path can pass one and fail the
+other. `mcp_client` (chunk 21) will hit the same import; the private path stays correct until
+the SDK's own `__all__` changes.
 
 ---
 

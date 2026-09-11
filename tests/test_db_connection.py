@@ -403,17 +403,6 @@ def test_mcp_server_does_not_import_statlab_persistence() -> None:
         )
 
 
-def test_mcp_server_package_source_never_mentions_persistence() -> None:
-    """Direct text-level check, in addition to the import-graph walk above: no file under
-    `mcp_server/` contains the literal substring `statlab.persistence`, so a future import
-    added inside a function body (which the module-level `vars()` walk above cannot see)
-    would still be caught."""
-    mcp_server_root = Path(__file__).resolve().parent.parent / "mcp_server"
-    for path in mcp_server_root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        assert "statlab.persistence" not in text, f"{path} mentions statlab.persistence"
-
-
 def test_boundary_no_module_under_mcp_server_imports_statlab() -> None:
     """Chunk 06 §7.1: this net had a hole -- the boundary tests only ever covered
     `contracts/`, so `mcp_server/statlab_tools/artifacts.py` importing `statlab.errors` slipped

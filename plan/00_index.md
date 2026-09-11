@@ -155,8 +155,22 @@ not re-derive any of this from memory:
   `@tool` decorator and anything later that introspects a tool signature.
 - `structured_content` populates only when the registered callable's **actual return-type object** is
   the union — a stringified annotation is not enough. Chunk 07 hit this.
-- Import `create_mcp_http_client` from **`mcp.client.streamable_http`**, not
-  `mcp.shared._httpx_utils`. Both resolve to the same object; only one is public.
+- `create_mcp_http_client` is defined in `mcp.shared._httpx_utils` and re-imported (without an
+  `__all__` entry) into `mcp.client.streamable_http`. Both names resolve to the same object at
+  runtime -- but `mypy --strict`'s `no_implicit_reexport` (set explicitly in this project's
+  `pyproject.toml`) rejects importing it from the latter, since that module never declares it
+  re-exportable, regardless of `from ... import` vs module-qualified access. **Import from
+  `mcp.shared._httpx_utils`** despite the leading underscore: it is the only option that is both
+  correct at runtime and mypy-strict clean without adding a `# type: ignore` shape outside the
+  three this project permits in tests. Re-check if a future SDK release adds the name to
+  **The decisive evidence:** `mcp.shared._httpx_utils.__all__` *explicitly contains*
+  `create_mcp_http_client`, while `mcp.client.streamable_http` has no `__all__` at all. The module
+  with the underscore is the one whose author declared the symbol public; the leading underscore is
+  on the module path, not on the export. Rejected alternative: a scoped
+  `no_implicit_reexport = false` override for `mcp.*`, which does work and does *not* weaken our own
+  modules (verified) — but it loosens a strictness flag to paper over a third-party packaging gap,
+  and adds config surface, to buy a cosmetically nicer import path.
+  `mcp.client.streamable_http.__all__`.
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
 

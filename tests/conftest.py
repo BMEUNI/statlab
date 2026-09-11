@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
@@ -24,6 +26,10 @@ from statlab_contracts.candidate import (
 from statlab_contracts.contract import DataContract
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import ClassWeight, ParamValue, VariationDimension
+
+if TYPE_CHECKING:
+    from mcp import ClientSession
+    from statlab_tools.settings import ToolSettings
 
 _STATLAB_VARS = (
     "STATLAB_MCP_TOKEN",
@@ -251,3 +257,116 @@ def sample_frame() -> pd.DataFrame:
             "ni": pd.array([1, 2, pd.NA], dtype="Int64"),
         }
     )
+
+
+# --- MCP server foundation (chunk 07) -----------------------------------------------------------
+
+MCP_TEST_TOKEN = "mcp-test-token-not-a-real-secret"  # noqa: S105 -- a fixture constant, not a real credential
+
+
+@pytest.fixture
+def mcp_data_dir(tmp_path: Path) -> Path:
+    return tmp_path / "data"
+
+
+@pytest.fixture
+def tool_settings(monkeypatch: pytest.MonkeyPatch, mcp_data_dir: Path) -> ToolSettings:
+    """A valid `ToolSettings` pointing at a temporary data directory, with a known token and
+    `fit_permits=1` -- deterministic semaphore tests need a fixed size, not the machine's core
+    count (D17, §14.2)."""
+    from statlab_tools.settings import load_tool_settings
+
+    monkeypatch.setenv("STATLAB_MCP_TOKEN", MCP_TEST_TOKEN)
+    monkeypatch.setenv("STATLAB_DATA_DIR", str(mcp_data_dir))
+    monkeypatch.setenv("STATLAB_FIT_PERMITS", "1")
+    return load_tool_settings()
+
+
+@pytest.fixture
+def run_paths_over_mcp(tool_settings: ToolSettings) -> str:
+    """Creates `<mcp_data_dir>/proj/runs/r_mcp0000000000000/` on disk and returns the run id.
+
+    Session-level tests (`test_server_mcp_session.py`) call tools by `project`/`run` string,
+    not by `RunPaths` -- this fixture is the MCP-session equivalent of `run_paths`, which
+    returns the dataclass directly for tests that call tool bodies without going through a
+    session.
+    """
+    run_id = "r_mcp0000000000000"
+    root = tool_settings.data_dir / "proj" / "runs" / run_id / "artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    return run_id
+
+
+@pytest.fixture
+def live_server(tool_settings: ToolSettings, unused_tcp_port: int) -> Iterator[str]:
+    """Runs the real app under uvicorn in a thread; yields its base URL.
+
+    Required, not preference: `httpx.ASGITransport` cannot reach the authorised path, because
+    the streamable-HTTP session manager needs the ASGI lifespan and fails with "Task group is
+    not initialized" without it (verified against the installed `mcp==2.2.0`, `00_index.md`).
+    """
+    import threading
+
+    import uvicorn
+    from statlab_tools.server import create_app
+
+    app = create_app(tool_settings)
+    config = uvicorn.Config(app, host="127.0.0.1", port=unused_tcp_port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        pass
+    try:
+        yield f"http://127.0.0.1:{unused_tcp_port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def mcp_session(live_server: str) -> Callable[[], AbstractAsyncContextManager[ClientSession]]:
+    """A factory for an initialised MCP session over real HTTP with a valid bearer token --
+    M1's "external MCP client". Each test does `async with mcp_session() as session:`.
+
+    Returns a factory, not a session directly, and is a plain (sync) fixture rather than an
+    async generator one: `ClientSession`/`streamable_http_client` are built on `anyio` task
+    groups, which require the same asyncio *task* to enter and exit them. pytest-asyncio
+    resumes an async generator fixture's teardown as a distinct task from the one that ran
+    setup even within the same event loop, so any task-group-based context manager spanning
+    the `yield` in a fixture hits "Attempted to exit cancel scope in a different task than it
+    was entered in" on teardown -- reproduced directly against a bare `anyio.create_task_group`
+    in a pytest-asyncio generator fixture before this fix, independent of anything MCP-specific.
+    Returning a factory the *test* enters keeps the whole session lifetime inside one task: the
+    test's own.
+    """
+
+    @asynccontextmanager
+    async def open_session() -> AsyncIterator[ClientSession]:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        # `mcp.client.streamable_http` imports this same object for its own internal use
+        # (confirmed: `create_mcp_http_client` from there and from here are identical at
+        # runtime), but never lists it in an `__all__` -- so `mypy --strict`'s
+        # `no_implicit_reexport` (set explicitly in pyproject.toml) rejects importing it from
+        # there, regardless of import style (`from ... import` vs module-qualified attribute
+        # access both fail identically). Importing from its actual defining module is the only
+        # option that is both correct at runtime and mypy-strict clean without adding a
+        # `# type: ignore` shape outside the three permitted ones. If a future SDK release adds
+        # `create_mcp_http_client` to `mcp.client.streamable_http.__all__`, switch this back.
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        http_client = create_mcp_http_client(headers={"Authorization": f"Bearer {MCP_TEST_TOKEN}"})
+        async with (
+            http_client,
+            streamable_http_client(f"{live_server}/mcp", http_client=http_client) as (
+                read,
+                write,
+            ),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            yield session
+
+    return open_session

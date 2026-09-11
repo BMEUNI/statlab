@@ -33,7 +33,7 @@ api: check-env ## Run the backend alone (chunk 33+)
 	@echo "not implemented until chunk 33"
 
 mcp: check-env ## Run the MCP server alone (chunk 07+)
-	@echo "not implemented until chunk 07"
+	$(PY) -m statlab_tools
 
 ui: ## Run the Vite dev server alone (chunk 36+)
 	@echo "not implemented until chunk 36"

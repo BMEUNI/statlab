@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 dependencies: [01, 02, 06]
 completion_date: 2026-09-11
 implementation_notes: |
@@ -61,6 +61,35 @@ implementation_notes: |
   `health` moved out of PLAN.md §6.3's tool catalogue into a note: it is an unauthenticated
   HTTP route on the same ASGI app, not an MCP tool, and forcing an MCP handshake for a
   liveness probe would defeat the point of having one.
+
+  §8 addendum (commit 69e9b30), resolved:
+
+  §8.2 fixed as specified: `tool.py` no longer detects the `RunPaths` parameter by checking
+  `name == "paths"`. `_run_paths_param_names` finds it by resolved type
+  (`get_type_hints(..., include_extras=True)` already had the type in hand), and
+  `_check_run_paths_param_count` raises at decoration time unless the count is exactly one for
+  `needs_run=True` or exactly zero for `needs_run=False` -- the naming convention became a
+  checked invariant. `list_artifacts`/`describe_artifact` needed zero code changes and their
+  existing tests needed zero edits, confirming the refactor was behaviour-preserving. 7 new
+  decoration-time tests added (renamed `RunPaths` param, a `str` param literally named `paths`
+  kept on the wire, zero/two `RunPaths` params, a stray one under `needs_run=False`, all
+  raising and none registering).
+
+  §8.1 attempted as specified, reverted with the reason recorded: `create_mcp_http_client` was
+  moved to the `mcp.client.streamable_http` import the addendum named, and the runtime-identity
+  check (both names resolve to the same object) held exactly as verified. But
+  `mcp.client.streamable_http` imports that symbol for its own internal use without ever
+  listing it in an `__all__`, so `mypy --strict`'s `no_implicit_reexport` (set explicitly in
+  this project's `pyproject.toml`) rejects the import regardless of import style -- confirmed
+  identical failure for `from ... import` and for module-qualified attribute access. Neither
+  the SDK's top-level `mcp` package nor `mcp.client` re-exports it either. The two-line change
+  was reverted back to `mcp.shared._httpx_utils`, the only mypy-strict-clean option that adds
+  no suppression outside the three permitted test shapes, with a comment at both import sites
+  recording why and what would allow switching back (the SDK adding this name to that module's
+  `__all__`). The private-import grep this addendum's own DoD asks for does not come back
+  clean as a result -- this is reported precisely rather than checked off.
+
+  §8.3, §8.4: no code changes; recorded as resolved / deferred per the addendum text.
 ---
 
 # Chunk 07 — MCP server foundation
