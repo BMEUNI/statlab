@@ -1,5 +1,5 @@
 ---
-status: completed
+status: in_progress
 dependencies: [01, 02, 06]
 completion_date: 2026-09-11
 implementation_notes: |
@@ -545,3 +545,74 @@ or `paths` is now safe regardless.
 3. Whether type-based detection needed anything beyond the `get_type_hints` call you already make.
 4. Whether any existing test had to change — if the two tools' tests needed edits, the refactor was
    not behaviour-preserving and I want to know where.
+
+---
+
+## 9. Addendum — three production suppressions the DoD forbade
+
+**Status: gated. Chunk 08 is blocked until this passes.**
+
+§5 said "no `Any`, no `pragma: no cover`, `type: ignore` only in the three permitted test shapes."
+There are three in **production** code, none reported and none justified inline:
+
+```
+mcp_server/statlab_tools/server.py:41   super().__init__(app)                    # type: ignore[arg-type]
+mcp_server/statlab_tools/tool.py:267    schema_fn.__signature__ = ...            # type: ignore[attr-defined]
+mcp_server/statlab_tools/tool.py:365    wrapper.__signature__ = ...              # type: ignore[attr-defined]
+```
+
+They are not equivalent. One is avoidable, two are not.
+
+### 9.1 `server.py:41` — avoidable, self-inflicted
+
+`_BearerAuthMiddleware.__init__` declares `app: object`, so passing it to
+`BaseHTTPMiddleware.__init__` cannot type-check. Starlette's own signature is properly typed —
+`BaseHTTPMiddleware.__init__(self, app: ASGIApp, dispatch: DispatchFunction | None = None)`. The
+suppression exists only because the parameter was widened to `object`.
+
+Fix: `from starlette.types import ASGIApp`, then `def __init__(self, app: ASGIApp, *, token: str)`.
+Verified in isolation — the correctly-typed version produces no error, the `object`-typed version
+produces exactly one. Delete the suppression.
+
+### 9.2 `tool.py:267` and `:365` — a genuine stub gap; keep, but justify
+
+Assigning `__signature__` on a function object is the documented way to change what
+`inspect.signature` reports, and the runtime honours it: after assignment,
+`inspect.signature(f)` returns the replacement. mypy's function type simply does not declare the
+attribute as writable, so `attr-defined` is unavoidable without a `cast` that would obscure more than
+it fixes. Verified both halves: mypy errors, and the runtime respects the assignment.
+
+Keep both, and add the inline justification every other suppression in the project carries. A bare
+`# type: ignore[...]` is indistinguishable from laziness six months later; the comment is what makes
+it reviewable.
+
+### 9.3 This is a fourth permitted shape, and it is now written down
+
+The three permitted shapes were all test-only: frozen mutation, invalid `Literal`, extra kwarg. A
+**stdlib or third-party stub gap in production code** is a fourth, and it is legitimate — but only
+under conditions, because "the stubs are wrong" is also the easiest excuse available:
+
+1. The runtime behaviour must be **verified**, not assumed. Assign the attribute, call the function,
+   and confirm the effect.
+2. There must be **no correctly-typed alternative**. §9.1 is the counter-example: an alternative
+   existed and the suppression was masking a widened parameter.
+3. It carries an **inline comment** naming the gap and what would remove it.
+
+`WHATS_NEXT.md` records this so later chunks do not re-litigate it — and so a reviewer can tell a
+real stub gap from a shortcut.
+
+### 9.4 Definition of Done
+
+- [ ] `make test` green, count unchanged — this is typing only, no behaviour change.
+- [ ] Coverage stays 100 % line and branch.
+- [ ] `make typecheck`, `make lint` clean.
+- [ ] `grep -rnE '# type: ignore\[' backend contracts mcp_server` returns exactly **two** lines, both
+      `tool.py`'s `__signature__` assignments, both with an inline justification.
+- [ ] `_BearerAuthMiddleware.__init__` takes `app: ASGIApp`; the auth tests pass unchanged.
+
+### Report back with
+
+1. Test count, coverage, mypy file count, ruff.
+2. The suppression grep, verbatim.
+3. Whether typing `app: ASGIApp` required any other change — if the tests construct the middleware
+   directly with something that is not an `ASGIApp`, say so.
