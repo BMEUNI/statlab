@@ -380,12 +380,12 @@ wire fields chunk 10 depends on are in place. The next step is chunk 10.
 
 Read D32–D34 in `PLAN.md` first. They change what the split tools record and when they must refuse
 (small-split guard, unavailable strategies). The split tools must set `ArtifactMeta.split` on each
-split frame (so the lineage lock has a typed fact to key on, not a label) and call
-`repository.set_test_fingerprint` for the run (R4, D32) so cross-run test exposure through forks can
-be counted.
+split frame (so the lineage lock has a typed fact to key on, not a label) and return the run's
+`test_fingerprint` in their summary; the backend stores it with `repository.set_test_fingerprint`
+(chunk 21). Tools never touch the database.
 
-Four per-strategy split tools (`split_random`, `split_stratified`, `split_temporal`,
-`split_grouped`) plus `verify_split`'s four independent checks. Together with chunk 09, this
+Two of the four per-strategy split tools (`split_random`, `split_stratified`; temporal and grouped
+follow at M7) plus `verify_split`'s four independent checks. Together with chunk 09, this
 closes milestone **M3** (`PLAN.md` §8: "every tool tested on fixtures; `verify_split` catches a
 deliberately overlapping split") — chunk 09 alone does not complete M3, only profiling's half of
 it. `summarize_target`'s class-share logic (chunk 09's `summarize_class_target`, factored out as
