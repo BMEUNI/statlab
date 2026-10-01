@@ -914,7 +914,7 @@ select_by_mutual_info(train, target, k)                            H
 **inference_matrix** — 2 — the D7 second track
 ```
 build_dummy_matrix(df, columns, reference_levels)   no scaling, explicit reference  [v1]
-assemble_inference_matrix(train, valid, feature_spec)    fit on train+valid
+assemble_inference_matrix(train, valid, target, predictors, reference_levels)    fit on train+valid
 ```
 
 **training** — 6
@@ -929,8 +929,8 @@ get_model_params(model)
 
 **evaluation** — 11
 ```
-score_classification(predictions, truth, average)                      [v1]
-score_regression(predictions, truth)                                   [v1]
+score_classification(probabilities, truth, target, threshold, average) [v1]
+score_regression(predictions, truth, target)                          [v1]
 compute_confusion_matrix(predictions, truth)                           [v1]
 compute_roc_curve(probabilities, truth)     → curve data
 compute_pr_curve(probabilities, truth)      → curve data
@@ -938,16 +938,16 @@ compute_calibration_curve(probabilities, truth, n_bins)
 select_threshold(curve, objective)          F1 / cost / target recall
 plot_curve(curve, title)                    → png, renders any curve artifact
 cross_validate_estimator(name, params, train, target, cv)          H
-compare_models(models, metric, split)       → ranking table          [v1]
+compare_models(candidates, metric)          → ranking table; refuses scores on different rows  [v1]
 compute_learning_curve(name, params, train, target)                H
 ```
 
 **inference** — 9 — statsmodels, D7; all called by the shared node 6 (D31)
 ```
-fit_ols(matrix, formula)                                           H   [v1]
-fit_logit(matrix, formula)                                         H   [v1]
-fit_glm(matrix, formula, family, link)                             H
-coefficient_table(fit)                      coef, SE, z/t, p, CI       [v1]
+fit_ols(matrix, target, predictors)                                H   [v1]  no formulas: patsy evaluates Python (chunk 15 D-a)
+fit_logit(matrix, target, predictors)                              H   [v1]
+fit_glm(matrix, target, predictors, family)                        H
+coefficient_table(fit, manifest, goals)     coef, SE, z/t, p, CI; joint Wald per goal, Holm (D35)  [v1]
 inferential_fit_summary(fit)                R²/pseudo-R², AIC, BIC, LR
 compute_vif(matrix)                         multicollinearity
 test_residuals(fit, tests)                  normality, heterosk., autocorr
@@ -966,7 +966,7 @@ analyze_errors(predictions, truth, df, by)  worst-performing segments
 
 **champion & reporting** — 5
 ```
-rank_models(models, metric, constraints)                               [v1]
+rank_models(comparison, estimators)         applies the contract's constraints  [v1]
 select_champion(ranking, rationale)
 render_metrics_table(models, metrics)       → markdown table
 assemble_report(sections, artifacts)        → report.md
