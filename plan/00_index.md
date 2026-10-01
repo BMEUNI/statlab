@@ -10,7 +10,7 @@ implementation_notes: ""
 # Execution Plan — Chunk Index
 
 Master architecture: [`PLAN.md`](./PLAN.md) (31 decisions D1–D31, 21 resolved questions).
-This directory decomposes it into **40 atomic, topologically ordered chunks**.
+This directory decomposes it into **41 atomic, topologically ordered chunks** (40 originally; chunk 27 was split into 27a/27b in the 2026-10-01 review).
 
 ## Hard rules for the implementing agent
 
@@ -24,7 +24,9 @@ This directory decomposes it into **40 atomic, topologically ordered chunks**.
 4. **Strict typing.** `mypy --strict` clean. No `Any`, no bare `dict`/`list`, no implicit
    `Optional`. `# type: ignore` requires an inline justification comment.
 5. **Errors wrap, never leak.** Every boundary (filesystem, HTTP, subprocess, LLM, SQL) maps
-   foreign exceptions to a domain error defined in chunk 02. No raw `Exception` escapes a module.
+   foreign exceptions to a domain error defined for that package: `statlab.errors` in `backend/`,
+   the local `Tool*Error` classes in `mcp_server/` (which must never import `statlab.errors` —
+   D13, chunk 06 correction). No raw `Exception` escapes a module.
 6. **PLAN.md wins.** On any conflict between a chunk file and `PLAN.md`, `PLAN.md` is
    authoritative — in particular §4's normative 13-node spine table.
 7. **Update your own frontmatter.** On completion set `status: completed`, fill
@@ -186,7 +188,7 @@ not re-derive any of this from memory:
 | 01 | [`01_foundation.md`](./01_foundation.md) — repo skeleton, pinned deps (Task 0), config, Makefile | completed | — |
 | 02 | [`02_core_types.md`](./02_core_types.md) — `ToolResult` envelope, `error_class` taxonomy + retry budget, `ArtifactRef`/`ArtifactKind`, `NodeSpec`, `NodeResult`, `GatePolicy`, structured error hierarchy. **Introduces `contracts/statlab_contracts/`** — a third dependency-free package for wire types, so the envelope cannot drift between the two processes | completed | 01 |
 | 03 | [`03_data_contract.md`](./03_data_contract.md) — `DataContract` Pydantic tree (§4.1): 10 models, 9 closed vocabularies, 28 consistency rules, JSON round-trip. Lives in `contracts/` (it crosses the process boundary), **not** `backend/` as §3.2 says. Validation against a real *frame* is chunk 08's `validate_contract` tool — this chunk validates the contract against itself | completed | 02 |
-| 04 | [`04_candidate_spec.md`](./04_candidate_spec.md) — `CandidateSpec` + `PreprocessingSpec`/`FeatureSpec`/`EstimatorSpec`/`FeatureSelection`, canonical spec-hash with a drift guard, `changed_dimensions` verifying `varies_from_baseline` against the real diff, and `CandidateSet` with 7 shortlist rules. Family cap and registry checks defer to chunk 27 (they need the registry) | completed | 02, 03 |
+| 04 | [`04_candidate_spec.md`](./04_candidate_spec.md) — `CandidateSpec` + `PreprocessingSpec`/`FeatureSpec`/`EstimatorSpec`/`FeatureSelection`, canonical spec-hash with a drift guard, `changed_dimensions` verifying `varies_from_baseline` against the real diff, and `CandidateSet` with 7 shortlist rules. Family cap and registry checks defer to chunk 27b (they need the registry) | completed | 02, 03 |
 | 05 | [`05_persistence_sqlite.md`](./05_persistence_sqlite.md) — all 15 tables (§10.2), WAL + `busy_timeout` + `foreign_keys` with a read-back check, forward-only migration runner, `BEGIN IMMEDIATE` transactions, and repositories for the project/dataset/contract/run spine only. The other 11 tables get repositories in the chunk that first writes to them | completed | 01, 02 |
 | 06 | [`06_artifact_store.md`](./06_artifact_store.md) — run-folder layout (§10.1) as two frozen dataclasses in `statlab_contracts`, artifacts repository + `pruned_at`, hard-link fork copy (D11), prune-on-success with a status guard (D24), and parquet/joblib/png/json IO in `statlab_tools` — the only module that imports pandas. Spans all three packages by design. No `locked` flag: chunk 05's `runs.test_scored_at` supersedes it | completed | 01, 02, 05 |
 
@@ -198,37 +200,38 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 |---|---|---|---|
 | 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | completed | 01, 02, 06 |
 | 08 | [`08_tools_intake.md`](./08_tools_intake.md) — `load_csv` (takes the upload's sha256, not a path: traversal unrepresentable by schema), `infer_column_roles`, `validate_contract` (reads the run's contract snapshot; reports every mismatch as a finding), `detect_id_columns`, `detect_leaky_columns`. Widens the pandas boundary rule to `mcp_server/` with a test over `backend/` + `contracts/`. Milestone **M2** | completed | 03, 06, 07 |
-| 09 | [`09_tools_profiling.md`](./09_tools_profiling.md) — 9 profiling tools; shared `_frame.py` helpers (`json_scalar`: np.int64 fails the envelope, NaN must not reach JSON); `save_json` made strict; plots via pyplot-free `Figure` with `parse_math=False` (bodies now run in threads) | completed | 06, 07, 08 |
-| 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks | untouched | 07, 08 |
+| 09 | [`09_tools_profiling.md`](./09_tools_profiling.md) — 9 profiling tools; shared `_frame.py` helpers (`json_scalar`: np.int64 fails the envelope, NaN must not reach JSON); `save_json` made strict; plots via pyplot-free `Figure` with `parse_math=False` (bodies now run in threads) Milestone **M3** (profiling half; completed by chunk 10) | completed | 06, 07, 08 |
+| 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks. Writes split roles so the lineage lock has something typed to key on, and `runs.test_fingerprint` (D32). Small-split guard (D33c). Temporal/grouped stay deferred, and an unavailable strategy escalates rather than falling back. Completes **M3** with chunk 09. **Requires `REVISIONS_IMPLEMENTED.md` R4 first** | untouched | 07, 08, 09 |
 | 11 | `11_tools_cleaning.md` — 9 tools; `fit_*`/`apply_*` separation | untouched | 07, 08 |
-| 12 | `12_tools_encoding.md` — 8 tools; one-hot / ordinal / target / scaler, all fit+apply | untouched | 07, 11 |
-| 13 | `13_tools_training.md` — `ESTIMATORS` registry (6 estimators, D25), `train_estimator`, `tune_estimator`, `predict`, `predict_proba` | untouched | 07, 12 |
-| 14 | `14_tools_evaluation.md` — 11 tools **plus `rank_models`** (pulled forward so chunk 15 is self-contained — audit fix C4/S2) | untouched | 07, 13 |
-| 15 | `15_skeleton_integration.md` — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture | untouched | 08–14 |
-| 16 | `16_tools_inference.md` — `SPECS` registry, `build_dummy_matrix`, `assemble_inference_matrix`, statsmodels fits, coefficient table, VIF, residual/influence tests + known-answer test | untouched | 07, 12 |
+| 12 | `12_tools_encoding.md` — 8 tools; one-hot / ordinal / target / scaler, all fit+apply. `fit_target_encoder` returns OOF-encoded train (D34c) | untouched | 07, 11 |
+| 13 | `13_tools_training.md` — `ESTIMATORS` registry (6 estimators, D25), `train_estimator` (calibration by CV on train, D34b), `tune_estimator` (CV within train, `max_fit_seconds` enforced in the body, D34a/D36c), `predict`, `predict_proba`; explicit `seed`, `n_jobs=1` (D34e) | untouched | 07, 12 |
+| 14 | `14_tools_evaluation.md` — 11 tools **plus `rank_models` and `compare_models`** (pulled forward so the chunk 16 gate is self-contained). Every `score_*` reports a bootstrap 95 % CI (D33b) | untouched | 07, 13 |
+| 15 | `15_tools_inference.md` — `SPECS` registry, `build_dummy_matrix`, `assemble_inference_matrix`, statsmodels fits incl. Poisson GLM for count targets, coefficient table with confirmatory/exploratory labels and Holm adjustment (D35), VIF, residual/influence tests + known-answer test. **Moved before the skeleton gate** (review 2026-10-01): the skeleton fits an inferential model | untouched | 07, 12 |
+| 16 | `16_skeleton_integration.md` — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | untouched | 08–15 |
 | 17 | `17_tools_features.md` — 6 feature-construction and selection tools | untouched | 07, 12 |
 | 18 | `18_tools_interpretation.md` — permutation importance, PDP compute + render, coefficient importance, error analysis | untouched | 07, 13, 14 |
-| 19 | `19_tools_champion_reporting.md` — `select_champion`, `render_metrics_table`, `assemble_report` | untouched | 14, 16, 18 |
+| 19 | `19_tools_champion_reporting.md` — `select_champion`, `render_metrics_table`, `assemble_report` | untouched | 14, 15, 18 |
 | 20 | `20_tools_reproducibility.md` — `export_pipeline_script` (champion path only), `snapshot_run`, `compute_run_hash`, `prune_intermediate_artifacts` | untouched | 06, 19 |
 
 ## Phase C — Orchestration (21–26)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, **test-set lock** refusal pre-dispatch (D26), error mapping | untouched | 02, 06, 07 |
-| 22 | `22_graph_engine_core.md` — `RunState`, checkpointer, event bus with monotonic `seq` → `events.jsonl`, declared `NodeSpec` spine traversal, shared-node sequential execution | untouched | 02, 04, 05, 21 |
+| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, injection of `project`/`run`/`dataset`/`seed`, **test-set lineage lock** (D32a–b: `derived_from_test` propagation, `fit_*` never on test-derived, transform-only flow in node 12, one `score_*` via `test_scored_at`), error mapping. **Requires `REVISIONS_IMPLEMENTED.md` R4 first** | untouched | 02, 05, 06, 07 |
+| 22 | `22_graph_engine_core.md` — `RunState`, checkpointer, event bus with monotonic `seq` → `events.jsonl`, declared `NodeSpec` spine traversal, shared-node sequential execution. If the spec exceeds ~200 tests, split checkpointer/event bus from traversal | untouched | 02, 04, 05, 06, 21 |
 | 23 | `23_restart_reconciliation.md` — boot-time status scan, node-boundary resume, interrupted-run marking (§5.1) | untouched | 22 |
-| 24 | `24_candidate_fanout.md` — parallel candidate execution, shared-split guarantee, test-lock integration, budget caps, search waves | untouched | 06, 21, 22 |
+| 24 | `24_candidate_fanout.md` — parallel candidate execution, shared-split guarantee, test-lock integration, budget caps, search waves, pause/cancel at tool-call boundaries (D36c) | untouched | 06, 21, 22 |
 | 25 | `25_llm_client.md` — LiteLLM wrapper, 3-tier structured output with capability detection, one repair retry, token/cost logging | untouched | 01, 02 |
-| 26 | `26_routing_and_skills.md` — `Role`→model routing with 4-level precedence (§7.3), skill-file parser + startup validation, invariant-first prompt assembly | untouched | 21, 25 |
+| 26 | `26_routing_and_skills.md` — `Role`→model routing with 4-level precedence (§7.3), skill-file parser + startup validation against the declared spine and each tool's `allow_in` (§9.2), invariant-first prompt assembly, **project memory repository + read path and the `remember` action** (D36d; previously unowned) | untouched | 05, 21, 22, 25 |
 
 ## Phase D — Nodes (27–29)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 27 | `27_nodes_shared.md` — nodes 1–6: intake, problem_definition, data_profiling, data_splitting, experiment_design, inferential_analysis + their decision schemas | untouched | 08, 09, 10, 16, 22, 24, 26 |
-| 28 | `28_nodes_per_candidate.md` — nodes 7–11: preprocessing, feature_engineering, model_training, model_evaluation, model_interpretation | untouched | 11, 12, 13, 14, 17, 18, 27 |
-| 29 | `29_nodes_champion.md` — nodes 12–13: champion_selection (incl. the single test score) and artifact_persistence | untouched | 19, 20, 28 |
+| 27a | `27a_nodes_shared_foundation.md` — nodes 1–4: intake, problem_definition (incl. the PR-AUC default under imbalance, D33d, and pre-registered inference goals, D35), data_profiling, data_splitting + their decision schemas | untouched | 08, 09, 10, 22, 24, 26 |
+| 27b | `27b_nodes_design_inference.md` — nodes 5–6: experiment_design (registry check, ≤2-per-family cap, `max_candidates`, chunk 04's deferred checks) and inferential_analysis (D31, D35) + their decision schemas. Split from 27 in review: six nodes in one chunk was the largest chunk in the plan | untouched | 13, 15, 27a |
+| 28 | `28_nodes_per_candidate.md` — nodes 7–11: preprocessing, feature_engineering, model_training, model_evaluation, model_interpretation | untouched | 11, 12, 13, 14, 17, 18, 27b |
+| 29 | `29_nodes_champion.md` — nodes 12–13: champion_selection (selection-bias labelling, CIs, cross-run test-exposure disclosure — D32c/D33) and artifact_persistence | untouched | 19, 20, 28 |
 
 ## Phase E — Control layer (30–32)
 
@@ -261,13 +264,13 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 ```
 A: 01 → 02 → {03, 05} → {04, 06}
                           │
-B:                        07 → 08 → {09, 10, 11} → 12 → 13 → 14 → 15 (gate)
-                                                    │           │
-                                                    ├→ 16 ──────┤
-                                                    ├→ 17       │
-                                                    └→ 18 ──────┴→ 19 → 20
+B:                        07 → 08 → {09, 10, 11} → 12 → 13 → 14 ─┬→ 16 (gate)
+                                                    │                │
+                                                    ├→ 15 ───────────┤
+                                                    ├→ 17            │
+                                                    └→ 18 ───────────┴→ 19 → 20
 C: 21 → 22 → {23, 24}    25 → 26
-D: 27 → 28 → 29
+D: 27a → 27b → 28 → 29
 E: 30 → 31 → 32
 F: 33 → 34 → 35
 G: 36 → 37 → 38 → 39 → 40
@@ -275,7 +278,7 @@ G: 36 → 37 → 38 → 39 → 40
 
 ## Two checkpoints worth pausing at
 
-- **Chunk 15** is the keystone. A complete statistical modelling pipeline running with *zero* LLM
+- **Chunk 16** is the keystone. A complete statistical modelling pipeline running with *zero* LLM
   involvement. If it is green, every later agent misbehaviour is unambiguously a bad *decision*
   rather than a broken tool. Do not proceed past it on a partial pass.
 - **Chunk 24** carries the two honesty invariants (shared split, locked test set). Treat a failure

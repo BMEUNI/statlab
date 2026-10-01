@@ -11,7 +11,7 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**9 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 10
+**9 of 41 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 10
 next.
 
 | Verified 2026-10-01, after chunk 09 | |
@@ -41,9 +41,10 @@ deviation with a reason.
 
 | Layer | File | Holds | Written by |
 |---|---|---|---|
-| 1. Architecture | `plan/PLAN.md` (~1900 lines, v1.7) | 31 locked decisions **D1–D31**, the normative 13-node spine, tool catalogue (~86 tools), wire protocol, schema, milestones **M1–M13**, and the 21 resolved questions **Q1–Q21** | Human + me, before execution began. Amended only when a chunk proves it wrong |
-| 2. Execution map | `plan/00_index.md` | The 40-chunk table with scope, status and dependencies; 7 hard rules; **verified environment facts** (pins, pandas 3.0 behaviour, MCP SDK 2.2.0 API, toolchain config); binding conventions | Me, updated after every chunk |
+| 1. Architecture | `plan/PLAN.md` (~1900 lines, v1.8) | 36 locked decisions **D1–D36**, the normative 13-node spine, tool catalogue (~86 tools), wire protocol, schema, milestones **M1–M13**, and the 21 resolved questions **Q1–Q21** | Human + me, before execution began. Amended only when a chunk proves it wrong |
+| 2. Execution map | `plan/00_index.md` | The 41-chunk table with scope, status and dependencies; 7 hard rules; **verified environment facts** (pins, pandas 3.0 behaviour, MCP SDK 2.2.0 API, toolchain config); binding conventions | Me, updated after every chunk |
 | 3. Chunk spec | `plan/NN_name.md` | One chunk, unambiguous enough to implement without further questions. Anatomy below | Me, one at a time, never in advance |
+| 3b. Revisions | `plan/REVISIONS_IMPLEMENTED.md` | Changes required in code already committed, found after the fact, with evidence. Applied as a batch, like a chunk | Me, after a review |
 | 4. Handoff prompt | Not a file — pasted into the implementation agent | Reading order, current state, ranked hazards, non-negotiables, report questions. Anatomy below | Me, per chunk |
 
 **Why specs are written one at a time and never batched.** Every chunk so far has changed something
@@ -301,7 +302,9 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Twelve defects found and fixed. Seven were mine (chunks 01–07); four more were caught during
+Sixteen defects, plus one methodology review (17). Rows 14–17 came from the full review of
+2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Of rows 1–13,
+seven were mine (chunks 01–07); four more were caught during
 chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
 the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
 a legitimate `Literal[...]`) — not mine, not latent in `PLAN.md`, found and fixed in the same pass
@@ -325,6 +328,10 @@ loop working.
 | 11 | `detect_leaky_columns` on an entirely-null target: two empty series compare equal under `.astype(str).equals()`, vacuously flagging every other column "identical to target" | Early return (no data, no finding) before any comparison runs |
 | 12 | `@tool`'s async wrapper ran sync bodies on the event loop, serialising every tool call across all parallel runs (D17). T17 passed regardless: it proved two calls *finished*, not that they *overlapped* | Body offloaded with `anyio.to_thread.run_sync`; T17b uses a barrier that deadlocks unless bodies overlap, and was confirmed to fail on the old code |
 | 13 | Chunk 07's T23 (`no module holds a tool-name list`) source-scan regex matched any `["x", "y"]`-shaped string pair, including a legitimate `Literal["pearson", "spearman"]` type annotation chunk 09 introduced | Negative lookbehind for `Literal` added to the regex; confirmed it still catches a real tool-name-list shape |
+| 14 | The walking skeleton (chunk 15) fit an inferential model with tools owned by chunk 16, sequenced after it — the same defect as the earlier `rank_models` fix, missed for inference | Chunks swapped: inference is 15, the gate is 16 (review 2026-10-01) |
+| 15 | My chunk 08 spec told L3 to skip features with unique share > 0.5 *before* binning, so `detect_leaky_columns` never flagged any continuous leak against a class target. Green, because tests planted leaks only in categoricals | `REVISIONS_IMPLEMENTED.md` R2 |
+| 16 | `validate_contract` compared target values as strings; a 0/1 target with one null loads as float, so valid contracts reported mismatches | R1 |
+| 17 | Methodology: the test lock keyed on one artifact id (transformed test copies and forks escaped it); the champion's validation score was reported as if unbiased; tuning-by-CV and tuning-on-valid both specified; calibration and target encoding had no leak-safe fold; post-EDA p-values reported as confirmatory, uncorrected | `PLAN.md` D32–D35 |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -352,17 +359,29 @@ Not oversights. Each waits on something that does not exist yet.
 
 | Deferred | Lands in | Waiting on |
 |---|---|---|
-| Estimator-name validation, model-family cap (D28), `max_candidates` | 27 | The registry (13) and the contract together |
+| Estimator-name validation, model-family cap (D28), `max_candidates` | 27b | The registry (13) and the contract together |
 | Candidate id minting (`c_01`, sequential and human-readable) | 22 | The engine that creates waves |
 | Repositories for 10 of the 15 tables | Whichever chunk first writes to each | Callers that exist |
-| `load_csv`'s upload-path validation (must resolve inside `datasets/`, no traversal) | 08 | The only tool taking a filesystem path rather than a ref |
 | Provider-name env check (`DEEPSEEK_API_KEY`) | 26 | D18's rule that no provider is named outside `llm/` |
-| Cancelling a *running* node | 31 | Resolves live rows to `failed`; needs no new status |
+| Cancelling a *running* node | 31 | Takes effect at the next tool-call boundary (D36c); resolves live rows to `failed`, needs no new status |
 | `skills/modelling.md` heuristics and pitfalls | **the human, by hand** | Nodes existing first (D12, §9.3). Chunk 26 scaffolds headings with `TODO:` only |
 
 ---
 
-## Next: chunk 10 — splitting tools
+## Next: the revision batch, then chunk 10
+
+**Before chunk 10, apply `REVISIONS_IMPLEMENTED.md` R1–R4** (R5–R7 can ride along). These came out of
+the full review of 2026-10-01 (`PLAN.md` v1.8). R1–R3 fix wrong results in shipped intake tools. Most
+seriously, `detect_leaky_columns` never flagged a continuous leak against a class target. R4 adds the
+schema and wire fields chunk 10's split tools and chunk 21's lineage lock are built on, so skipping it
+means migrating later. Treat the batch like a chunk: write a spec from the revision file, hand it over,
+verify, commit.
+
+### Then chunk 10 — splitting tools
+
+Read D32–D34 in `PLAN.md` first. They change what the split tools record (`ArtifactMeta.split`,
+`runs.test_fingerprint`) and when they must refuse (small-split guard, unavailable strategies).
+
 
 Four per-strategy split tools (`split_random`, `split_stratified`, `split_temporal`,
 `split_grouped`) plus `verify_split`'s four independent checks. Together with chunk 09, this
@@ -475,6 +494,6 @@ above for the reasoning and the new `test_boundary_compute_libs.py`.
 
 ## Two named checkpoints ahead
 
-From `00_index.md`: **chunk 15** (walking skeleton — first end-to-end run) and **chunk 24**. Treat
+From `00_index.md`: **chunk 16** (walking skeleton — first end-to-end run; moved after inference in the 2026-10-01 review) and **chunk 24**. Treat
 both as integration gates rather than ordinary chunks. If the architecture is wrong somewhere, 15 is
 where it shows.

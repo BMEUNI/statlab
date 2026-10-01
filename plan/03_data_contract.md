@@ -312,7 +312,7 @@ class ModellingRules(BaseModel):
     available estimators depend on the running MCP server, not on this schema. Chunk 27's
     intake node validates these against `list_estimators`. Carrying a Literal here would
     make the contract the source of truth for the model registry, which is wrong."""
-    inferential_model: str | None = None    # same reasoning; chunk 16 owns the registry
+    inferential_model: str | None = None    # same reasoning; chunk 15 owns the registry
     tuning: Tuning = Field(default_factory=Tuning)
     class_weight: ClassWeight = "none"
     calibrate: bool = False

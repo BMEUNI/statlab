@@ -1,7 +1,11 @@
 # LLM-Driven Statistical Modelling Workbench — Plan
 
 > Living document. Compiled into a hand-off prompt for a coding agent in §16.
-> Status: **COMPLETE v1.7** — 31 decisions locked, all 21 questions resolved.
+> Status: **COMPLETE v1.8** — 36 decisions locked, all 21 questions resolved.
+> v1.8 (2026-10-01) is a full review after chunks 01–09: test-set integrity extended to lineage
+> and forks (D32), honest reporting of a comparison (D33), leak-safe fitting rules (D34),
+> confirmatory vs exploratory inference (D35), lifecycle and ownership fixes (D36). Changes to
+> code already written are listed in `REVISIONS_IMPLEMENTED.md`.
 
 **Project name: `modelling-agent`.** This is the canonical name for the `pyproject.toml`
 package, the repository root in illustrative layouts throughout this document, and any
@@ -31,7 +35,7 @@ Three things make it more than a chat wrapper:
 2. **The pipeline is a declared graph with explicit state** (§4.3), so it can be paused, forked,
    retried and resumed — and a new domain (time series, clustering, survival) is a new `NodeSpec`
    list plus tools, touching no existing code.
-3. **All computation happens in ~86 small typed MCP tools**, so results are deterministic and
+3. **All computation happens in 85 small typed MCP tools**, so results are deterministic and
    reproducible, and the LLM never sees or invents the data.
 
 ### 1.1 Non-goals (v1)
@@ -57,16 +61,16 @@ Three things make it more than a chat wrapper:
 | **D4** | **SQLite for metadata + filesystem for blobs.** | `sqlite3` is stdlib; the UI needs real queries ("runs sorted by score"). Blobs (parquet, joblib, png) belong on disk. |
 | **D5** | **Data contract is a Pydantic schema, serialised as JSON, and *optional*.** Exactly one CSV and at most one JSON config per run. When the config is absent or partial, the missing fields are drafted from the dataset profile with reasoning and confirmed by the user **before the run starts** (see D8); the accepted result is written back as a complete contract JSON. Uploaded and elicited contracts are the same validated object. | Resolves **Q2**. An optional config is the realistic path — users rarely have one prepared. Making elicitation emit a *file* means the next run reuses the answers instead of re-asking. |
 | **D6** | **Task scope: binary + multiclass classification and regression, with a pluggable model registry** (logreg / linear+ridge / random forest / hist gradient boosting). Adding more models = one dict entry. | Champion selection needs a real contest. Registry keeps §12 open. |
-| **D7** | **Dual track: prediction *and* classical inference.** `statsmodels` is a first-class dependency. Every run fits at least one inferential model (OLS / GLM / Logit) alongside the predictive candidates and reports coefficient tables, standard errors, p-values, confidence intervals, VIF and residual assumption tests. **Prediction still decides the champion; the inferential fit is the explanatory companion, not a competitor.** Fitted **once per run** in its own SHARED node 6 (D31), never per candidate. | Resolves **Q1 = b**. A "statistical modelling" deliverable is expected to produce a p-value, not only an AUC. Cost is contained: one dependency, one tool module, a branch in nodes 7/8/9. |
+| **D7** | **Dual track: prediction *and* classical inference.** `statsmodels` is a first-class dependency. Every run with an inference goal fits exactly one inferential model (node 6 is skipped, with a logged reason, when node 2 records none) (OLS / GLM / Logit) alongside the predictive candidates and reports coefficient tables, standard errors, p-values, confidence intervals, VIF and residual assumption tests. **Prediction still decides the champion; the inferential fit is the explanatory companion, not a competitor.** Fitted **once per run** in its own SHARED node 6 (D31), never per candidate. | Resolves **Q1 = b**. A "statistical modelling" deliverable is expected to produce a p-value, not only an AUC. Cost is contained: one dependency, one tool module, a branch in nodes 7/8/9. |
 | **D8** | **Contract elicitation happens in the setup wizard, before the run exists.** Upload CSV → backend profiles → agent proposes a complete contract with reasoning → user edits and confirms → choose mode → run starts. A run therefore *always* begins with a complete, validated contract, and auto mode is genuinely non-interactive. **Minimum input rule: `target.column` must be set at run creation** (from the config, or one click in the wizard); every other field may be agent-inferred. | Resolves **Q2b = a**. Inferring `scaling` or `cv_folds` wrongly costs a slightly worse model; inferring the *target* wrongly costs a garbage run that still reports a healthy-looking metric. That one field earns its mandatory click. Guided mode can still revisit any contract field later through the change/rewind handler. |
 | **D9** | **Persistent SSE stream down, REST up.** One long-lived `EventSource` per run carries all telemetry; user messages, gate answers and lifecycle commands go up as ordinary validated `POST`s. Every event has a monotonic `seq`, mirrored to `events.jsonl`, so `?since=<seq>` replays a run's full history on reconnect or in a newly opened tab. **Agent prose streams token-by-token; structured decisions do not** — a gate proposal appears complete and validated, never assembling field by field. | Resolves **Q4 = a**. The traffic is deeply asymmetric: the server emits every tool call, metric and plot while the client sends a handful of commands. SSE is built for that shape and gives reconnection, heartbeats and replay from the platform instead of hand-written WebSocket plumbing. A run can last twenty minutes; reconnecting into the middle of one without losing the transcript is a hard requirement, and `seq` + `events.jsonl` is what delivers it. |
-| **D10** | **Every non-skipped node gates in guided mode**, but each gate carries an applicable default and an **"approve all remaining"** action that collapses the rest of the run into auto mode. Gates also accept **free-text instructions**, which the agent interprets into a revised proposal and re-gates. **Gates block indefinitely** — no auto-approve timeout — and survive a server restart, so a gate opened yesterday can be answered today. | Resolves **Q3 = c + iii**. "Approve all remaining" gives the escape hatch without inventing a third mode, and is precisely what a user wants after a rewind ("redo the split, then just run the rest"). Auto-approve-on-timeout is rejected because it is the one setting that can silently produce a report claiming human review that never happened. Free-text answers are what make this a conversation rather than a form. |
+| **D10** | **Every non-skipped node gates in guided mode** *(amended by D29: shared nodes gate; per-candidate nodes gate only on exceptions)*, but each gate carries an applicable default and an **"approve all remaining"** action that collapses the rest of the run into auto mode. Gates also accept **free-text instructions**, which the agent interprets into a revised proposal and re-gates. **Gates block indefinitely** — no auto-approve timeout — and survive a server restart, so a gate opened yesterday can be answered today. | Resolves **Q3 = c + iii**. "Approve all remaining" gives the escape hatch without inventing a third mode, and is precisely what a user wants after a rewind ("redo the split, then just run the rest"). Auto-approve-on-timeout is rejected because it is the one setting that can silently produce a report claiming human review that never happened. Free-text answers are what make this a conversation rather than a form. |
 | **D11** | **Rewind forks.** Rewinding to node N creates a new run with `forked_from_run_id` set, state copied up to N and artifacts **hard-linked** (same inode — immutable, so sharing is safe and disk cost is near zero). The original run stays frozen and complete. **One run = exactly one reproducible path**, by construction. The UI follows the user to the fork so it feels continuous, and the run list renders lineage (`r_07 ← forked from r_03 at node 4`). | Resolves **Q9 = b**. Node 13 claims reproducibility; a run rewound three times in place cannot honestly make that claim, because its record would describe a history its `pipeline.py` never took. Forking also converts rewind from a destructive edit into the run-comparison feature (§12.5) for free. Accepted cost: the run list becomes a tree. |
 | **D12** | **One hand-written skill file, `skills/modelling.md`**, with a shared preamble and one `## <node_name>` section per staging node, each having a fixed set of required headings the loader validates at startup. **The `Tools` allow-list is enforced in `mcp_client` against the active node**, not merely stated in the prompt. Authored by the user (not agent-generated). **Build order: the coding agent scaffolds the file with all required headings and `TODO` placeholder heuristics; the real domain content is written by hand afterwards, once the nodes exist.** | Resolves **Q8 = a + i**. The value of a skill file is consistency *across* nodes, which is visible in one document and invisible across eleven. If the agent writes its own instructions the file stops being a control surface and becomes decoration — this is the part of the system that is the author's contribution rather than DeepSeek's. Code-level tool enforcement is ~10 lines and turns a prompt suggestion into a guarantee. |
 | **D13** | **The MCP server is a standalone HTTP service** — its own process, its own port, implementing the MCP **Streamable HTTP** transport (the current spec transport; plain HTTP+SSE is deprecated). Any MCP client can connect to it, not just this backend. The backend reaches it via `MCP_SERVER_URL`. **Bound to `127.0.0.1` by default and gated by a bearer token**, because this service reads and writes the filesystem and executes model fitting — it must not be openly reachable. Artifact paths are config-driven (`STATLAB_DATA_DIR`), shared with the backend, never relative to CWD. | Resolves **Q12 = b**. A genuinely independent, network-addressable MCP server is an explicit project goal, and it means the tool layer is reusable and demonstrable outside this app. Accepted cost: a third process to run and a health check. |
 | **D14** | **Single-user, loopback-only, no login.** The web app binds to `127.0.0.1` with no auth; the MCP server binds to `127.0.0.1` behind a bearer token from `.env`. No `user_id` / `owner_id` columns are added — a nullable column is a one-line migration if multi-user ever becomes real, and adding it now would be speculative. Remote demos go through an SSH tunnel, never by binding `0.0.0.0`. | Resolves **Q5 = a + i**. Multi-user is not a login screen, it is an authorization model threaded through every project and run query — a different project. Loopback-only makes the absence of auth a deliberate, defensible choice instead of an oversight, and the MCP token removes the one genuinely sharp edge: a service that writes files and burns CPU on request should not be callable by any local process that stumbles onto the port. |
 | **D15** | **Small-data only, and honest about it.** Everything is in-memory pandas; **nothing is ever sampled.** Guards instead of sampling: upload rejected above **200 MB** with a clear message, node 1 warns above **200k rows** that fitting will be slow, `max_fit_seconds` defaults to **300**, and distribution plots cap at **50 categories** per chart. | Resolves **Q6 = a**. Sampling is a correctness footgun: the moment some numbers come from a sample and others do not, every downstream statistic needs provenance tracking to stay honest, and the D7 inference track cannot report p-values from a silently sampled frame. Refusing a file we cannot handle properly is less code *and* more honest than half-handling it. Upgrade path stays narrow — v2 adds a chunked reader plus a `sampled: true` flag in every tool summary — precisely because v1 never pretends. |
-| **D16** | **Hybrid routing, cost displayed but never enforced.** `deepseek-v4-flash` is the default; `deepseek-v4-pro` for the three genuinely reasoning-shaped nodes (problem definition, interpretation & diagnostics, champion selection). All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain, so changing any node's model is a one-line edit or an env var — no code restructuring. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**. The nodes differ qualitatively: "propose an imputation strategy from this missingness table" is extraction-shaped work Flash does well, while "given five models' metrics, calibration and diagnostics, which ships and what are the caveats" is what Pro exists for — and it is the output a human reads most closely. A full run is cents either way, so a token cap protects nothing while adding a failure mode that aborts a nearly-finished run; the real runaway risk is *compute*, already bounded by `max_retune_loops` and `max_fit_seconds`. |
+| **D16** | **Hybrid routing, cost displayed but never enforced.** `deepseek-v4-flash` is the default; `deepseek-v4-pro` for the genuinely reasoning-shaped nodes (problem definition, **experiment design**, inferential analysis, interpretation & diagnostics, champion selection — the D28/D31 nodes postdate this decision and were added in review). All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain, so changing any node's model is a one-line edit or an env var — no code restructuring. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**. The nodes differ qualitatively: "propose an imputation strategy from this missingness table" is extraction-shaped work Flash does well, while "given five models' metrics, calibration and diagnostics, which ships and what are the caveats" is what Pro exists for — and it is the output a human reads most closely. A full run is cents either way, so a token cap protects nothing while adding a failure mode that aborts a nearly-finished run; the real runaway risk is *compute*, already bounded by `max_retune_loops` and `max_fit_seconds`. |
 | **D17** | **Unbounded parallel runs.** Each run is its own asyncio task; any number may execute at once, across or within projects. Three guards make that safe: (1) a **global fit semaphore** in the MCP server sized to `os.cpu_count()` (default) — runs proceed in parallel through LLM, IO and profiling work and serialise *only* at CPU-bound fits, with `n_jobs=1` per estimator so nothing oversubscribes; (2) **SQLite in WAL mode** with `busy_timeout=5000`, so concurrent readers never block and writers queue instead of erroring; (3) every `node_executions` row records **`concurrency_at_start`**, so a slow timing can be attributed to contention rather than misread as a regression. **Rewind still halts its parent** (marks it `superseded`) — parallelism is for runs the user deliberately starts, not for branches they just abandoned. | Resolves **Q13 = c**. Parallel runs are genuinely useful (kick off an auto run, explore a guided one). The naive risk is not parallelism itself but N simultaneous `GridSearchCV` calls thrashing the cores and making every logged `duration_ms` meaningless; the semaphore removes that while preserving the concurrency the user asked for. WAL is one line and is the difference between "concurrent" and "intermittent `database is locked`". |
 | **D18** | **Provider-agnostic LLM layer: LiteLLM + Pydantic. No agent framework.** Supersedes D1's DSPy wiring and resolves **Q15**'s library question. Every LLM interaction is a Pydantic output model whose `model_json_schema()` is handed to the provider's structured-output facility; LiteLLM normalises the call, the schema support, the retries and the cost maths across providers. **DeepSeek is the default, not a dependency** — swapping to Claude or GPT is a model-string change plus an API key, with no code edit. DSPy is dropped: its payoff is prompt *optimisers*, which are out of scope, and it provides no memory (memory is §7's SQLite tables — a misconception worth naming). LangChain stays dropped. | Resolves **Q15 = no mandate**. Without optimisers, DSPy is a verbose way to do what Pydantic + a JSON schema already does, and it obscures the actual prompt — bad for a project that must be explained. LiteLLM is the one dependency that pays for itself here: multi-provider routing, `supports_response_schema()` capability detection, and `completion_cost()` per-provider pricing are all things we would otherwise hand-roll and maintain. |
 | **D19** | **Report is markdown + PNG files.** `report/report.md` referencing `report/plots/*.png`, rendered in the UI. No PDF toolchain, no embedded base64. HTML export from the same markdown is a later two-line addition if a single shareable file is ever wanted. | Resolves **Q10 = a**. Keeps the report a *source artifact* rather than a rendered output: `report.md`, `pipeline.py` and `manifest.json` are all text, all diffable, all inspectable with a text editor, and the plots are files the tools already produce. A PDF renderer (weasyprint/pandoc/LaTeX) is exactly the dependency that breaks on a new Python release and blocks a build for reasons unrelated to this project. |
@@ -82,6 +86,11 @@ Three things make it more than a chat wrapper:
 | **D29** | **Candidates execute in parallel; guided mode gates the shortlist, then only exceptions.** All candidates advance concurrently, serialising only at CPU-bound fits via D17's existing semaphore. In guided mode the **node-5 shortlist is the gate**; nodes 7–11 then run ungated *except* on exceptions — a candidate failing, a material tool warning, or a metric far outside the expected range. `approve_all_remaining` (D10) still lets the user opt into per-node gating for a specific candidate. **Amends D10**: "every node gates" was written when a run was one path; with 5 candidates × 5 per-candidate nodes it would mean 25+ stops. **Per-candidate wall-clock timings are not comparable** under parallel execution (candidates compete for semaphore permits); the report states this rather than implying fit costs can be ranked. | Resolves **Q20 = b + i, with iii**. The parallel machinery already exists, so this is faster for free. On gating: a gate nobody reads is worse than no gate — 25 sequential prompts trains a user to click approve reflexively and the audit trail becomes fiction. The shortlist is the decision that actually matters, and exception-gating preserves oversight exactly where something went wrong. Being explicit about timing incomparability matters because a comparison-focused report inviting a fit-cost ranking from contended timings would be quietly wrong. |
 | **D31** | **The inferential fit is per-run, in its own SHARED node 6 `inferential_analysis`.** Spine becomes **13 nodes**. Node 6 builds its own canonical inference matrix — median/mode imputation, dummy coding with explicit reference levels, no scaling, no selection beyond collinearity removal — fits **one** model on train+valid, and produces the coefficient table, VIF, residual and influence diagnostics. It depends only on nodes 1–4, so the engine may run it concurrently with the candidate fan-out. Node 12 reports exactly **one** coefficient table. Resolves **Q21 = a**. | The audit found D7 ("one inferential fit") contradicting its placement in a PER_CANDIDATE node. The fix is not bookkeeping: an inferential model answers a question about *the data* ("does plan tier affect churn?"), not about a candidate's encoding choice, so it has no business being multiplied by candidates. The rejected option — N coefficient tables, one per candidate — is worse than untidy, it is misleading: a coefficient's magnitude and significance depend on what else is in the model, so tables from different feature sets are not comparable and presenting N of them invites exactly the wrong reading. One canonical specification, stated once, with its assumptions tested. |
 | **D30** | **Specification hygiene, from an external audit of v1.5.** (a) §4 carries a **normative spine table** that supersedes all other numbering. (b) The test-set lock has a named owner: `mcp_client` + a `locked` registry flag, **not** the stateless server, and the guarantee is scoped honestly to this application. (c) `NodeSpec` / `NodeResult` / `ArtifactRef` / `CandidateSpec` and the success/**error** envelope with a 4-way `error_class` taxonomy are frozen in **M0.5**, before the three milestones that consume them. (d) Every milestone's done-criterion includes `make test` fully green, not just its own demo. (e) All tolerances are numbers (§14.1) and concurrency tests inject permits instead of discovering them (§14.2). (f) M7→M7a/M7b and M8→M8a/M8b. (g) Restart reconciliation specified (§5.1). | The audit found two hard contradictions (a `split_data` tool the catalogue forbids, node renumbering not propagated to §3/§10), one core guarantee written as an outcome with no mechanism, and demo-only gates that let a milestone pass while breaking a sibling — evidenced by M5's own DoD depending on an M7 tool. Those are defects, not preferences, and a document claiming COMPLETE while containing them is worse than one that admits it is a draft. The deeper lesson taken: **an outcome is not a design.** "Rejected unless a champion is chosen" and "reproduces within tolerance" both read like specifications and neither told an implementer what to build. |
+| **D32** | **Test-set integrity covers lineage and the whole project, not one artifact in one run** (review 2026-10-01). (a) **Lineage lock:** every artifact produced by a call that received a test-derived input is itself test-derived (`artifacts.derived_from_test`, set by `mcp_client` at registration). (b) **`fit_*` tools never receive a test-derived artifact, in any node.** Before node 12 no tool receives one. In node 12, once a champion is chosen, only transform-only tools (`apply_*`, `predict`, `predict_proba`) may receive them — the champion's already-fitted pipeline applied to `test` — plus **exactly one `score_*` call**, guarded by `runs.test_scored_at`. (c) **Cross-run exposure is disclosed:** node 4 records `runs.test_fingerprint` = sha256(dataset sha256, split seed, sorted test row positions). A fork hard-links the same test set (D11), and a re-split with the same seed recreates it, so a fork that reaches node 12 scores it again. Not forbidden (that would make rewind useless) but **counted**: node 12 reports how many earlier runs in the project scored the same fingerprint, and if any did, the report and UI state that the estimate is no longer unbiased. | The original rule keyed on one artifact id. That missed three ways to peek: transforming test in node 7 and scoring the transformed copy in node 10; the impossibility of scoring at all if only one `score_*` call may touch test (the frame must be imputed, encoded and predicted first); and forking after a disappointing test score until one looks better. Each turns "scored exactly once" into a per-artifact, per-run truth that is globally false. |
+| **D33** | **Honest reporting of a comparison** (review 2026-10-01). (a) The champion's validation score is **selection-biased** — the maximum over N candidates, W waves and any retune loops (winner's curse). The report labels it a *selection score* and states N and W; only the test score is a performance estimate. (b) Every reported score carries a **95 % bootstrap CI** (1000 resamples, percentile, seeded from `constraints.random_seed`). Node 12 must say when the champion's validation CI overlaps the runner-up's: "not distinguishable on this validation set". (c) **Small-split guard:** node 4 escalates (`data`) instead of splitting when valid or test would hold fewer than 30 rows, or, for classification, fewer than 5 rows of any class. (d) **Default primary metric** for classification is `pr_auc` when the minority share is below 0.1, matching `summarize_target`'s imbalance warning, and `roc_auc` otherwise; overridable, choice logged. (e) Node 12's trade-offs weigh accuracy against interpretability and model complexity, **never fit time** (D29 makes timings incomparable). | D15 targets small data, which is exactly where one 20 % validation split is noisy and where reporting the winner's validation score as if it were unbiased misleads most. CIs make the noise visible without changing the shared-split model. **Rejected for v1:** ranking candidates by k-fold CV over train+valid. It is more statistically efficient on tiny data, but changes every tool's inputs, the shared-split guarantee and the test-lock reasoning; CIs plus the small-split guard buy most of the honesty for none of that. The plan's own c_02 example argues for PR-AUC at 3 % positives while defaulting to ROC-AUC; (d) removes that contradiction. |
+| **D34** | **Leak-safe fitting rules** (review 2026-10-01). (a) **Tuning** (`tune_estimator`) uses `cv_folds`-fold CV *within train only*. `valid` ranks candidates and drives retune decisions; it is never inside a fit. (b) **Calibration** (`calibrate`) is fitted inside `train_estimator` by `CalibratedClassifierCV(cv=cv_folds)` on train, never on valid or test. (c) **Target encoding**: `fit_target_encoder` returns the encoder *and* the train frame encoded out-of-fold (cross-fitting, as sklearn's `TargetEncoder.fit_transform` does); `apply_target_encoder` is for valid/test only. (d) **Pre-split row drops** are limited to target-independent structural ones (exact duplicates, rows above `drop_rows_above` missing share), done once in node 4 and recorded. Everything learned from data is fit on train through `fit_*`/`apply_*`. (e) **Seeds**: every stochastic tool takes an explicit `seed`, which `mcp_client` fills from `constraints.random_seed` exactly as it fills `project`/`run`. `split.seed` governs only the partition. `n_jobs=1` is forced inside tools (D17). | §4 said the predictive matrix is "fitted on train (tuned on valid)" while the contract specifies `cv_folds`: two selection mechanisms for one decision, which two modules would implement differently. Calibration and target encoding each have one leak-free way to fit and several plausible-looking leaky ones; naming the fold removes the choice. Duplicates must go before the split, or one row lands in train and its copy in test — the leak `verify_split` check 2 exists to catch. Without an explicit seed the `pipeline.py` reproducibility claim (§14.1) has nothing to reproduce. |
+| **D35** | **Inference is confirmatory only where pre-specified** (review 2026-10-01). Node 2 fixes the inference goals and their predictors *before* EDA (node 2 precedes node 3), and those are the confirmatory tests. Node 6 may add control covariates and transformations after seeing EDA; their coefficients are reported as **exploratory**, with p-values marked "not pre-specified". With more than one confirmatory test, p-values are **Holm-adjusted** (`statsmodels.stats.multitest.multipletests`), raw and adjusted both reported, each goal's α applied to the adjusted value. `count` targets use a **Poisson GLM**, not OLS (outside the walking skeleton). | A p-value is valid only for a specification chosen before looking at the outcome's relationships. Node 6 choosing its formula after EDA is specification search, and several goals each tested at α inflate the family-wise error rate. Both are standard ways an honest-looking coefficient table becomes misleading, and both are cheap to prevent: one label, one correction call. |
+| **D36** | **Lifecycle and ownership corrections** (review 2026-10-01). (a) The canonical mode token is **`autonomous`** (code, DB, API); "Auto" is only a UI label. (b) **`superseded`** is a run status: the state of a parent halted by a rewind fork (D17), distinct from `cancelled` (user stopped it) and `completed`. (c) **Pause and cancel take effect at tool-call boundaries.** A tool body runs in a worker thread, and Python cannot interrupt a running thread, so a cancel waits for the current call to return; long tools enforce their own budget (`tune_estimator` stops at `max_fit_seconds` and returns best-so-far). (d) **Project memory lives only in the `memory` table**; §10.1's `memory.json` is dropped. `remember` is a backend action of the agent loop, not an MCP tool — the MCP server has no database (D26). | (a) The plan said "auto" in 13 places while the implemented `RunMode` and the DB CHECK say `autonomous`; an implementer following the prose would write values the database rejects. (b) D17 and §5 both say "marks it superseded", but no status existed to mark. (c) Was unspecified, and the obvious design (timeouts on the decorator) cannot work on threads. (d) Two stores for one fact drift, and no chunk owned either. |
 
 ### 2.1 Environment flag — Task 0
 
@@ -281,7 +290,7 @@ decision and before the action (so the user edits parameters, not results).
 | 1 | **Intake, configuration & data contract** | shared | re-validates the contract against the actual CSV, flags mismatches and suspected leaks, proposes fixes (elicitation already happened pre-run, D8) | `raw` artifact, contract snapshot, intake report |
 | 2 | **Problem definition & scoping** | shared | task type, primary predictive metric, secondary metrics, success threshold, **inference goals** (which relationships must be explained and at what α), constraints, risks | `problem_spec.json` |
 | 3 | **Data profiling (EDA)** | shared | which profiles matter, what the numbers mean, hypotheses worth testing | profile JSON, plots, EDA narrative |
-| 4 | **Data splitting** | shared | strategy (random/stratified/temporal/grouped), ratios, seed — **once, shared by every candidate** (D26) | `train`/`valid`/`test` artifacts, split report |
+| 4 | **Data splitting** | shared | strategy (random/stratified/temporal/grouped), ratios, seed — **once, shared by every candidate** (D26). A strategy with no v1 tool (temporal, grouped) escalates as `data`, **never falls back to random**: a random split of time-ordered data lets the model see the future. Refuses splits that are too small (D33c). Records `test_fingerprint` (D32c) | `train`/`valid`/`test` artifacts, split report |
 | 5 | **Experiment design** | shared | **the candidate shortlist**: which 3–5 approaches are worth trying and why, each justified by an EDA finding (D28) | `candidates.json`, comparison plan |
 | 6 | **Inferential analysis** | shared | **the inferential specification** (formula, family, link, reference levels) and which findings are defensible; fitted **once per run** on a canonical matrix, independent of any candidate (D31) | inference matrix, one fit, coefficient table with p-values/CIs, VIF, residual & influence diagnostics |
 | 7 | **Data preprocessing & cleaning** | per-candidate | imputation per column, outlier policy, dedupe, dtype fixes | fitted transformers, cleaned artifacts |
@@ -314,7 +323,7 @@ nodes 7–8, the **inferential** matrix once in node 6 (D31):
 | Categoricals | one-hot / target encoding | dummy coding with an explicit reference level |
 | Feature selection | aggressive, metric-driven | only theory-driven drops + collinearity removal |
 | Missing values | imputed | imputed, with a missingness indicator where informative |
-| Fitted on | `train` (tuned on `valid`) | `train` + `valid` (no held-out set needed for inference) |
+| Fitted on | `train` (tuned by CV within `train`; ranked on `valid` — D34a) | `train` + `valid` (no held-out set needed for inference) |
 | Built in | nodes 7–8, once per candidate | node 6, once per run (D31) |
 | How many | one per candidate | exactly one per run |
 | Judged by | held-out metric on `valid`, then `test` once if champion | assumption tests, AIC/BIC, coefficient stability |
@@ -408,6 +417,8 @@ name", which chunk 03 rejects for the same reason the plan rejects other encoded
 implicit-convention shapes elsewhere: three explicit fields carry the same information with no
 convention to remember. `outlier_policy` is likewise named `outliers` on `PreprocessingRules`,
 for brevity and symmetry with the other three preprocessing sub-fields.
+
+**`modelling` fields constrain node 5; they are not a frozen shortlist.** `modelling.candidates` is the pool of estimators node 5 may draw from. `class_weight`, `calibrate` and `tuning`, when set, apply to *every* candidate; when absent, node 5 may vary them between candidates. That is how a user-supplied value stays authoritative (D5) without turning D28's reasoned shortlist into a fixed list.
 
 **Contract → tool parameter precedence.** Several contract fields duplicate `load_csv` params
 (`delimiter`, `encoding`, `decimal`, `na_values`, `header_row`). The rule: **node 1 copies the
@@ -517,15 +528,21 @@ section exists; without them a comparison-focused app produces confident nonsens
      `RunState.current_node == "champion_selection"` (node 12) **and** `RunState.champion_candidate_id is
      not None`;
    - the refusal is raised **before dispatch**, so the call never reaches the network;
-   - node 12 unlocks it for exactly one `score_*` call, then re-locks and records
-     `test_scored_at` in `RunState`. A second attempt is refused even inside node 12.
+   - the lock follows **lineage**: any artifact produced from a test-derived input is itself
+     test-derived, and `fit_*` tools never receive one (D32a–b);
+   - in node 12, once a champion is chosen, transform-only tools (`apply_*`, `predict`,
+     `predict_proba`) may receive test-derived artifacts — the champion's fitted pipeline applied to
+     test — and **exactly one `score_*` call** is allowed, claimed atomically through
+     `runs.test_scored_at`. A second attempt is refused even inside node 12.
 
    The §14 test drives `mcp_client`, not the server, and asserts the pre-dispatch refusal.
    **Scope limit:** an external MCP client (D13) is *not* bound by this — it can call any tool on
    any artifact. The guarantee is "this application never asks", not "the tools refuse". Stating
    that honestly matters more than pretending otherwise.
 3. **The champion is scored on test exactly once.** That number is the only unbiased estimate
-   in the run, and the report must say so.
+   in the run, and the report must say so — with its bootstrap CI, and with the champion's
+   validation score labelled as selection-biased (D33a–b). Across runs, the number of earlier
+   scorings of the same test set is reported (D32c); a fork is not a fresh test.
 
 **Budget.** `max_candidates` (default 8) and `max_total_fit_seconds` bound the fan-out. The
 agent may run an **iterative search**: propose a first wave, read the comparison, propose a
@@ -676,7 +693,7 @@ On startup the backend scans `runs` and acts by status:
 |---|---|
 | `awaiting_user` | rehydrate `RunState` from `state.json`, re-publish the pending gate from `gates`, leave **dormant** until the gate is answered |
 | `paused` | rehydrate, leave dormant until an explicit `resume` |
-| `running` | the process died mid-flight → mark the interrupted node execution `failed` with `error_class="bug"`, reason `"process terminated"`, then **rewind to the last completed node boundary** and resume from there |
+| `running` | the process died mid-flight → mark the interrupted node execution `failed` with `error_class="bug"`, reason `"process terminated"`, then **resume in place from the last completed node boundary**. This is crash recovery, not a D11 rewind: no fork is created, because no user decision changed |
 | `pending` | start normally |
 | `completed` / `failed` / `cancelled` | nothing |
 
@@ -792,10 +809,16 @@ The `@tool` decorator owns registration, Pydantic validation, artifact resolutio
 envelope, timing, and semaphore acquisition for CPU-bound tools (`heavy=True`) — so each tool
 body contains only its actual logic.
 
-### 6.3 Tool catalogue (~85 tools)
+### 6.3 Tool catalogue (85 tools)
 
 `[v1]` marks the walking-skeleton subset built first (§6.4). `H` = heavy, takes a semaphore
 permit (D17).
+
+**Signatures below omit orchestrator-supplied parameters.** Every tool with artifact inputs also
+receives `project` and `run` (chunk 07); `load_csv` receives `dataset`, the upload's sha256 (chunk
+08); stochastic tools receive `seed` (D34e). `mcp_client` fills all of them and overwrites anything
+the model proposes, so they are never part of the agent's choice. Any `df`/`train`/`truth`
+parameter is an artifact ref, and is subject to the test-set lineage lock (D32).
 
 **intake** — 5
 ```
@@ -855,7 +878,7 @@ drop_columns(df, columns)                                              [v1]
 drop_duplicate_rows(df, subset)
 drop_constant_columns(df)
 drop_high_missing_columns(df, threshold)
-cast_dtypes(df, roles)
+cast_dtypes(df, roles)                      roles from the contract snapshot, not chosen
 fit_imputer(train, strategy_per_column)     → imputer artifact         [v1]
 apply_imputer(imputer, df)                                             [v1]
 fit_outlier_clipper(train, method, columns)
@@ -868,8 +891,8 @@ fit_onehot_encoder(train, columns, max_cardinality)                    [v1]
 apply_onehot_encoder(encoder, df)                                      [v1]
 fit_ordinal_encoder(train, columns, level_order)
 apply_ordinal_encoder(encoder, df)
-fit_target_encoder(train, columns, target, smoothing)
-apply_target_encoder(encoder, df)
+fit_target_encoder(train, columns, target, smoothing)  → encoder + OOF-encoded train (D34c)
+apply_target_encoder(encoder, df)           valid/test only, never train
 fit_scaler(train, method, columns)                                     [v1]
 apply_scaler(scaler, df)                                               [v1]
 ```
@@ -893,8 +916,8 @@ assemble_inference_matrix(train, valid, feature_spec)    fit on train+valid
 **training** — 6
 ```
 list_estimators(task)                       registry introspection     [v1]
-train_estimator(name, params, train, target)                       H   [v1]
-tune_estimator(name, param_grid, train, target, cv, max_seconds)   H
+train_estimator(name, params, train, target, calibrate)            H   [v1]
+tune_estimator(name, param_grid, train, target, cv, max_seconds)   H   CV within train (D34a)
 predict(model, df)                                                     [v1]
 predict_proba(model, df)                                               [v1]
 get_model_params(model)
@@ -911,7 +934,7 @@ compute_calibration_curve(probabilities, truth, n_bins)
 select_threshold(curve, objective)          F1 / cost / target recall
 plot_curve(curve, title)                    → png, renders any curve artifact
 cross_validate_estimator(name, params, train, target, cv)          H
-compare_models(models, metric, split)       → ranking table
+compare_models(models, metric, split)       → ranking table          [v1]
 compute_learning_curve(name, params, train, target)                H
 ```
 
@@ -942,8 +965,8 @@ analyze_errors(predictions, truth, df, by)  worst-performing segments
 rank_models(models, metric, constraints)                               [v1]
 select_champion(ranking, rationale)
 render_metrics_table(models, metrics)       → markdown table
-assemble_report(run, sections, artifacts)   → report.md
-export_pipeline_script(run)                 → pipeline.py from tool log
+assemble_report(sections, artifacts)        → report.md
+export_pipeline_script()                    → pipeline.py from tool log
     Source of truth: the champion's path only — the SHARED prefix (nodes 1-5 tool
     calls; node 6's inference track is reported, not part of the predictive
     pipeline) plus the winning candidate's branch (nodes 7-11), selected by joining
@@ -959,11 +982,11 @@ export_pipeline_script(run)                 → pipeline.py from tool log
 
 **artifacts & reproducibility** — 5
 ```
-list_artifacts(run)                                                    [v1]
+list_artifacts()                                                       [v1]
 describe_artifact(artifact)                 head rows, shape, dtypes    [v1]
-compute_run_hash(run)                       inputs + tool-log digest
-snapshot_run(run)                           manifest.json + env capture
-prune_intermediate_artifacts(run, node)     within-node only, success only (D24)
+compute_run_hash()                          inputs + tool-log digest
+snapshot_run()                              manifest.json + env capture
+prune_intermediate_artifacts(node)          within-node only, success only (D24); sets pruned_at, never deletes rows
 ```
 
 > **`health` is not a tool.** It is an unauthenticated HTTP route (`GET /health` on the same
@@ -1212,7 +1235,10 @@ interpretation deserves the model doing the interpreting.
 
 ## 8. Run modes
 
-| | Auto | Guided |
+The canonical token is **`autonomous`** in code, the database and the API; "Auto" is only its UI
+label (D36a). Every "auto mode" below means `autonomous`.
+
+| | Auto (`autonomous`) | Guided (`guided`) |
 |---|---|---|
 | Gates | none (except escalation) | **shared nodes 1–6 gate; the node-5 shortlist is the key decision.** Per-candidate nodes 7–11 run ungated except on exceptions (D29) |
 | Agent proposes params | yes, applies immediately | yes, presented for edit/approve |
@@ -1293,8 +1319,10 @@ train / valid / test artifacts registered, split report with per-class counts pe
 
 - Parses `##` headings into node sections and `###` into fields.
 - **Fails at startup** (not mid-run) if: a staging node has no section, a section is missing a
-  required heading, or `Tools` names a tool the MCP server does not expose. A typo in a tool
-  name is a startup error, never a silent capability loss.
+  required heading, or `Tools` names a tool the MCP server does not expose, **or names a tool
+  whose `allow_in` metadata (served in `Tool.meta`) excludes that node**. A typo in a tool
+  name is a startup error, never a silent capability loss — and so is listing a real tool under the
+  wrong node, which an existence check alone would pass.
 - Hands each node *only* its own section plus the preamble — the graph is the plan, the skill
   file is the policy, and no node sees another node's instructions.
 - `Tools` is parsed into a set and passed to `mcp_client` as the active allow-list; a call to
@@ -1334,7 +1362,6 @@ projects/<project_slug>/
 │                       │  run's `raw` artifact is already parquet, so a second
 │                       │  `<sha256>.parquet` cache has no consumer and was dropped)
 ├── contracts/          contract_v1.json ...
-├── memory.json
 └── runs/<run_id>/
     ├── state.json              # checkpoint, rewritten after each node
     ├── events.jsonl            # append-only event log (SSE replay source)
@@ -1366,7 +1393,7 @@ datasets(id, project_id, filename, path, sha256, n_rows, n_cols, created_at)
 contracts(id, project_id, path, json, version, created_at)
 runs(id, project_id, contract_id, mode, status, current_node,
      champion_model_id, forked_from_run_id, started_at, ended_at, config_json,
-     test_scored_at)
+     test_scored_at, test_fingerprint)
 sessions(id, project_id, title, created_at)
 messages(id, session_id, run_id, role, content, meta_json, ts)
 candidates(id, run_id, label, rationale, spec_json, varies_from_baseline_json,
@@ -1375,7 +1402,7 @@ node_executions(id, run_id, candidate_id, node_name, seq, attempt, status,
                 summary, error, concurrency_at_start, started_at, ended_at)
 tool_calls(id, run_id, node_execution_id, tool_name, args_json,
            result_json, duration_ms, ts)
-artifacts(id, run_id, kind, path, meta_json, produced_by, ts)
+artifacts(id, run_id, kind, path, meta_json, produced_by, ts, pruned_at, derived_from_test)
 models(id, run_id, candidate_id, name, params_json, artifact_id, created_at)
 metrics(id, run_id, candidate_id, model_id, split, name, value)
 gates(id, run_id, node_execution_id, question_json, answer_json, status, ts)
@@ -1385,7 +1412,7 @@ memory(id, project_id, key, value_json, source_run_id, ts)
 ```
 
 `status` enums: `runs.status` ∈ {pending, running, awaiting_user, paused, failed, cancelled,
-completed}; `node_executions.status` ∈ {pending, running, awaiting_user, skipped, failed,
+completed, superseded} (`superseded`: halted by a rewind fork, D36b); `node_executions.status` ∈ {pending, running, awaiting_user, skipped, failed,
 completed}.
 
 **Two node vocabularies, deliberately.** `node_executions.status` is a *row lifecycle* and needs
@@ -1465,6 +1492,10 @@ Every frame is one envelope, so the frontend has a single parser:
   is a *tail of that file*, not a parallel channel — so what the browser sees and what
   disk records can never diverge.
 - **Reconnect**: `GET /api/runs/{id}/events?since=412` replays 413…N then continues live.
+  `since` ≥ the current maximum replays nothing and tails live; `since` is never an error.
+- **Ordering**: `seq` is one total order per run. Events from parallel candidates interleave in
+  it, so per-candidate ordering comes from filtering on `payload.candidate_id`, not from gaps in
+  `seq`.
   `EventSource` reconnects on its own; the client just remembers its last `seq`.
 - **Heartbeat**: an SSE comment every 15 s keeps proxies from idling the connection out.
 - **Prose vs structure**: `message.assistant.delta` carries token chunks for narration and
@@ -1539,13 +1570,13 @@ cache. Charts: recharts for metrics, server-rendered matplotlib PNGs for statist
 | **M2** | `DataContract` Pydantic schema (§4.1) + **intake** tools | contract tests pass; mismatches produce precise errors; a CSV loads to an artifact |
 | **M3** | **profiling** + **splitting** tools | every tool tested on fixtures; `verify_split` catches a deliberately overlapping split |
 | **M4** | **cleaning** + **encoding** tools | `fit_*` on train / `apply_*` on valid+test round-trips; a fit-on-test attempt is visible in the call log |
-| **M5** | **training** + **evaluation** tools, **plus `rank_models` and `compare_models`** (needed by the skeleton's ranking step even though `rank_models` lives in the champion phase) | **walking skeleton (§6.4) runs end to end with zero LLM involvement on BOTH a classification and a regression fixture**, 3 estimators each, producing real metrics *and a ranking*; **all M0–M4 tests still pass** |
-| **M6** | **inference** + **inference_matrix** tools (D7, D31) | `logit` and `ols` both fit on a canonical matrix; exactly one coefficient table per run; **known-answer inference test green** |
+| **M5** | **training** + **evaluation** tools, **plus `rank_models` and `compare_models`** (needed by the skeleton's ranking step even though `rank_models` lives in the champion phase) | every training and evaluation tool tested on fixtures; **all M0–M4 tests still pass** |
+| **M6** | **inference** + **inference_matrix** tools (D7, D31, D35), then the **walking skeleton** | `logit` and `ols` both fit on a canonical matrix; **known-answer inference test green**; **walking skeleton (§6.4) runs end to end with zero LLM involvement on BOTH a classification and a regression fixture**, 3 estimators each, producing real metrics, *a ranking* and one coefficient table. The skeleton fits an inferential model, so it cannot precede the inference tools (review 2026-10-01) |
 | **M7a** | **features** + **interpretation** tools | every tool tested on fixtures; compute/render separation honoured (`partial_dependence` returns data, `plot_partial_dependence` renders it); **all prior tests pass** |
-| **M7b** | **champion & reporting** + **artifacts** tools, incl. `export_pipeline_script` | full ~86-tool catalogue tested; **`pipeline.py` reproduces the champion's primary metric within the §14.1 tolerance** from a fixed seed; **all prior tests pass** |
+| **M7b** | **champion & reporting** + **artifacts** tools, incl. `export_pipeline_script` | full 85-tool catalogue tested; **`pipeline.py` reproduces the champion's primary metric within the §14.1 tolerance** from a fixed seed; **all prior tests pass** |
 | **M8a** | Graph engine core: `RunState`, checkpointing, **declared `NodeSpec` spine (D27)**, single-candidate auto mode, restart reconciliation (§5.1) | a one-candidate auto run completes driving real tools; `state.json` replayable; a synthetic 3-node domain runs on the same engine with no engine edits; a killed mid-node run resumes from its last node boundary; **node 6 runs concurrently with the fan-out without touching candidate state** |
 | **M8b** | **Candidate fan-out (D26)** + parallel execution (D29) + **test-set lock enforcement** | auto run completes across ≥3 candidates in parallel; all candidates receive byte-identical splits; **a `test`-artifact read before champion selection is refused by `mcp_client` before dispatch**; champion scored on test exactly once |
-| **M9** | LiteLLM client (structured output + repair retry + cost), routing, **skill-file scaffold with registry-validated `Tools` (§9.3)**, per-node decision schemas | agent-decided auto run completes; decisions logged; loader starts clean against the live registry; **the same run works against a second provider by changing only env vars** |
+| **M9** | LiteLLM client (structured output + repair retry + cost), routing, **skill-file scaffold with registry-validated `Tools` (§9.3)**, per-node decision schemas | agent-decided auto run completes; decisions logged; loader starts clean against the live registry; **provider portability proven in CI by the grep assertion, `model_for()` precedence tests and a recorded-fixture round-trip**; a live run against a second provider is an optional smoke test behind an env var, since §14.2 bans live LLM calls in CI |
 | **M10** | Control layer: router, Q&A, status, recovery/retry, lifecycle | injected failures recover; pause/resume/cancel verified |
 | **M11** | HITL gates + guided mode + fork-based rewind | guided run gates the node-5 shortlist and exceptions only (D29); all 7 gate actions work; rewind to node 4 produces a fork whose parent is unchanged and whose shared artifacts are hard-linked |
 | **M12** | FastAPI surface + SSE + event replay | curl-driven full run, reconnect loses nothing |
@@ -1623,9 +1654,11 @@ Tests must not depend on timing or core count:
   that catches a silently wrong inferential pipeline — metric-based tests cannot.
 - **Candidates & comparison (D26)**: all candidates receive byte-identical train/valid/test
   artifacts; **any tool call reading the `test` artifact before node 12 with a champion chosen is
-  rejected**; the champion is scored on test exactly once (assert one `test`-split metric row);
+  rejected**; the champion is scored on test exactly once (assert one `test`-split metric row **and that its `model_id` is `runs.champion_model_id`**); a test-derived artifact (e.g. imputed test) is refused by every `fit_*` tool and by every tool before node 12 (D32); a fork that re-scores a fingerprinted test set reports the earlier scoring;
   `max_candidates` and `max_search_waves` are respected; **candidates advance in parallel and one
   candidate failing does not abort its siblings** (D29).
+- **SSE (§11.1)**: append N events with interleaved candidate ids, reconnect at `since=k`, assert
+  exactly `k+1…N` replayed in order then live; `since` beyond the maximum tails without error.
 - **Domain seam (D27)**: no node name appears outside `domains/` (grep assertion); a synthetic
   second domain with a 3-node spine executes end to end on the same engine without engine edits.
 - **Graph engine**: checkpoint/resume round-trip; **fork leaves the parent run byte-identical

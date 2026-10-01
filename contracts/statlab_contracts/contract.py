@@ -299,7 +299,7 @@ class ModellingRules(BaseModel):
     make the contract the source of truth for the model registry, which is wrong."""
 
     inferential_model: str | None = None
-    """Same reasoning as `candidates`; chunk 16 owns the registry."""
+    """Same reasoning as `candidates`; chunk 15 owns the registry."""
 
     tuning: Tuning = Field(default_factory=Tuning)
     class_weight: ClassWeight = "none"
