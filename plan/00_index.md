@@ -190,6 +190,32 @@ not re-derive any of this from memory:
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
 
+## Execution batches (from chunk 12, decided 2026-10-01)
+
+Chunks 01–11 ran one per cycle. The remaining 30 run in **16 batches**. One cycle per batch: both
+specs are written and committed, two implementation stages run in sequence (the second sees the
+first's code), there is one independent review, and one commit. Scope is unchanged. Every chunk so
+far had 2–4 defects caught in review, so the review is not reduced, only shared.
+
+| Batch | Chunks | Closes |
+|---|---|---|
+| B1 | 12 encoding + 13 training | M4 |
+| B2 | 14 evaluation + 15 inference | M5 |
+| B3 | 16 walking-skeleton gate (alone: it is the gate) | M6 |
+| B4 | 17 features + 18 interpretation | M7a |
+| B5 | 19 champion/reporting + 20 reproducibility | M7b |
+| B6 | 21 mcp_client + 25 llm_client (independent) | |
+| B7 | 22 engine core + 23 restart reconciliation | M8a |
+| B8 | 24 candidate fan-out + 26 routing/skills | M8b |
+| B9 | 27a nodes 1–4 + 27b nodes 5–6 | |
+| B10 | 28 nodes 7–11 (alone: the largest) | |
+| B11 | 29 nodes 12–13 + 30 control router | M9 |
+| B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11 |
+| B13 | 33 API projects + 34 API runs | |
+| B14 | 35 SSE + 36 frontend scaffold | M12 |
+| B15 | 37 setup flow + 38 run workspace | |
+| B16 | 39 comparison + 40 report | M13 |
+
 ## Phase A — Foundation (01–06)
 
 | # | Chunk | Status | Depends on |
@@ -213,8 +239,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 09r | [`REVISIONS_IMPLEMENTED.md`](./REVISIONS_IMPLEMENTED.md) — revision batch from the v1.8 review: R1-R3 intake contract/leak fixes, R4 schema and wire fields for the D32 lineage lock, R5-R7 small fixes | completed | 08, 09 |
 | 10 | [`10_tools_splitting.md`](./10_tools_splitting.md) — `split_random`, `split_stratified` and `verify_split`'s 4 checks (temporal/grouped follow at M7). Writes split roles so the lineage lock has something typed to key on, and the test fingerprint as a content digest (D-c: no dataset identity needed, matches on same-rows-same-frame). Small-split guard (D33c) refuses before writing. Null-target rows dropped by the split tools (D34d). Temporal/grouped stay deferred, and an unavailable strategy escalates rather than falling back. Completes **M3** (completed): `verify_split` catches a deliberately overlapping split (and, via P3, a relabelled duplicate). | completed | 07, 08, 09 |
 | 11 | [`11_tools_cleaning.md`](./11_tools_cleaning.md) — 10 tools (adds `drop_high_missing_rows`); `fit_*`/`apply_*` separation; pre-split row drops and `cast_dtypes` in node 4 (D34d); imputation `drop` drops the column, never rows. Fitted state is a frozen dataclass (`FittedImputer`/`FittedClipper`) pickled as kind `transformer`, no sklearn. Core leak test (train median 10, valid median 99; same for clipper bounds) proves `apply_*` replays train-learned state. Target never imputed/clipped/dropped (D-e); `apply_*` works with the target present or absent. No `reset_index` (labels/order preserved). Completes nothing by itself; M4 is finished by chunk 12 (encoding). | completed | 07, 08 |
-| 12 | `12_tools_encoding.md` — 8 tools; one-hot / ordinal / target / scaler, all fit+apply. `fit_target_encoder` returns OOF-encoded train (D34c) | untouched | 07, 11 |
-| 13 | `13_tools_training.md` — `ESTIMATORS` registry (6 estimators, D25), `train_estimator` (calibration by CV on train, D34b), `tune_estimator` (CV within train, `max_fit_seconds` enforced in the body, D34a/D36c), `predict`, `predict_proba`; explicit `seed`, `n_jobs=1` (D34e) | untouched | 07, 12 |
+| 12 | [`12_tools_encoding.md`](./12_tools_encoding.md) — 8 tools; one-hot / ordinal / target / scaler, all fit+apply. `fit_target_encoder` returns OOF-encoded train (D34c) | untouched | 07, 11 |
+| 13 | [`13_tools_training.md`](./13_tools_training.md) — `ESTIMATORS` registry (6 estimators, D25), `train_estimator` (calibration by CV on train, D34b), `tune_estimator` (CV within train, `max_fit_seconds` enforced in the body, D34a/D36c), `predict`, `predict_proba`; explicit `seed`, `n_jobs=1` (D34e) | untouched | 07, 12 |
 | 14 | `14_tools_evaluation.md` — 11 tools **plus `rank_models` and `compare_models`** (pulled forward so the chunk 16 gate is self-contained). Every `score_*` reports a bootstrap 95 % CI (D33b) | untouched | 07, 13 |
 | 15 | `15_tools_inference.md` — `SPECS` registry, `build_dummy_matrix`, `assemble_inference_matrix`, statsmodels fits incl. Poisson GLM for count targets, coefficient table with confirmatory/exploratory labels and Holm adjustment (D35), VIF, residual/influence tests + known-answer test. **Moved before the skeleton gate** (review 2026-10-01): the skeleton fits an inferential model | untouched | 07, 12 |
 | 16 | `16_skeleton_integration.md` — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | untouched | 08–15 |

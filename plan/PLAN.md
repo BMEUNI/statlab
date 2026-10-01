@@ -891,13 +891,13 @@ apply_outlier_clipper(clipper, df)
 
 **encoding** — 8
 ```
-fit_onehot_encoder(train, columns, max_cardinality)                    [v1]
+fit_onehot_encoder(train, target, columns, max_cardinality)            [v1]
 apply_onehot_encoder(encoder, df)                                      [v1]
-fit_ordinal_encoder(train, columns, level_order)
+fit_ordinal_encoder(train, target, columns, level_order)
 apply_ordinal_encoder(encoder, df)
-fit_target_encoder(train, columns, target, smoothing)  → encoder + OOF-encoded train (D34c)
-apply_target_encoder(encoder, df)           valid/test only, never train
-fit_scaler(train, method, columns)                                     [v1]
+fit_target_encoder(train, target, columns, smoothing)  → encoder + OOF-encoded train (D34c)
+apply_target_encoder(encoder, df)           refuses any train row label (chunk 12 D-d)
+fit_scaler(train, target, method, columns)                             [v1]
 apply_scaler(scaler, df)                                               [v1]
 ```
 
@@ -920,8 +920,8 @@ assemble_inference_matrix(train, valid, feature_spec)    fit on train+valid
 **training** — 6
 ```
 list_estimators(task)                       registry introspection     [v1]
-train_estimator(name, params, train, target, calibrate)            H   [v1]
-tune_estimator(name, param_grid, train, target, cv, max_seconds)   H   CV within train (D34a)
+train_estimator(train, target, name, params, class_weight, calibrate) H [v1]
+tune_estimator(train, target, name, metric, param_grid, class_weight) H  CV within train (D34a); cv_folds and max_fit_seconds from the contract; returns params, not a model
 predict(model, df)                                                     [v1]
 predict_proba(model, df)                                               [v1]
 get_model_params(model)

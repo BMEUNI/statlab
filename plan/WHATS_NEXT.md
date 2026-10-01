@@ -379,7 +379,11 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: chunk 12
+## Next: batch B1 (chunks 12 + 13)
+
+Remaining work runs in batches (`00_index.md`, "Execution batches").
+
+### Chunk 12
 
 Chunk 11 is **applied and verified**. The next step is chunk 12 (encoding/scaling), which completes
 **M4**.
