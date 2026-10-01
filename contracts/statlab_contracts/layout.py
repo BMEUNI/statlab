@@ -14,6 +14,19 @@ from typing import Final, get_args
 
 from statlab_contracts.artifacts import ArtifactKind, ArtifactRef
 
+SHA256_PATTERN: Final = r"^[0-9a-f]{64}\z"
+r"""Lowercase hexadecimal SHA-256 identifier.
+
+Lowercase ``\z``, not ``\Z``: this string is fed to `pydantic.Field(pattern=...)`, which
+compiles it with the Rust `regex` crate (`pydantic-core`), not Python's `re` module -- and the
+Rust crate only recognises the lowercase form, raising `SchemaError: unrecognized escape
+sequence` on `\Z` (verified against the installed `pydantic`). Python's own `re.compile` accepts
+``\z`` too and gives it the same "absolute end of string" meaning as ``\Z`` (verified: a bare
+`z` suffix does NOT match, so it is not read as a literal character) -- so the lowercase form is
+the one spelling that works identically for both regex engines, unlike `ARTIFACT_ID_PATTERN`,
+which is only ever used as a compiled `re.Pattern` and never as a pydantic `Field(pattern=...)`.
+"""
+
 EXTENSION_FOR_KIND: Final[dict[ArtifactKind, str]] = {
     "dataframe": ".parquet",
     "predictions": ".parquet",
@@ -133,6 +146,14 @@ class ProjectPaths:
     @property
     def runs(self) -> Path:
         return self.root / "runs"
+
+    def dataset_csv(self, sha256: str) -> Path:
+        """Return the original upload at ``<root>/datasets/<sha256>.csv``.
+
+        The caller validates the identifier against ``SHA256_PATTERN`` at the tool schema
+        boundary; this helper only expresses the shared project layout.
+        """
+        return self.datasets / f"{sha256}.csv"
 
     def run(self, run_id: str) -> RunPaths:
         return RunPaths(data_dir=self.data_dir, slug=self.slug, run_id=run_id)

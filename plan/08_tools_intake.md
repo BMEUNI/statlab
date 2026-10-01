@@ -1,8 +1,46 @@
 ---
-status: untouched
+status: completed
 dependencies: [03, 06, 07]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-01
+implementation_notes: |
+  All five tools (`load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`,
+  `detect_leaky_columns`) implemented in `mcp_server/statlab_tools/tools/intake.py`. 1290 tests
+  total (1289 passed, 1 skipped), 100% line+branch coverage, mypy --strict clean on 66 files,
+  ruff clean, zero new `# type: ignore` in any chunk-08 file.
+
+  P1-P6 all held exactly as recorded against the installed pandas 3.0.5; no STOP condition
+  triggered. One nuance beyond what §1 recorded: a CSV row with FEWER fields than the header
+  pads silently with NaN (no error at all); only a row with MORE fields than declared raises
+  `ParserError`. Still a `ValueError` subclass either way, consistent with P1.
+
+  Three real production bugs found and fixed during implementation (none were in the spec):
+  (1) `SHA256_PATTERN` as pre-staged (`\Z`) is syntactically valid Python but breaks
+  `pydantic.Field(pattern=...)`, which compiles with the Rust `regex` crate and does not
+  recognise `\Z` -- only lowercase `\z`, which both engines accept identically. Fixed in
+  `contracts/statlab_contracts/layout.py`.
+  (2) `LookupError` (unknown codec) is not a `ValueError` subclass; `load_csv`'s original
+  `except ValueError` never caught it. Fixed with `except (ValueError, LookupError)`.
+  (3) `detect_leaky_columns` on an entirely-null target: two empty series compare equal under
+  `.astype(str).equals()` after dropping null rows, vacuously flagging every other column
+  "identical to target". Fixed with an early return.
+
+  Two genuinely unreachable branches found and deleted (not covered with contrived tests):
+  `_level_purity`'s `except ValueError` (qcut with `q=10, duplicates="drop"` never raises it on
+  any input tried) and `_majority_share`'s `counts.empty` guard (unreachable once (3) above
+  guarantees a non-empty `target_series` at its only call site).
+
+  D-b (pandas boundary widened to all of `mcp_server/`) implemented via
+  `tests/test_boundary_compute_libs.py`, a regex source-scan over `backend/` + `contracts/` for
+  seven compute libraries. `tools/artifacts.py`'s existing pandas-only-here test kept unchanged.
+
+  `PLAN.md` §6.3 and §10.1 updated; `00_index.md` chunk 08 row and chunk 33 row updated;
+  `WHATS_NEXT.md` state table, pandas-boundary convention and corrections table updated.
+
+  Manually verified outside pytest: `python -m statlab_tools` starts and serves `/health`;
+  a latin-1 file genuinely fails under `encoding="utf-8"` and genuinely succeeds on retry with
+  `encoding="latin-1"` over a real MCP session; a `../`-shaped `dataset` is rejected by schema
+  validation before the tool body runs, confirmed via a monkeypatch that would raise loudly if
+  the body were ever reached.
 ---
 
 # Chunk 08 — Intake tools
@@ -502,3 +540,12 @@ registered (appears in `tools/list` over a real session with all five names and 
 7. For chunk 09 (profiling): these five tools all re-read `raw` with `load_dataframe`. Did repeated
    loading show up as a cost worth caring about at 240 rows, and is there anything in how `raw` is
    produced that profiling will need but does not get?
+
+### Post-verification fix (2026-10-01)
+
+`detect_id_columns` flagged `notes_free_text` on `churn_frame`. That was a false positive — free text
+describes rows, it doesn't identify them — and the spec's "stop and ask" covered exactly this case. My
+§3.5 rule had no text exclusion. Fixed directly: string columns with mean length ≥ `TEXT_MEAN_LENGTH`
+(R8's threshold, so the two tools agree) are skipped. UUIDs (36 chars) stay under it. Tests: the
+`churn_frame` test now asserts the ID set equals `["customer_id"]` rather than containing it, plus a
+free-text case and a UUID boundary case. 1292 tests.

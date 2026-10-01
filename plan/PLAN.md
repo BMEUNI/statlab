@@ -799,9 +799,14 @@ permit (D17).
 
 **intake** — 5
 ```
-load_csv(path, delimiter, encoding, decimal, na_values, header_row)    [v1]
+load_csv(dataset, delimiter, encoding, decimal, na_values, header_row)  [v1]
+    `dataset` is the upload's sha256, not `path` (chunk 08 D-a) -- a filesystem path at this
+    trust boundary needs traversal checks; an identifier that cannot express a path does not.
 infer_column_roles(df)                                                 [v1]
-validate_contract(df, contract)                                        [v1]
+validate_contract(df)                                                  [v1]
+    reads the contract from the run's `contract.snapshot.json`, not a `contract` parameter
+    (chunk 08 D-c) -- the agent would otherwise have to reproduce the full contract verbatim in
+    every call.
 detect_id_columns(df)                       near-unique candidates
 detect_leaky_columns(df, target)            suspicious target correlation
 ```
@@ -1325,7 +1330,9 @@ Per-project skill overrides are a later addition, out of scope for v1.
 ```
 projects/<project_slug>/
 ├── project.json
-├── datasets/           <sha256>.parquet + original upload
+├── datasets/           <sha256>.csv -- the original upload, nothing else (chunk 08 D-a: the
+│                       │  run's `raw` artifact is already parquet, so a second
+│                       │  `<sha256>.parquet` cache has no consumer and was dropped)
 ├── contracts/          contract_v1.json ...
 ├── memory.json
 └── runs/<run_id>/

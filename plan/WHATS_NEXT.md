@@ -11,22 +11,25 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**7 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) started. Chunk 08 next.
+**8 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 09
+next.
 
-| Verified 2026-10-01, after chunk 07 §9 | |
+| Verified 2026-10-01, after chunk 08 | |
 |---|---|
-| Tests | 1112 (1111 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (1550 stmts, 338 branches, 0 missed) |
-| mypy | `--strict` clean on 60 source files, `init_typed = true` |
+| Tests | 1290 (1289 passed, 1 skipped — chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (1894 stmts, 488 branches, 0 missed) |
+| mypy | `--strict` clean on 66 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 08 added zero new ones in either category |
 | Git | local `master`, never pushed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
 Milestones passed: **M1** (chunk 07) — an external MCP client completes `tools/list` and a
-round-trip `call_tool` over real HTTP; a tokenless request is rejected.
+round-trip `call_tool` over real HTTP; a tokenless request is rejected. **M2** (chunk 08) — the
+five intake tools pass contract tests, mismatches produce precise field-level errors, and a real
+CSV loads to a `raw` artifact over a real MCP session.
 
 ---
 
@@ -242,8 +245,12 @@ read it:
 - **`tuple`, not `list`, on frozen models** — `frozen=True` does not freeze list contents.
 - **Boundary isolation:** `backend/` and `mcp_server/` never import each other; both may import
   `statlab_contracts`, which imports only stdlib + pydantic. `mcp_server/` must never import
-  `statlab.persistence` (D26 statelessness). pandas appears in exactly one module,
-  `mcp_server/statlab_tools/artifacts.py`. Source-scan tests enforce all of it.
+  `statlab.persistence` (D26 statelessness). **Compute libraries — pandas, numpy, sklearn, scipy,
+  statsmodels, matplotlib, joblib — are confined to `mcp_server/`** (chunk 08 D-b, superseding
+  "pandas appears in exactly one module": that rule could not survive `tools/intake.py` needing
+  pandas too, and was never the real invariant — `PLAN.md` §6's "the backend never imports pandas
+  or sklearn" is). Source-scan tests enforce all of it, including `test_boundary_compute_libs.py`
+  over `backend/` + `contracts/`.
 - **`disallow_any_explicit` must stay OFF** — incompatible with the pydantic mypy plugin for *every*
   `BaseModel`. `tests/test_no_explicit_any.py` replaces it and is stronger.
 - **No unreachable code, therefore no `pragma: no cover`.** If a line cannot be reached, delete it. If
@@ -286,7 +293,11 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Eight defects found and fixed. Seven were mine; one was latent in `PLAN.md`. One of my *corrections*
+Eleven defects found and fixed. Seven were mine (chunks 01–07); three more were caught during
+chunk 08's own implementation and belong to it (the `\Z`/`\z` regex-engine mismatch, the
+`LookupError` gap, the vacuous-empty-comparison bug) — not mine, not latent in `PLAN.md`, found
+and fixed in the same pass that introduced them, which is why they are not addenda. One was latent
+in `PLAN.md`. One of my *corrections*
 was itself wrong and the agent reverted it — recorded because being overruled by evidence is the
 loop working.
 
@@ -300,6 +311,9 @@ loop working.
 | 6 | `statlab.errors` imported inside `mcp_server` — a real D13 boundary violation | `ToolArtifactError` defined locally; both boundary directions now tested |
 | 7 | `create_artifact` minted an id independent of the ref used for the file path | `new_artifact_ref()` in `statlab_contracts`; `create_artifact` takes `ref`; invariant tested |
 | 8 | `@tool` found its `RunPaths` parameter by matching the name string `"paths"` | Found by resolved annotation; raises at decoration time on zero or two |
+| 9 | `SHA256_PATTERN` written `r"^[0-9a-f]{64}\Z"` — valid Python `re`, but fed to `pydantic.Field(pattern=...)`, which compiles with the Rust `regex` crate and does not recognise `\Z` | Lowercase `\z`, which both engines accept with the same end-of-string meaning |
+| 10 | `load_csv` caught only `ValueError` around `pd.read_csv`; an unknown codec name raises `LookupError`, a sibling hierarchy, not a `ValueError` subclass | `except (ValueError, LookupError)` |
+| 11 | `detect_leaky_columns` on an entirely-null target: two empty series compare equal under `.astype(str).equals()`, vacuously flagging every other column "identical to target" | Early return (no data, no finding) before any comparison runs |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -337,17 +351,65 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: chunk 08 — intake tools
+## Next: chunk 09 — profiling tools
+
+Nine profiling tools (`profile_schema`, `summarize_numeric`, `summarize_categorical`,
+`report_missingness`, `summarize_target`, plus the compute/render-split pair for correlations and
+distribution/target-relation plots). All five re-read `raw` with `load_dataframe`; chunk 08's own
+report (item 7) found this an acceptable cost at the data sizes D15 scopes for (never sampled, but
+also never more than the single-machine in-memory ceiling D15 already enforces) — repeated loads
+of a 200 MB-ceiling frame are cheap relative to the fits later nodes perform, and keeping each tool
+stateless (no shared in-memory cache between calls) is worth more than the saved reads, since a
+cache would be the first piece of hidden state in an otherwise fully auditable tool layer.
+
+## Chunk 08 — completed (summary)
 
 `load_csv`, `infer_column_roles`, `validate_contract`, `detect_id_columns`, `detect_leaky_columns`.
-The first tools written against chunk 07's decorator for real.
+The first tools written against chunk 07's decorator for real, and the first to exercise
+milestone M2. All six of the spec's named facts (P1–P6) held exactly as recorded against the
+installed `pandas==3.0.5`; no STOP condition triggered.
 
-The decision it carries: `load_csv` takes a **filesystem path**, not an artifact ref, and produces the
-first artifact of a run rather than consuming one. That path originates in a user upload, so it is the
-one place in the ~86-tool catalogue where an unvalidated string reaches the filesystem — it needs to
-resolve inside the project's `datasets/` directory with no traversal escape. Chunk 07 §8.2 removed the
-incidental hazard (a parameter named `path` is now safe regardless of the decorator), but the trust
-boundary is still chunk 08's to close.
+**The decision it carried, resolved:** `load_csv` takes `dataset: str` (the upload's sha256), not
+a filesystem path (D-a) — the schema makes a traversal shape unrepresentable rather than merely
+rejecting one. Defence in depth (`resolve()` + `is_relative_to()`) still guards the one remaining
+hole, a symlink planted inside `datasets/` pointing outside it; both layers were verified
+independently (schema rejection over a real MCP session with the body monkeypatched to fail
+loudly if ever reached, and a real symlink in a temp directory for the filesystem-level check).
+
+**A real bug found in this chunk's own pre-staged groundwork, not in the tool code:**
+`SHA256_PATTERN` (`layout.py`) was written as `r"^[0-9a-f]{64}\Z"` — syntactically valid Python,
+and the exact spelling `ARTIFACT_ID_PATTERN` already used safely as a compiled `re.Pattern`. But
+`SHA256_PATTERN` is also fed to `pydantic.Field(pattern=...)`, which compiles patterns with the
+Rust `regex` crate (`pydantic-core`), not Python's `re` module — and that crate does not recognise
+`\Z`, raising `SchemaError: unrecognized escape sequence` at import time. The fix is the lowercase
+`\z`, which both engines accept with the same "absolute end of string" meaning (verified: a
+literal trailing `z` character does not match under either engine, confirming `\z` is read as the
+anchor, not a literal). The general lesson: a pattern string's correctness depends on which engine
+reads it, and a string shared between a plain `re.compile` and a pydantic `Field(pattern=...)`
+needs to satisfy both, which `\Z` does not.
+
+**Two real production bugs found while writing tests, both fixed:**
+1. `LookupError` (an unknown codec name) is not a `ValueError` subclass — `load_csv`'s original
+   `except ValueError` clause never caught it, so an unrecognised `encoding` would have reached
+   the decorator's default `bug` classification with a traceback, exactly the failure mode P1
+   warns about for the three documented exceptions. Fixed by catching `(ValueError, LookupError)`
+   together.
+2. `detect_leaky_columns` on an entirely-null target: after dropping null rows, both the target
+   and the comparison series become empty, and two empty series compare equal under
+   `.astype(str).equals()` — every other column would have been vacuously flagged "identical to
+   target". Fixed with an early return (no data, no finding) before any comparison runs.
+
+**Dead code found and deleted, not merely left uncovered:** `_level_purity`'s `except ValueError:
+return None` and `_majority_share`'s `counts.empty` guard were both genuinely unreachable once
+written against the actual call sites (`qcut(q=10, duplicates="drop")` collapses every tried input
+— empty, all-null, single-value, constant — to zero categories rather than raising, confirmed by
+direct probe; and `_majority_share` is only ever called with the already-non-empty `target_series`
+after the fix above). Removed rather than covered with a contrived test, per the project's own
+"no unreachable code" rule.
+
+**D-b, the pandas boundary rule, is now this:** confined to `mcp_server/` (pandas, numpy, sklearn,
+scipy, statsmodels, matplotlib, joblib), not "exactly one module" — see the conventions section
+above for the reasoning and the new `test_boundary_compute_libs.py`.
 
 ## Two named checkpoints ahead
 

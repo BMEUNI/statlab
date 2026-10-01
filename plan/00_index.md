@@ -171,6 +171,7 @@ not re-derive any of this from memory:
   modules (verified) — but it loosens a strictness flag to paper over a third-party packaging gap,
   and adds config surface, to buy a cosmetically nicer import path.
   `mcp.client.streamable_http.__all__`.
+- **`Field(pattern=...)` with a *string* is compiled by pydantic-core's Rust regex engine, which rejects `\Z` with a `SchemaError` at class creation — use `\z`.** A pre-compiled `re.Pattern` goes through Python's `re` instead, which is why `ARTIFACT_ID_PATTERN` (compiled, `\Z`) never hit it. Python 3.14's `re` accepts `\z` too, so one string works in both. Verified: `\z` rejects a trailing newline and a literal `z` under both engines. Found in chunk 08.
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
 
@@ -192,7 +193,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
 | 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | completed | 01, 02, 06 |
-| 08 | [`08_tools_intake.md`](./08_tools_intake.md) — `load_csv` (takes the upload's sha256, not a path: traversal unrepresentable by schema), `infer_column_roles`, `validate_contract` (reads the run's contract snapshot; reports every mismatch as a finding), `detect_id_columns`, `detect_leaky_columns`. Widens the pandas boundary rule to `mcp_server/` with a test over `backend/` + `contracts/`. Milestone **M2** | untouched | 03, 06, 07 |
+| 08 | [`08_tools_intake.md`](./08_tools_intake.md) — `load_csv` (takes the upload's sha256, not a path: traversal unrepresentable by schema), `infer_column_roles`, `validate_contract` (reads the run's contract snapshot; reports every mismatch as a finding), `detect_id_columns`, `detect_leaky_columns`. Widens the pandas boundary rule to `mcp_server/` with a test over `backend/` + `contracts/`. Milestone **M2** | completed | 03, 06, 07 |
 | 09 | `09_tools_profiling.md` — 9 profiling tools incl. compute/render split | untouched | 07, 08 |
 | 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks | untouched | 07, 08 |
 | 11 | `11_tools_cleaning.md` — 9 tools; `fit_*`/`apply_*` separation | untouched | 07, 08 |
@@ -237,7 +238,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 33 | `33_api_projects.md` — projects, dataset upload (≤200 MB), contract upload/validate/propose | untouched | 03, 05, 06 |
+| 33 | `33_api_projects.md` — projects, dataset upload (≤200 MB, stored as `datasets/<sha256>.csv`, chunk 08 D-a), contract upload/validate/propose | untouched | 03, 05, 06 |
 | 34 | `34_api_runs.md` — run creation, state snapshot, messages, gate answers, control actions (incl. rewind → new run id) | untouched | 22, 32, 33 |
 | 35 | `35_sse_stream.md` — SSE endpoint, `?since=` replay from `events.jsonl`, 15 s heartbeat, token-delta streaming for prose only | untouched | 22, 34 |
 

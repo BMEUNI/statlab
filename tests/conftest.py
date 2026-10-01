@@ -9,6 +9,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import JsonValue
@@ -370,3 +371,89 @@ def mcp_session(live_server: str) -> Callable[[], AbstractAsyncContextManager[Cl
             yield session
 
     return open_session
+
+
+# --- Intake tools (chunk 08) ---------------------------------------------------------------------
+
+
+def churn_frame() -> pd.DataFrame:
+    """240 rows, seeded, matching `full.json`'s seven columns, with known properties:
+    `customer_id` unique and strictly increasing; `age` a plausible adult range; `plan` has 3
+    levels; `signup_date` ISO-8601 strings parsing 100%; `satisfaction` in
+    {low, medium, high}; `notes_free_text` long (mean length > 100) and 100% unique;
+    `churned` 0/1 at roughly 30%.
+
+    A plain function, not a fixture, deliberately -- `write_snapshot`/`seeded_run` need a frame
+    to derive a real file's bytes from before any fixture graph exists, and `tests/test_tools_
+    intake_*.py` need the SAME generator both as a `pytest.fixture`-wrapped value (for direct
+    tool-body tests) and as a raw CSV-writer input (for `load_csv` tests), which a fixture alone
+    cannot serve to a non-fixture helper. Built in code, not checked in, so the properties stay
+    readable here rather than opaque in a binary file.
+    """
+    rng = np.random.default_rng(20260801)
+    n = 240
+    start = pd.Timestamp("2023-01-01")
+    return pd.DataFrame(
+        {
+            "customer_id": np.arange(1, n + 1),
+            "age": rng.integers(18, 80, size=n),
+            "plan": rng.choice(["basic", "standard", "premium"], size=n, p=[0.5, 0.3, 0.2]),
+            "signup_date": [
+                (start + pd.Timedelta(days=int(d))).date().isoformat()
+                for d in rng.integers(0, 700, size=n)
+            ],
+            "satisfaction": rng.choice(["low", "medium", "high"], size=n, p=[0.2, 0.5, 0.3]),
+            "notes_free_text": [
+                "Customer discussed plan options extensively during the support call, "
+                f"mentioning competitor pricing and overall service quality concerns {i}."
+                for i in range(n)
+            ],
+            "churned": rng.choice([0, 1], size=n, p=[0.7, 0.3]),
+        }
+    )
+
+
+@pytest.fixture
+def churn_frame_fixture() -> pd.DataFrame:
+    """`pytest.fixture` wrapper around `churn_frame()`, for tests that want the frame injected
+    directly rather than calling the generator themselves."""
+    return churn_frame()
+
+
+@pytest.fixture
+def dataset_csv_bytes() -> bytes:
+    """A small, deterministic CSV's raw bytes -- the simplest valid upload, shared by every
+    `load_csv` test that does not need a specific dialect or defect."""
+    return b"a,b,c\n1,2.5,x\n3,4.5,y\n4,6.5,z\n"
+
+
+@pytest.fixture
+def seeded_run(tool_settings: ToolSettings, dataset_csv_bytes: bytes) -> RunPaths:
+    """A run directory with layout created and `dataset_csv_bytes` written under
+    `datasets/<sha256>.csv` (the sha256 of those exact bytes). The sha is available via
+    `RunPaths` is not enough to resolve it -- tests needing the hash use
+    `hashlib.sha256(dataset_csv_bytes).hexdigest()` themselves, same inputs, same digest.
+    """
+    import hashlib
+
+    from statlab.storage import ensure_run_layout
+    from statlab_contracts.layout import ProjectPaths
+
+    paths = RunPaths(data_dir=tool_settings.data_dir, slug="proj", run_id="r_seeded0000000")
+    ensure_run_layout(paths)
+    project = ProjectPaths(data_dir=tool_settings.data_dir, slug="proj")
+    project.datasets.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(dataset_csv_bytes).hexdigest()
+    project.dataset_csv(digest).write_bytes(dataset_csv_bytes)
+    return paths
+
+
+@pytest.fixture
+def write_snapshot(seeded_run: RunPaths) -> Callable[[DataContract], None]:
+    """Writes a contract to `seeded_run`'s `contract.snapshot.json` via `model_dump_json()`,
+    the same shape `validate_contract` reads back (D-c)."""
+
+    def write(contract: DataContract) -> None:
+        seeded_run.contract_snapshot_json.write_text(contract.model_dump_json(), encoding="utf-8")
+
+    return write

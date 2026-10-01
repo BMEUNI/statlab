@@ -47,10 +47,15 @@ async def test_m1_initialize_succeeds_over_real_http(mcp_session: SessionFactory
 
 
 async def test_m2_tools_list_returns_both_artifact_tools(mcp_session: SessionFactory) -> None:
+    """M2 (chunk 07): the two artifact tools are present. Not an exact-set check -- the
+    registry is a module-level singleton shared by every later chunk's tools (chunk 08 adds
+    five intake tools onto the same `server`), so asserting the full set here would make this
+    test regress every time a later chunk registers a new tool, for a reason that has nothing
+    to do with what this test actually verifies."""
     async with mcp_session() as session:
         result = await session.list_tools()
         names = {t.name for t in result.tools}
-        assert names == {"list_artifacts", "describe_artifact"}
+        assert {"list_artifacts", "describe_artifact"} <= names
 
 
 # --- M3-M5: the D23 guarantee, over the real registry -------------------------------------------

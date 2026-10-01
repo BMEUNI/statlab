@@ -77,10 +77,8 @@ _TRANSIENT_EXCEPTIONS: Final = (ToolArtifactError, OSError, TimeoutError)
 """§6.1.1's `transient` row: IO and timeouts. `ToolArtifactError` covers content-IO failures
 from `statlab_tools.artifacts`; `OSError`/`TimeoutError` cover everything else at that shape."""
 
-_ORCHESTRATOR_SUPPLIED: Final = "Supplied by the orchestrator; do not choose a value."
-"""§1's decision: `project`/`run` are injected into every `needs_run=True` tool's schema, with
-this exact description, so the agent can see why filling them in would be pointless rather than
-being tempted to guess."""
+ORCHESTRATOR_SUPPLIED: Final = "Supplied by the orchestrator; do not choose a value."
+"""Description for values supplied by the orchestrator rather than selected by the model."""
 
 ToolFn = Callable[..., ToolSuccess]
 
@@ -252,12 +250,12 @@ def _build_schema_fn(
         project_param = inspect.Parameter(
             "project",
             inspect.Parameter.KEYWORD_ONLY,
-            annotation=Annotated[str, Field(description=_ORCHESTRATOR_SUPPLIED)],
+            annotation=Annotated[str, Field(description=ORCHESTRATOR_SUPPLIED)],
         )
         run_param = inspect.Parameter(
             "run",
             inspect.Parameter.KEYWORD_ONLY,
-            annotation=Annotated[str, Field(description=_ORCHESTRATOR_SUPPLIED)],
+            annotation=Annotated[str, Field(description=ORCHESTRATOR_SUPPLIED)],
         )
         kept_params = [project_param, run_param, *kept_params]
 
