@@ -1,8 +1,19 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 13]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  Eleven evaluation tools in `evaluation.py` (score_classification/regression, confusion matrix,
+  ROC/PR/calibration curves, select_threshold, plot_curve, cross_validate_estimator,
+  compute_learning_curve, compare_models) plus `rank_models` in `champion.py`. Reuses chunk 13's
+  matrix builder, splitter and scorer mapping, made public in `training.py` (`build_matrix`,
+  `cv_splitter`, `feature_columns`, `check_*`, `tuning_from_snapshot`); chunk 13 tests pass
+  unedited. `EstimatorEntry.interpretable` added (true for the two linear models only).
+  Gates: 1805 passed, 1 skipped; 100% line+branch; mypy --strict clean on 87 files; ruff clean;
+  suite ~42 s. All seven DoD mutations fail at least one test. Point estimates checked against
+  sklearn as the oracle; stratified bootstrap (5/43) survives -W error while plain fails at seed 1;
+  real-1000 scoring on 48 rows is 3.4 s (one test runs it, the rest use 50 resamples). P4 handled
+  (roc_curve inf threshold -> null). No new `# type: ignore`, no `Any`, no `pragma: no cover`.
 ---
 
 # Chunk 14 — Evaluation tools
@@ -298,3 +309,29 @@ P1–P5 do not reproduce; chunk 13 tests need edits; anything needs `backend/` o
 3. The end-to-end `rank_models` summary, verbatim.
 4. The real-1000 scoring time on 48 rows.
 5. For chunk 16: is anything in the skeleton path still missing a tool?
+
+
+## 6. Addendum — review corrections (2026-10-01)
+
+**Item (c): a contract `positive_class` matching no class silently scored the wrong class.**
+`_positive_class` matched the snapshot's `target.positive_class` by `str(...)` and, when it matched
+none of the predicted classes, **silently fell back** to the last column with source `"default"`.
+Combined with the two-stringifications defect (item a), a `float`-coded target plus a contract
+`positive_class=0` would stringify the contract value as `"0"`, the classes as `"0.0"`/`"1.0"`,
+match nothing, and silently score the last column — the wrong class, reported as if chosen by
+default.
+
+Fix, two parts:
+- The contract value is normalised with `as_str_scalar`, the same rule the proba columns and the
+  truth are stringified by, so `positive_class=0` on a `0.0/1.0` target correctly resolves to
+  `"0"`.
+- A contract `positive_class` that still matches no observed class is now a **`ToolDataError`**
+  naming the contract value and the observed classes — **never a silent default**. The default
+  (last column, source `"default"`) applies *only* when the contract carries no `positive_class`
+  at all. `score_classification`'s summary continues to report `positive_class_source`
+  (`"contract"` or `"default"`).
+
+Regression tests (in `tests/test_tools_evaluation.py`):
+`test_contract_positive_class_unmatched_is_tool_data` (unmatched contract value → `ToolDataError`;
+fails on the old code, which fell back to `"default"`) and the float-target end-to-end test above
+for item (a). String- and int-class tests pass unchanged. See WHATS_NEXT.md correction 22.

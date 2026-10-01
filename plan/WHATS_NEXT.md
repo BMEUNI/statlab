@@ -11,18 +11,18 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**13 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Batch B2 (chunks 14 + 15) next; remaining work runs in batches (`00_index.md`).
+**15 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Batch B2 (chunks 14 + 15) complete; batch B3 (chunk 16, the walking-skeleton gate) next.
 
-| Verified 2026-10-01, after batch B1 (chunks 12 + 13, incl. review) | |
+| Verified 2026-10-01, after batch B2 (chunks 14 + 15, incl. review corrections) | |
 |---|---|
-| Tests | 1729 (1728 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 27 s |
-| Coverage | 100 % line **and** branch (3405 stmts, 886 branches, 0 missed) |
-| mypy | `--strict` clean on 83 source files, `init_typed = true` |
+| Tests | 1898 (1897 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 44 s |
+| Coverage | 100 % line **and** branch (4444 stmts, 1122 branches, 0 missed) |
+| mypy | `--strict` clean on 90 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B1 added **zero** |
-| Git | local `master`, batch B1 committed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B2 added **zero** |
+| Git | local `master`, uncommitted B2 working tree (do not commit) |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -34,6 +34,9 @@ profiling and splitting tool tested on fixtures; `verify_split` catches a delibe
 overlapping split (and, via P3, a relabelled duplicate that index overlap cannot see). **M4**
 (chunks 11 + 12) — every `fit_*` learns on train and every `apply_*` replays it unchanged on a
 frame with different statistics; the target encoder is out-of-fold and refuses train rows.
+**M5** (chunks 14 + 15) — every `score_*` carries a seeded bootstrap CI and `rank_models` applies
+the contract's constraints; the inferential track fits OLS/Logit/GLM, reproduces the NIST Longley
+certified coefficients, and labels confirmatory vs exploratory with Holm correction (D35).
 
 ---
 
@@ -312,10 +315,10 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Twenty-one defects, plus one methodology review (17). Rows 14–17 came from the full review of
+Twenty-two defects, plus one methodology review (17). Rows 14–17 came from the full review of
 2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Rows 18–19 are two
 defects in my *own* 09r revision text and its first implementation, caught in review before 09r was
-accepted. Rows 20–21 came from batch B1's review. Defects caught in chunk 10/11 reviews
+accepted. Rows 20–21 came from batch B1's review. Row 22 came from batch B2's review. Defects caught in chunk 10/11 reviews
 are recorded in those chunks' addenda (§6), not here. Of rows 1–13, seven were mine (chunks 01–07); four more were caught during
 chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
 the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
@@ -348,6 +351,7 @@ loop working.
 | 19 | R2's first fix (skip the unique-share rule for numeric features + purity over paired non-null rows) passed its own test only because the test used an exactly balanced 200/200 `np.tile` target: binned purity of a perfect leak reaches 1.0 only when the class boundary falls on a decile edge (0.975 at 210/400, 0.9525 at 221, 0.950 at 180/60/20), so it still missed most real leaks | R2 final rule: rank-based one-vs-rest AUC, balance-insensitive, 1.000 at every split; tests parametrised over 200/210/221/60/20 positives so an exact split alone is no longer evidence |
 | 20 | Chunk 13's tuning CV used `n_jobs=-1`: it broke D17 and deadlocked the test run (loky workers started from a tool-body thread), stalling the implementation stage for an hour | Pin resource rules with a spy test, not a comment. Nothing in a tool body may spawn workers (`00_index.md`, sklearn block) |
 | 21 | Chunk 13's "predict uses frame column order" mutation survived: every test frame had its columns in fitted order | A mutation that survives means the tests share an accidental property. Vary it (here, reorder the columns) |
+| 22 | Class labels and levels were stringified two ways (`str()` vs `as_str`), breaking scoring of float-coded targets, one-hot of float-coded columns, and silently replacing an unmatched contract positive_class | One scalar helper, `as_str_scalar` (agrees with `as_str` element-for-element); never a silent default — an unmatched contract positive_class is a `ToolDataError` |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -384,22 +388,152 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B2 (chunks 14 + 15)
+## Next: batch B3 (chunk 16 alone — the walking-skeleton gate)
 
-Two specs, one cycle (`00_index.md`, "Execution batches"): chunk 14 (evaluation, plus
-`rank_models` and `compare_models`) and chunk 15 (inference). They are independent apart from
-shared fixtures, so they can run as two sequential stages with one review.
+Chunk 16 is a batch of one because it **is** the integration gate (`00_index.md`, "Execution
+batches"): the ~33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a
+classification **and** a regression fixture. Every tool it needs now exists — intake, profiling,
+splitting, cleaning, encoding, training, evaluation, champion, and (as of B2) inference.
 
-- **Chunk 14** scores `predictions` artifacts against truth. Chunk 13 indexes predictions by the
-  frame's labels, with columns `prediction` and `proba__{class}` in `FittedModel.classes` order.
-  Align by label, never by position, and refuse a label mismatch. Every `score_*` reports a
-  bootstrap 95 % CI (D33b): 1000 resamples, seeded. Precision, recall and F1 need
-  `zero_division=0`, because the zero-division warning is an error under `-W error` (chunk 13 P4).
-- **Chunk 15** builds the inferential matrix (dummy coding with an explicit reference level, no
-  scaling, D31) and the statsmodels fits. It applies D35: confirmatory/exploratory labels and Holm
-  correction. statsmodels is untyped here, like sklearn: keep it behind `object` and narrow.
-- Both chunks: import sklearn and statsmodels **lazily inside tool bodies** (chunk 12's scipy
-  fact). Use `n_jobs=1` in everything (chunk 13's deadlock).
+- The skeleton's inference leg is now unblocked: node 6 runs
+  `assemble_inference_matrix(train, valid)` → one of `fit_ols`/`fit_logit`/`fit_glm` (chosen by
+  `target.type` via `SPECS`) → `coefficient_table` → the diagnostics. The exact node-6 sequence
+  for the regression fixture is in the chunk 15 report.
+- Treat 16 as the moment the architecture is proven or found wrong, not an ordinary chunk. If a
+  tool's contract is subtly off, the end-to-end run is where it surfaces.
+## Batch B2 — completed (summary)
+
+Two chunks, one review cycle: chunk 14 (evaluation + champion) and chunk 15 (inference). Together
+they close **M5**. Gates after B2 (incl. review corrections): **1897 passed, 1 skipped** (1898 total), **100 % line and
+branch** (4444 stmts, 1122 branches, 0 missed), mypy `--strict` clean on **90 source files**, ruff
+`check` + `format --check` clean, suite ≈ 44 s. B2 added **zero** `# type: ignore` (still only
+`tool.py`'s 2 `__signature__` gaps in production; 23 in tests), **zero** `Any`, **zero**
+`pragma: no cover`.
+
+### Chunk 15 (inference) — the D7 second track
+
+Eleven tools in `tools/inference.py`: the two matrix builders (`build_dummy_matrix`,
+`assemble_inference_matrix`) and the nine statsmodels tools (`fit_ols`, `fit_logit`, `fit_glm`,
+`coefficient_table`, `inferential_fit_summary`, `compute_vif`, `test_residuals`,
+`compute_influence`, `plot_residuals`). `registry.SPECS` names the four inferential models (ols,
+logit, glm_poisson, glm_gamma); `training.list_estimators` now also reports `inferential_models`.
+Only `registry.py` and `training.list_estimators` were touched among chunk 14's files, plus one
+import line in `tools/__init__.py`. Nothing under `backend/`/`contracts/` changed.
+
+**The NIST known-answer is independent.** `fit_ols` on statsmodels' Longley data is compared to the
+**certified** NIST StRD coefficients, SEs and R² hard-coded in the test (never statsmodels' own
+output); the max relative error is **1.03e-11** on the coefficients, well under the 1e-8 ceiling.
+Logit on a hand-built 2×2 reproduces `log(1/3)` and `log 9` to <1e-9 with no reference data; a
+Poisson GLM recovers `exp(0.5 + 0.3x)` within 3 SE.
+
+**Three hazards held exactly as the spec named them.** (P3) Perfect separation does not crash in
+production — statsmodels' own import-time `always` filter emits the warning and returns
+`converged=False` — but pytest's `filterwarnings=error` raises it. `fit_logit` handles **both**:
+it catches `PerfectSeparationWarning`/`ConvergenceWarning` raised as an exception **and** checks
+`mle_retvals["converged"]`, each mapping to the same `ToolDataError`. Both paths are tested (the
+warning path under pytest; the `converged=False` path by monkeypatching `sm.Logit` to a
+non-converged result). No `warnings.catch_warnings` anywhere (process-global; bodies run in
+threads). (P6) No `statsmodels.formula`/patsy anywhere — fits take `(matrix, target, predictors)`
+and add the constant themselves. statsmodels is untyped: results live behind an `object` field and
+are narrowed at the boundary — zero new `# type: ignore`, zero `Any`.
+
+**One deviation, recorded.** Gamma's canonical InversePower link raises a `DomainWarning` fatal
+under `-W error`, and `warnings.catch_warnings` is banned (threads). `fit_glm` therefore uses the
+domain-safe **log link** for both GLM families (Poisson's canonical link is log anyway); the
+coefficients stay multiplicative in original units (D31). Marked with a `ponytail:` note.
+
+**A real bug found while testing, fixed.** Dummy-level and binary-target derivation first used
+`str(observed_counts(series).index)`, which gives `"1.0"` for an integral float column, while the
+dummy columns and `y_bin` compared against `as_str(series)` which gives `"1"` — so every binary
+0/1 target silently became all-zeros and every Logit/GLM "failed to converge". Fixed with a shared
+`_str_level_counts` that routes level derivation through `_frame.as_str`, the same chunk 11/12
+integer-string lesson. Caught because the known-answer and end-to-end tests exercise a real fit,
+not a mock.
+
+**Mutation evidence** (each applied to `inference.py`, the affected test file run, restored;
+`inference.py` `diff`-clean against a backup afterwards):
+
+| Mutation | Tests that failed (count) |
+|---|---|
+| the reference level is not dropped | `..._default_reference_is_most_frequent`, `..._explicit_reference_is_respected`, `..._reference_column_is_absent_mutation_guard` (3) |
+| per-term p-values instead of a joint Wald test | `..._three_level_goal_is_one_joint_test_df_two`, `..._per_term_p_mutation_guard`, `..._end_to_end_churn_plan_to_churned` (3) |
+| Holm replaced by raw p for `reject` | `..._holm_to_raw_mutation_guard` (1) |
+| remove the `converged` check | `..._non_convergence_production_path`, `..._remove_converged_check_mutation_guard` (2) |
+| assemble imputes from train only | `..._median_mode_imputation_uses_concatenation`, `..._imputes_from_train_only_mutation_guard` (2) |
+| the collinearity drop is removed | `..._collinear_duplicate_dropped_with_warning`, `..._collinearity_drop_removed_mutation_guard` (2) |
+| exploratory terms labelled confirmatory | `..._roles_confirmatory_exploratory_intercept`, `..._exploratory_terms_carry_p_note`, `..._exploratory_labelled_confirmatory_mutation_guard`, `..._end_to_end_churn_plan_to_churned` (4) |
+
+**VIF on Longley** flags `GNPDEFL`, `GNP`, `UNEMP`, `POP`, `YEAR` (all > 10); the spec's named
+`GNP`, `POP`, `YEAR` are a subset, so the test asserts that subset is flagged. `const` is excluded
+from the output. The end-to-end `plan → churned` run gives one confirmatory joint Wald test with
+`df == 2` (two plan dummies) and `n_confirmatory == 2`.
+
+### Chunk 14 (evaluation + champion)
+
+Eleven evaluation tools in `evaluation.py` (`score_classification`, `score_regression`,
+`compute_confusion_matrix`, `compute_roc_curve`, `compute_pr_curve`, `compute_calibration_curve`,
+`select_threshold`, `plot_curve`, `cross_validate_estimator`, `compute_learning_curve`,
+`compare_models`) plus `rank_models` in `champion.py` (its catalogue phase; chunk 19 adds
+`select_champion` and reports). This is where D33 became code: every `score_*` carries a seeded
+bootstrap 95 % CI, `compare_models` reports `top_two_distinguishable` on CI overlap (D-f), and
+`rank_models` labels the top validation score a selection score over N candidates (D33a).
+
+**Reuse, not duplication (§1).** Chunk 13's matrix builder, CV splitter and scorer mapping were
+made public in `training.py` (`build_matrix`, `cv_splitter`, `feature_columns`,
+`check_features_usable`, `check_no_missing`, `check_task`, `check_class_counts`,
+`tuning_from_snapshot`); `scorer_for`/`greater_is_better`/`is_negated`/`is_binary_only` were
+already public in `registry.py`. `EstimatorEntry` gained `interpretable` (true for
+`logistic_regression` and `linear_regression` only), reported by `list_estimators`. **No chunk 13
+test was edited** (46 training tests green).
+
+**Gates:** 1805 passed, 1 skipped (1806 total); **100 % line and branch** (3939 stmts, 990
+branches, 0 missed); mypy `--strict` clean on **87 source files**; ruff `check` + `format --check`
+clean; suite ≈ 42 s. `evaluation.py`/`champion.py` add **no** `# type: ignore`, **no** `Any`,
+**no** `pragma: no cover`.
+
+**The metrics are tested, not right-by-construction.** Every point estimate is asserted equal to
+sklearn's own function called directly in the test as the oracle, binary and multiclass. The
+stratified-bootstrap test (5 positives / 43 negatives) scores every metric with no warning under
+`-W error`, and **fails under a plain bootstrap** (P2: a plain resample drops the rare class and
+AUC raises). The alignment test shuffles the prediction order and asserts an identical score, so
+an implementation that aligned by position would differ. The positive-class test flips binary
+precision via the contract's `positive_class`, so an always-last-column implementation disagrees.
+
+**Mutation evidence** (each applied to source, the affected test file run, restored; both source
+files `diff`-clean against a backup afterwards):
+
+| Mutation | Tests that failed (count) |
+|---|---|
+| plain bootstrap instead of stratified | `..._stratified_bootstrap_scores_rare_class...`, `..._real_1000_resamples...` (2) |
+| point estimate = bootstrap mean | the three `..._point_estimates_equal_sklearn`, `..._point_estimate_is_full_data...`, `..._shuffled_prediction_order...` (5) |
+| truth not reordered to predictions' order | `..._shuffled_prediction_order...`, `..._mutation_truth_not_reordered...` (2) |
+| remove the fingerprint check | `..._compare_mismatched_fingerprints...`, `..._mutation_remove_fingerprint_check...` (2) |
+| CI overlap vs the third candidate not the second | 4 compare tests (IndexError with 2 candidates) + `..._mutation_ci_overlap_against_third...` (5) |
+| `rank_models` ignores `interpretability_required` | `..._interpretability_required_makes_forest_ineligible`, `..._mutation_ignore_interpretability...`, `..._no_eligible_candidate...` (3) |
+| positive class always the last column | `..._contract_positive_class_flips_precision`, `..._mutation_always_last_column...` (2) |
+
+**Hazards that held exactly as the spec named them.** P1: real 1000 resamples on 48 rows (9
+classification metrics) is **3.4 s** — one test runs it, every other bootstrap test uses 50
+resamples via an autouse fixture (seed 1 is one where a plain bootstrap still drops the rare class
+at 50, so the mutation test stays valid). P4: `roc_curve`'s first threshold is `inf`; it is stored
+as `null`, and every curve/table artifact survives `json.dumps(..., allow_nan=False)`. Under
+`-W error`: `zero_division=0` on precision/recall/f1, `n_jobs=1` in every sklearn call (a
+`cross_val_score` spy asserts it), sklearn imported lazily inside tool bodies (package import stays
+scipy-free). sklearn's dynamic values narrowed at the boundary (`np.asarray(..., dtype=float)`,
+`float(...)`) — no `Any`, no new suppression.
+
+**End-to-end `rank_models` summary** (B1 pipeline → `predict_proba` → `score_classification` ×3 →
+`compare_models` → `rank_models` on `churn_frame`, near-random by construction):
+```json
+{"ranking": [{"rank": 1, "candidate": "random_forest_classifier", "estimator": "random_forest_classifier", "value": 0.5464646464646465, "eligible": true, "ineligible_reason": null, "meets_success_threshold": null}, {"rank": 2, "candidate": "hist_gb_classifier", "estimator": "hist_gb_classifier", "value": 0.4686868686868687, "eligible": true, "ineligible_reason": null, "meets_success_threshold": null}, {"rank": 3, "candidate": "logistic_regression", "estimator": "logistic_regression", "value": 0.4080808080808081, "eligible": true, "ineligible_reason": null, "meets_success_threshold": null}], "top_eligible": "random_forest_classifier", "top_two_eligible_distinguishable": false, "selection_note": "the top validation score is a selection score over 3 candidates; only the test score estimates performance", "n_candidates": 3}
+```
+
+**For chunk 16's skeleton path:** the evaluation side is complete — `score_classification`,
+`compare_models` and `rank_models` run end to end and the gate is self-contained. The one thing the
+skeleton still needs that this chunk does not provide is chunk 15's inference tools (the skeleton
+fits an inferential model, which is why 15 precedes 16). No evaluation tool is missing for the
+skeleton's classification/regression scoring path.
+
 
 ## Batch B1 — completed (summary)
 

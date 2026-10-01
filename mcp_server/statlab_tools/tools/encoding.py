@@ -47,6 +47,7 @@ from statlab_tools.artifacts import load_dataframe, save_model
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import (
     as_str,
+    as_str_scalar,
     is_class_target,
     is_numeric_column,
     json_list,
@@ -79,11 +80,13 @@ literal default (ruff B006)."""
 
 @dataclass(frozen=True)
 class FittedOneHot:
-    """Observed train levels per source column (`str`-sorted). `apply` builds one `bool` dummy per
-    level named `f"{col}__{level}"`; an unseen or null value is an all-`False` row (D-a, D-b)."""
+    """Observed train levels per source column, stored as their **string form** (`as_str_scalar`,
+    so a `float64` level `1.0` is kept as `"1"` -- the same rule `as_str` applies at apply). `apply`
+    builds one `bool` dummy per level named `f"{col}__{level}"`; an unseen or null value is an
+    all-`False` row (D-a, D-b)."""
 
     target: str
-    levels: dict[str, tuple[object, ...]]
+    levels: dict[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -239,10 +242,12 @@ def fit_onehot_encoder(
             else:
                 selected.append(col)
 
-    levels: dict[str, tuple[object, ...]] = {}
+    levels: dict[str, tuple[str, ...]] = {}
     output_names: list[str] = []
     for col in selected:
-        col_levels = tuple(sorted(observed_counts(data[col]).index, key=str))
+        col_levels = tuple(
+            sorted((as_str_scalar(lv) for lv in observed_counts(data[col]).index), key=str)
+        )
         levels[col] = col_levels
         output_names.extend(f"{col}__{level}" for level in col_levels)
 
@@ -295,17 +300,17 @@ def apply_onehot_encoder(
             continue
         source = data[col]
         stringified = as_str(source)
-        level_strs = {str(level): str(level) for level in fitted.levels[col]}
+        level_set = set(fitted.levels[col])
         n_null = int(source.isna().sum())
         present = stringified[source.notna()]
-        n_unseen = int((~present.isin(set(level_strs))).sum())
+        n_unseen = int((~present.isin(level_set)).sum())
         if n_null:
             null[col] = n_null
         if n_unseen:
             unseen[col] = n_unseen
         for level in fitted.levels[col]:
             name = f"{col}__{level}"
-            match = (stringified == str(level)) & source.notna()
+            match = (stringified == level) & source.notna()
             pieces.append(pd.Series(match.to_numpy(), index=data.index, name=name, dtype=bool))
 
     out = pd.concat(pieces, axis=1)
@@ -360,7 +365,7 @@ def fit_ordinal_encoder(
                     field_errors={"level_order": f"{col!r} omits observed levels: {missing!r}"},
                 )
         elif isinstance(dtype, pd.CategoricalDtype) and dtype.ordered:
-            order = tuple(str(c) for c in dtype.categories)
+            order = tuple(as_str_scalar(c) for c in dtype.categories)
         else:
             order = tuple(sorted(observed, key=str))
         ranks[col] = {level: rank for rank, level in enumerate(order)}
@@ -473,7 +478,7 @@ def fit_target_encoder(
     oof = np.asarray(encoder.fit_transform(x, y), dtype="float64")
 
     if target_type == "multiclass":
-        classes = [str(c) for c in encoder.classes_]
+        classes = [as_str_scalar(c) for c in encoder.classes_]
         output_columns = tuple(f"{col}__te_{cls}" for col in columns for cls in classes)
     else:
         output_columns = tuple(f"{col}__te" for col in columns)

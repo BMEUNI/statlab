@@ -301,3 +301,21 @@ P1–P5 do not reproduce; typing sklearn seems to need `Any` or `# type: ignore`
 4. How sklearn's untyped values were kept out of `Any`.
 5. For chunk 14: `predict_proba`'s column naming and label alignment. Is anything awkward for
    scoring against a truth artifact?
+
+
+## 6. Addendum — review corrections (2026-10-01)
+
+**Item (a): a float-coded binary target could not be scored.** `predict_proba` named its columns
+`f"proba__{cls}"` with the raw class labels, so a `0.0/1.0` `float64` target (an integer target
+with a null loads as `float64`) produced `proba__0.0`/`proba__1.0`. Evaluation then compares
+`as_str(truth)` (`"0"`, `"1"`) against the suffixes and `score_classification` raised
+"truth classes ['0', '1'] have no proba__ column" — a float-coded binary target could not be
+scored at all, all gates green.
+
+Fix: `predict_proba` now names columns `f"proba__{as_str_scalar(cls)}"` (the scalar twin of
+`as_str` added to `_frame.py`), so the suffix is `"0"`/`"1"` and matches the truth's string form.
+Regression test (in `tests/test_tools_evaluation.py`):
+`test_float_coded_binary_target_scores_and_honours_contract` trains on a `0.0/1.0` target, asserts
+the proba columns are `proba__0`/`proba__1`, scores successfully, and checks the honoured positive
+class and recall differ between contract `positive_class` 1 and 0; it fails on the old code with
+`proba__0.0`-style names. See `00_index.md`'s integral-float row and WHATS_NEXT.md correction 22.

@@ -12,6 +12,8 @@ import pandas as pd
 import pytest
 from statlab_tools.tools._frame import (
     CLASS_TARGET_MAX_LEVELS,
+    as_str,
+    as_str_scalar,
     is_class_target,
     is_numeric_column,
     iso8601_parse_share,
@@ -335,3 +337,32 @@ def test_observed_counts_leaves_a_non_categorical_series_unchanged() -> None:
     series = pd.Series(["a", "a", "b", "c"])
     result = observed_counts(series)
     assert result.to_dict() == series.value_counts().to_dict()
+
+
+# --- as_str_scalar: the scalar twin of as_str (review correction) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1.0, "1"),  # integral float -> no ".0"
+        (0.0, "0"),
+        (1.5, "1.5"),  # non-integral float kept
+        (True, "True"),  # bool, not 1
+        (False, "False"),
+        (2, "2"),  # int
+        ("yes", "yes"),  # str unchanged
+        (np.int64(3), "3"),
+        (np.float64(4.0), "4"),
+        (np.bool_(True), "True"),
+    ],
+)
+def test_as_str_scalar_cases(value: object, expected: str) -> None:
+    assert as_str_scalar(value) == expected
+
+
+@pytest.mark.parametrize("value", [1.0, 0.0, 1.5, True, False, 2, "yes", -2.0, np.int64(3)])
+def test_as_str_scalar_agrees_with_as_str_elementwise(value: object) -> None:
+    """The helper must equal `as_str(pd.Series([value])).iloc[0]` on every element, so a scalar
+    class label or level stringifies exactly as its column would (the whole point of the fix)."""
+    assert as_str_scalar(value) == as_str(pd.Series([value])).iloc[0]

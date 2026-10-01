@@ -43,6 +43,7 @@ from statlab_contracts.vocabulary import ClassWeight, Metric, ParamValue, Task
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe, save_model
 from statlab_tools.registry import (
+    SPECS,
     EstimatorEntry,
     estimators,
     greater_is_better,
@@ -51,7 +52,13 @@ from statlab_tools.registry import (
     scorer_for,
 )
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
-from statlab_tools.tools._frame import is_class_target, is_numeric_column, json_scalar, load_fitted
+from statlab_tools.tools._frame import (
+    as_str_scalar,
+    is_class_target,
+    is_numeric_column,
+    json_scalar,
+    load_fitted,
+)
 
 _TRAIN_PHASES = ("model_training",)
 _PREDICT_PHASES = ("model_evaluation", "model_interpretation", "champion_selection")
@@ -129,7 +136,7 @@ def _entry(name: str) -> EstimatorEntry:
     return entry
 
 
-def _tuning_from_snapshot(paths: RunPaths) -> tuple[int, int]:
+def tuning_from_snapshot(paths: RunPaths) -> tuple[int, int]:
     """`(cv_folds, max_fit_seconds)` from the contract snapshot's `modelling.tuning` (D-a: the
     user's budget, which the agent cannot weaken). Falls back to the sklearn defaults when no
     snapshot is present -- the same read `cleaning.cast_dtypes` does."""
@@ -180,12 +187,12 @@ def _get_params(estimator: object) -> dict[str, object]:
     return {str(k): v for k, v in dict(est.get_params()).items()}
 
 
-def _feature_columns(frame: pd.DataFrame, target: str) -> list[str]:
+def feature_columns(frame: pd.DataFrame, target: str) -> list[str]:
     """Every column except `target` (D-d). The node has already dropped unwanted columns."""
     return [col for col in frame.columns if col != target]
 
 
-def _check_features_usable(frame: pd.DataFrame, features: list[str]) -> None:
+def check_features_usable(frame: pd.DataFrame, features: list[str]) -> None:
     """Every feature must be numeric or bool, nullable included (D-d). A string, datetime or
     categorical column is `tool_param` naming them ("encode first")."""
     bad = [
@@ -200,14 +207,14 @@ def _check_features_usable(frame: pd.DataFrame, features: list[str]) -> None:
         )
 
 
-def _matrix(frame: pd.DataFrame, features: list[str]) -> np.ndarray:
+def build_matrix(frame: pd.DataFrame, features: list[str]) -> np.ndarray:
     """The `float64` design matrix for `features` (P3: one conversion for every allowed dtype).
     Always numpy, never a DataFrame -- fitting or predicting on a frame then crossing to numpy
     emits a feature-name `UserWarning` that `-W error` turns fatal (D-note)."""
     return frame[features].to_numpy(dtype="float64", na_value=np.nan)
 
 
-def _check_no_missing(matrix: np.ndarray, entry: EstimatorEntry) -> None:
+def check_no_missing(matrix: np.ndarray, entry: EstimatorEntry) -> None:
     """NaN in the matrix with an estimator that cannot handle it is `tool_param` (P2)."""
     if not entry.handles_missing and bool(np.isnan(matrix).any()):
         raise ToolParamError(
@@ -217,7 +224,7 @@ def _check_no_missing(matrix: np.ndarray, entry: EstimatorEntry) -> None:
         )
 
 
-def _check_task(frame: pd.DataFrame, target: str, task: Task) -> None:
+def check_task(frame: pd.DataFrame, target: str, task: Task) -> None:
     """Task compatibility by shape (D-f): a classifier needs `is_class_target`, a regressor needs
     `is_numeric_column`."""
     y = frame[target]
@@ -227,7 +234,7 @@ def _check_task(frame: pd.DataFrame, target: str, task: Task) -> None:
         raise ToolDataError(f"estimator is a regressor but target {target!r} is not numeric")
 
 
-def _splitter(cv_folds: int, task: Task, seed: int) -> object:
+def cv_splitter(cv_folds: int, task: Task, seed: int) -> object:
     """The CV splitter (D-c): `StratifiedKFold` for a classifier, `KFold` for a regressor, both
     shuffled with the injected seed. Chunk 10 keeps the input's row order, so an unshuffled split
     of target-sorted or time-sorted data would make biased folds. Returned as `object` -- a
@@ -239,7 +246,7 @@ def _splitter(cv_folds: int, task: Task, seed: int) -> object:
     return KFold(cv_folds, shuffle=True, random_state=seed)
 
 
-def _check_class_counts(y: pd.Series, cv_folds: int) -> None:
+def check_class_counts(y: pd.Series, cv_folds: int) -> None:
     """Every class needs at least `cv_folds` train rows, else `CalibratedClassifierCV` /
     `StratifiedKFold` raise (P1); surfaced as `ToolDataError` so it is not a `bug`."""
     smallest = int(y.value_counts().min())
@@ -299,7 +306,12 @@ def list_estimators(
 ) -> ToolSuccess:
     """List the registry's estimators (D25), optionally filtered to one `task`. Per entry:
     `task`, `default_grid`, `handles_missing`, `supports_class_weight`, and `supports_proba`
-    (true for classifiers). The agent reads this to pick an estimator and propose a grid."""
+    (true for classifiers). The agent reads this to pick an estimator and propose a grid.
+
+    Also reports `inferential_models`: the `SPECS` registry (chunk 15 §3.1) of classical-inference
+    models (OLS, Logit, Poisson/Gamma GLM) node 1 may validate `modelling.inferential_model`
+    against. `task` does not filter these -- an inference model is chosen by `target.type`, not a
+    predictive task."""
     out: dict[str, JsonValue] = {}
     for name, entry in estimators().items():
         if task is not None and entry.task != task:
@@ -312,8 +324,17 @@ def list_estimators(
             "handles_missing": entry.handles_missing,
             "supports_class_weight": entry.supports_class_weight,
             "supports_proba": entry.task == "classification",
+            "interpretable": entry.interpretable,
         }
-    return ToolSuccess(summary={"estimators": out})
+    inferential: dict[str, JsonValue] = {
+        name: {
+            "tool": spec.tool,
+            "target_types": list(spec.target_types),
+            "family": spec.family,
+        }
+        for name, spec in SPECS.items()
+    }
+    return ToolSuccess(summary={"estimators": out, "inferential_models": inferential})
 
 
 # --- 3.2 train_estimator (H, [v1]) ---------------------------------------------------------------
@@ -355,15 +376,15 @@ def train_estimator(
             f"target {target!r} is not in train",
             field_errors={"target": f"not a column in train: {target!r}"},
         )
-    features = _feature_columns(data, target)
-    _check_features_usable(data, features)
-    _check_task(data, target, entry.task)
+    features = feature_columns(data, target)
+    check_features_usable(data, features)
+    check_task(data, target, entry.task)
 
-    x = _matrix(data, features)
-    _check_no_missing(x, entry)
+    x = build_matrix(data, features)
+    check_no_missing(x, entry)
     y = data[target]
 
-    cv_folds, _ = _tuning_from_snapshot(paths)
+    cv_folds, _ = tuning_from_snapshot(paths)
     estimator = entry.build(seed, class_weight)
     estimator = _set_params(estimator, params)
 
@@ -374,7 +395,7 @@ def train_estimator(
                 "calibrate requires a classifier",
                 field_errors={"calibrate": "only a classification estimator can be calibrated"},
             )
-        _check_class_counts(y, cv_folds)
+        check_class_counts(y, cv_folds)
         estimator = _wrap_calibrated(estimator, cv_folds, seed)
         calibrated = True
 
@@ -424,7 +445,7 @@ def _wrap_calibrated(estimator: object, cv_folds: int, seed: int) -> object:
     D-c), returned as `object`."""
     from sklearn.calibration import CalibratedClassifierCV
 
-    splitter = _splitter(cv_folds, "classification", seed)
+    splitter = cv_splitter(cv_folds, "classification", seed)
     return CalibratedClassifierCV(estimator, cv=splitter, method="sigmoid")
 
 
@@ -487,18 +508,18 @@ def tune_estimator(
             f"target {target!r} is not in train",
             field_errors={"target": f"not a column in train: {target!r}"},
         )
-    features = _feature_columns(data, target)
-    _check_features_usable(data, features)
-    _check_task(data, target, entry.task)
+    features = feature_columns(data, target)
+    check_features_usable(data, features)
+    check_task(data, target, entry.task)
 
-    x = _matrix(data, features)
-    _check_no_missing(x, entry)
+    x = build_matrix(data, features)
+    check_no_missing(x, entry)
     y = data[target]
 
-    cv_folds, budget_seconds = _tuning_from_snapshot(paths)
+    cv_folds, budget_seconds = tuning_from_snapshot(paths)
     multiclass = False
     if entry.task == "classification":
-        _check_class_counts(y, cv_folds)
+        check_class_counts(y, cv_folds)
         multiclass = int(y.nunique()) > 2
         if multiclass and is_binary_only(metric):
             raise ToolParamError(
@@ -507,7 +528,7 @@ def tune_estimator(
             )
 
     scorer = scorer_for(metric, multiclass=multiclass)
-    splitter = _splitter(cv_folds, entry.task, seed)
+    splitter = cv_splitter(cv_folds, entry.task, seed)
     y_arr = y.to_numpy() if entry.task == "classification" else y.to_numpy(dtype="float64")
 
     points = list(ParameterGrid(dict(grid)))
@@ -639,7 +660,7 @@ def predict_proba(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
 
     est = cast(BaseEstimator, fitted.estimator)
     proba = np.asarray(est.predict_proba(x), dtype="float64")
-    columns = [f"proba__{cls}" for cls in fitted.classes]
+    columns = [f"proba__{as_str_scalar(cls)}" for cls in fitted.classes]
     out = pd.DataFrame(proba, columns=columns, index=data.index)
     meta = _save_predictions(paths, out, f"{fitted.name}_proba")
     summary: dict[str, JsonValue] = {
@@ -660,7 +681,7 @@ def _predict_matrix(frame: pd.DataFrame, fitted: FittedModel) -> np.ndarray:
         )
     x = frame[list(fitted.features)].to_numpy(dtype="float64", na_value=np.nan)
     entry = estimators()[fitted.name]
-    _check_no_missing(x, entry)
+    check_no_missing(x, entry)
     return x
 
 

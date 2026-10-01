@@ -276,3 +276,22 @@ change under `backend/` or `contracts/`.
 4. Anything about `TargetEncoder` that surprised you.
 5. For chunk 13: is there any column dtype the encoders can output that sklearn would reject or
    misread (nullable `boolean`, ordered `Categorical`, `Int64`)?
+
+
+## 6. Addendum — review corrections (2026-10-01)
+
+**Item (b): one-hot of a float-coded column silently destroyed data.** `fit_onehot_encoder` stored
+each column's observed levels as their raw objects (`1.0, 2.0, 3.0`) and named dummies
+`f"{col}__{level}"` → `rating__1.0`, while `apply_onehot_encoder` compared `as_str(source)` (`"1"`)
+against `str(level)` (`"1.0"`). On a `float64`-coded column `[1.0, 2.0, 3.0, NaN]*10` (an integer
+column with a null loads as `float64`, the common case) every dummy came out all-`False` and the
+summary reported all 30 non-null rows as `unseen` — silent data loss, all gates green.
+
+Fix: the fitted levels are now stored in **string form** via `_frame.as_str_scalar` (the scalar
+twin of `as_str`), so the dummy names and the apply-time comparison are the same string. The
+multiclass target-encoder output names (`f"{col}__te_{cls}"`) and the ordered-`Categorical`
+`dtype.categories` order both use `as_str_scalar` for the same reason — a float-coded class or
+category level would otherwise never match the `as_str`-ed source column. Regression test:
+`test_onehot_float_coded_column_matches_integral_string_form` (dummies `rating__1/2/3`, counts
+10/10/10, null 10, unseen 0); it fails on the old code with `rating__1.0`-style names. See
+`00_index.md`'s integral-float row and WHATS_NEXT.md correction 22.

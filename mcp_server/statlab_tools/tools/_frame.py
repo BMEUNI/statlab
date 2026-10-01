@@ -137,6 +137,30 @@ def as_str(series: pd.Series) -> pd.Series:
     return series.astype("str")
 
 
+def as_str_scalar(value: object) -> str:
+    """The scalar twin of `as_str`: the string form of one class label or category level, agreeing
+    with `as_str` element-for-element (`as_str(pd.Series([value])).iloc[0]` semantics). An integral
+    float becomes `"1"` not `"1.0"`, a `bool` becomes `"True"`/`"False"`, a `str` passes through.
+
+    Needed wherever a single label/level is turned into a column name or compared against an
+    `as_str` column but no `Series` is in hand (chunk 14/15 class names, one-hot/target-encoder
+    output names): a bare `str(1.0)` gives `"1.0"` while `as_str` gives `"1"`, so float-coded
+    targets and levels (any integer-coded column with a null loads as `float64`) silently fall
+    outside every comparison -- the same two-stringifications defect `as_str` was built to end."""
+    if isinstance(value, (bool, np.bool_)):
+        return str(bool(value))
+    if isinstance(value, (float, np.floating)):
+        as_float = float(value)
+        if math.isfinite(as_float) and as_float == int(as_float):
+            return str(int(as_float))
+        return str(as_float)
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    # Every other type (`str`, a datetime category level, ...) goes through the one-element
+    # `as_str` path, which is the definition this helper agrees with -- a single source of truth.
+    return str(as_str(pd.Series([value])).iloc[0])
+
+
 def require_columns(frame: pd.DataFrame, names: tuple[str, ...], field: str) -> None:
     """A column name not in `frame` is `tool_param`, naming the missing ones under `field`."""
     missing = [name for name in names if name not in frame.columns]

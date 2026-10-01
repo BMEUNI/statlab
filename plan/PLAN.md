@@ -946,7 +946,7 @@ compute_learning_curve(name, params, train, target)                H
 ```
 fit_ols(matrix, target, predictors)                                H   [v1]  no formulas: patsy evaluates Python (chunk 15 D-a)
 fit_logit(matrix, target, predictors)                              H   [v1]
-fit_glm(matrix, target, predictors, family)                        H
+fit_glm(matrix, target, predictors, family)                        H         log link for both families: Gamma's canonical InversePower raises a fatal DomainWarning under -W error (chunk 15 §6, B2 review)
 coefficient_table(fit, manifest, goals)     coef, SE, z/t, p, CI; joint Wald per goal, Holm (D35)  [v1]
 inferential_fit_summary(fit)                R²/pseudo-R², AIC, BIC, LR
 compute_vif(matrix)                         multicollinearity

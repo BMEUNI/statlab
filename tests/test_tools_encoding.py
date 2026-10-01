@@ -106,6 +106,25 @@ def test_onehot_unseen_and_null_counted(run_paths: RunPaths) -> None:
     assert dummies.iloc[2].tolist() == [False, False]
 
 
+def test_onehot_float_coded_column_matches_integral_string_form(run_paths: RunPaths) -> None:
+    """Review correction b: a float64-coded column [1.0, 2.0, 3.0, NaN]*10 (an int-coded column
+    with a null loads as float64). The dummies must be named rating__1/2/3 (not rating__1.0, ...)
+    and must actually fire: fitted levels are stored in as_str form and apply matches as_str, so
+    each level fires 10 times, the null rows are counted (10) and nothing is unseen (0). Before the
+    fix every dummy was all-False and all 30 non-null rows were reported unseen."""
+    frame = pd.DataFrame({"rating": [1.0, 2.0, 3.0, np.nan] * 10, "y": [0, 1] * 20})
+    ref = _save(run_paths, frame)
+    fit = fit_onehot_encoder(run_paths, ref, target="y", columns=("rating",))
+    res = apply_onehot_encoder(run_paths, fit.artifacts[0].ref, ref)
+    out = _loaded(run_paths, res)
+    assert list(out.columns) == ["rating__1", "rating__2", "rating__3", "y"]
+    assert out["rating__1"].sum() == 10
+    assert out["rating__2"].sum() == 10
+    assert out["rating__3"].sum() == 10
+    assert res.summary["null"] == {"rating": 10}
+    assert res.summary["unseen"] == {}
+
+
 def test_onehot_explicit_column_above_max_cardinality_is_tool_param(run_paths: RunPaths) -> None:
     train = pd.DataFrame({"c": [f"v{i}" for i in range(5)], "y": [0, 1, 0, 1, 0]})
     with pytest.raises(ToolParamError) as exc:

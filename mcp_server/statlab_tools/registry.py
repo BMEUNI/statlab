@@ -22,8 +22,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
-from statlab_contracts.vocabulary import ClassWeight, Metric, ParamValue, Task
+from statlab_contracts.vocabulary import ClassWeight, Metric, ParamValue, TargetType, Task
 
 # A grid key maps to the tuple of values to try for it. Values are `ParamValue` (the contract's
 # hyperparameter type): scalars or a flat tuple, which is all sklearn params ever are.
@@ -36,13 +37,17 @@ class EstimatorEntry:
     `object`: sklearn's constructor result is a dynamic value, and returning it as `object` keeps
     that dynamic type from leaking out -- the training tool narrows it only enough to call
     documented methods (`fit`, `predict`, `get_params`), never widening it. `handles_missing` and
-    `supports_class_weight` gate the two P2/§3.1 pre-checks the training tool runs before a fit."""
+    `supports_class_weight` gate the two P2/§3.1 pre-checks the training tool runs before a fit.
+    `interpretable` is true only for the two linear models (`logistic_regression`,
+    `linear_regression`); `rank_models` (chunk 14 §3.5) reads it to flag a non-interpretable
+    estimator ineligible when the contract requires interpretability (D-g)."""
 
     task: Task
     build: Callable[[int, ClassWeight], object]
     default_grid: Grid
     handles_missing: bool
     supports_class_weight: bool
+    interpretable: bool
 
 
 def _class_weight_arg(class_weight: ClassWeight) -> str | None:
@@ -100,6 +105,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid={"C": (0.1, 1.0, 10.0)},
             handles_missing=False,
             supports_class_weight=True,
+            interpretable=True,
         ),
         "random_forest_classifier": EstimatorEntry(
             task="classification",
@@ -107,6 +113,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid=_grid_rf,
             handles_missing=True,
             supports_class_weight=True,
+            interpretable=False,
         ),
         "hist_gb_classifier": EstimatorEntry(
             task="classification",
@@ -114,6 +121,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid=_grid_hgb,
             handles_missing=True,
             supports_class_weight=True,
+            interpretable=False,
         ),
         "linear_regression": EstimatorEntry(
             task="regression",
@@ -121,6 +129,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid={},
             handles_missing=False,
             supports_class_weight=False,
+            interpretable=True,
         ),
         "random_forest_regressor": EstimatorEntry(
             task="regression",
@@ -128,6 +137,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid=_grid_rf,
             handles_missing=True,
             supports_class_weight=False,
+            interpretable=False,
         ),
         "hist_gb_regressor": EstimatorEntry(
             task="regression",
@@ -135,6 +145,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             default_grid=_grid_hgb,
             handles_missing=True,
             supports_class_weight=False,
+            interpretable=False,
         ),
     }
 
@@ -236,3 +247,33 @@ def scorer_for(metric: Metric, *, multiclass: bool) -> str | object:
         )
         return made
     return simple[metric]
+
+
+# --- Inferential model registry (D7, chunk 15 §3.1) ---------------------------------------------
+# The D7 second track: the four classical-inference models node 6 may fit, each pointing at the
+# `inference` tool that fits it and the target types it is valid for. Pure data (no statsmodels
+# import), so `list_estimators` can report it and node 1 can validate
+# `modelling.inferential_model` without importing server code or pulling scipy -- the same
+# scipy-free constraint `_build_estimators` keeps for the predictive registry.
+
+
+@dataclass(frozen=True)
+class InferentialEntry:
+    """One inferential-model registry line (§3.1). `tool` is the `inference`-phase tool that fits
+    it; `target_types` is the closed set of `TargetType`s it is valid for; `family` is the GLM
+    family (`None` for OLS and Logit, which are not GLMs in this registry's shape)."""
+
+    tool: str
+    target_types: tuple[TargetType, ...]
+    family: Literal["poisson", "gamma"] | None = None
+
+
+SPECS: dict[str, InferentialEntry] = {
+    "ols": InferentialEntry("fit_ols", ("continuous",)),
+    "logit": InferentialEntry("fit_logit", ("binary",)),
+    "glm_poisson": InferentialEntry("fit_glm", ("count",), "poisson"),
+    "glm_gamma": InferentialEntry("fit_glm", ("continuous",), "gamma"),
+}
+"""The four inferential models (§3.1). Reported by `list_estimators` as `inferential_models` so
+node 1 can validate `modelling.inferential_model` against it without importing server code. Every
+`.tool` is a registered `inference`-phase tool name (checked by a chunk 15 registry test)."""

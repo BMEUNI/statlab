@@ -1,8 +1,17 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 12, 14]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  Eleven inference tools in `tools/inference.py`; `registry.SPECS` (4 inferential models);
+  `training.list_estimators` now reports `inferential_models`. NIST Longley coef/SE/R² match the
+  certified values to relative <=1.03e-11. Gamma GLM uses the domain-safe log link (the canonical
+  InversePower link raises a DomainWarning fatal under -W error); both GLM families are log-link.
+  P3 handled on both paths (warning raised under pytest; converged=False via monkeypatch). A
+  pandas integer-string bug was found and fixed: level derivation must use `_frame.as_str` (not
+  `str(value)`) so `1.0` becomes `"1"` consistently with the dummy columns. All 7 DoD mutations
+  caught; source diff-clean. 71 new tests, 100% line+branch, mypy/ruff clean, zero new
+  suppressions.
 ---
 
 # Chunk 15 — Inference tools
@@ -293,3 +302,37 @@ P3–P7 do not reproduce, or anything needs `backend/` or `contracts/`.
 4. Which Longley columns VIF flagged.
 5. For chunk 16 (the skeleton gate): the exact tool sequence you would run for node 6 on the
    regression fixture.
+
+
+## 6. Addendum — review corrections (2026-10-01)
+
+**Item (d): `fit_logit` silently used the wrong positive class and never recorded its source.**
+`_binary_target` matched the snapshot's `target.positive_class` by `str(...)` and, when it matched
+neither observed level, **silently fell back** to the second level in string order — with a
+`float`-coded target the `str()`/`as_str` mismatch (item a) made this the common path. The summary
+also had no `positive_class_source`, although spec D-f says it records which source chose the
+positive class.
+
+Fix:
+- The contract value is normalised with `as_str_scalar` (the scalar twin of `as_str`, shared with
+  evaluation and encoding).
+- A contract `positive_class` matching neither level is a **`ToolDataError`** naming the value and
+  the observed levels — never a silent fallback. The default (second string level, source
+  `"default"`) applies only when the contract carries no `positive_class`.
+- The summary now reports `positive_class_source` (`"contract"` or `"default"`), as D-f requires.
+
+Regression tests (in `tests/test_tools_inference.py`):
+`test_fit_logit_snapshot_positive_class_unmatched_is_tool_data` (unmatched contract value →
+`ToolDataError`; fails on the old code, which fell back silently), plus
+`positive_class_source` assertions on the existing contract/default tests (both fail on the old
+code with a `KeyError`). See WHATS_NEXT.md correction 22.
+
+**Gamma GLM uses a log link, not the canonical inverse link.** `sm.families.Gamma`'s canonical
+link is `InversePower`, which raises a `DomainWarning` at construction. Under this project's
+`filterwarnings=error` that warning is **fatal**, and the usual escape —
+`warnings.catch_warnings()` — is **banned here** because tool bodies run in worker threads
+(`anyio.to_thread.run_sync`, D17) and `catch_warnings` mutates process-global state that is not
+thread-safe. `fit_glm` therefore uses the domain-safe **log link** for both families (Poisson's
+canonical link is log anyway). Consequence to document for interpretation: with a log link the
+coefficients are **multiplicative** in the original units (`exp(coef)` is a rate/mean ratio), not
+additive on an inverse scale. This matches `PLAN.md`'s `fit_glm` catalogue line.
