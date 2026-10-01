@@ -22,7 +22,7 @@ underway. Batch B2 (chunks 14 + 15) complete; batch B3 (chunk 16, the walking-sk
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
 | Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B2 added **zero** |
-| Git | local `master`, uncommitted B2 working tree (do not commit) |
+| Git | local `master`, batch B2 committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
