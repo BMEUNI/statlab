@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -146,9 +147,10 @@ def ensure_writable(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ConfigError(f"Cannot create directory {path}.", cause=exc) from exc
-    probe = path / ".statlab_write_probe"
+    # A unique anonymous file, not a fixed name: two loaders probing at once (parallel
+    # workers, or the server and backend sharing a data_dir) must not race on one path.
     try:
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        with tempfile.TemporaryFile(dir=path):
+            pass
     except OSError as exc:
         raise ConfigError(f"Directory {path} is not writable.", cause=exc) from exc

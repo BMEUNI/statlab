@@ -317,12 +317,20 @@ def tool(
 
         async def wrapper(**kwargs: object) -> ToolResult:
             started = time.monotonic()
+
+            def call_body() -> object:
+                return _call_as_object(called, kwargs)
+
             try:
+                # Bodies are synchronous and CPU- or IO-bound. Running them inline would block
+                # the event loop and serialise every tool call across every run, defeating
+                # D17 (runs proceed in parallel and serialise only at heavy fits). The
+                # semaphore is acquired on the loop, so a queued heavy call holds no thread.
                 if heavy:
                     async with _fit_semaphore():
-                        result = _call_as_object(called, kwargs)
+                        result = await anyio.to_thread.run_sync(call_body)
                 else:
-                    result = _call_as_object(called, kwargs)
+                    result = await anyio.to_thread.run_sync(call_body)
                 if isinstance(result, ToolFailure):
                     # §6.1.1: tool bodies raise, they never return ToolFailure. One conversion
                     # point (this except block, below) beats eighty; a body returning a

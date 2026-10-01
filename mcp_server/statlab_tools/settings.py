@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -120,10 +121,11 @@ def load_tool_settings(env_file: Path | None = None) -> ToolSettings:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ToolSettingsError(f"Cannot create directory {settings.data_dir}.", cause=exc) from exc
-    probe = settings.data_dir / ".statlab_write_probe"
+    # A unique anonymous file, not a fixed name: two loaders probing at once (parallel
+    # workers, or the server and backend sharing a data_dir) must not race on one path.
     try:
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        with tempfile.TemporaryFile(dir=settings.data_dir):
+            pass
     except OSError as exc:
         raise ToolSettingsError(
             f"Directory {settings.data_dir} is not writable.", cause=exc

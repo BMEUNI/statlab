@@ -172,6 +172,7 @@ not re-derive any of this from memory:
   and adds config surface, to buy a cosmetically nicer import path.
   `mcp.client.streamable_http.__all__`.
 - **`Field(pattern=...)` with a *string* is compiled by pydantic-core's Rust regex engine, which rejects `\Z` with a `SchemaError` at class creation — use `\z`.** A pre-compiled `re.Pattern` goes through Python's `re` instead, which is why `ARTIFACT_ID_PATTERN` (compiled, `\Z`) never hit it. Python 3.14's `re` accepts `\z` too, so one string works in both. Verified: `\z` rejects a trailing newline and a literal `z` under both engines. Found in chunk 08.
+- **`MCPServer` runs a *sync* tool in an AnyIO worker thread but awaits an *async* tool on the event loop.** `@tool`'s wrapper is async (it awaits the fit semaphore), so it must offload the body itself with `anyio.to_thread.run_sync` — otherwise every tool call in every run serialises on one thread. Measured: 4 × 0.5 s calls took 2.09 s inline, 0.54 s offloaded. Test T17b pins it with a two-party barrier. Found 2026-10-01 while drafting chunk 09.
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
 

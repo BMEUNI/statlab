@@ -550,6 +550,39 @@ def test_t17_light_tools_never_block(run_dir: RunPaths) -> None:
     assert order == ["light-enter", "light-enter"]
 
 
+def test_t17b_light_tool_bodies_overlap_in_time(run_dir: RunPaths) -> None:
+    """T17b: two light calls are inside their bodies AT THE SAME TIME (D17).
+
+    T17 only proves both calls finish, which is also true if they run one after the other on
+    the event loop -- and they did, until bodies were moved to a worker thread. Here each body
+    waits on a two-party barrier: it can only pass if the other body is running concurrently.
+    Serialised bodies would deadlock, so the barrier's timeout turns that into a failure.
+    """
+    import threading
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    @tool(phase="t17b", allow_in=["*"], heavy=False)
+    def overlapping(paths: RunPaths) -> ToolSuccess:
+        """Passes only if a second call is inside its body concurrently."""
+        del paths
+        barrier.wait()
+        return ToolSuccess()
+
+    from statlab_tools.tool import server
+
+    async def call() -> None:
+        await server.call_tool("overlapping", {"project": run_dir.slug, "run": run_dir.run_id})
+
+    async def main() -> None:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(call)
+            tg.start_soon(call)
+
+    anyio.run(main)
+    assert not barrier.broken
+
+
 def test_t18_permit_released_on_exception(run_dir: RunPaths) -> None:
     """T18: run a failing heavy tool three times with one permit. If the permit leaked on the
     first failure, the second or third call would hang and the test would time out rather than
