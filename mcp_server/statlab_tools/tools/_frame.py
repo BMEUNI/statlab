@@ -44,6 +44,26 @@ def is_numeric_column(series: pd.Series) -> bool:
     return bool(pd.api.types.is_numeric_dtype(series)) and not pd.api.types.is_bool_dtype(series)
 
 
+def is_class_target(series: pd.Series) -> bool:
+    """A class target unless numeric with more than CLASS_TARGET_MAX_LEVELS distinct non-null
+    values (summarize_target's rule, now shared). `nunique()` already excludes nulls, so this
+    matches both of profiling.py's former inline copies exactly."""
+    return not is_numeric_column(series) or series.nunique() <= CLASS_TARGET_MAX_LEVELS
+
+
+def observed_counts(series: pd.Series) -> pd.Series:
+    """`value_counts()` without the zero-count unused categories a categorical reports.
+
+    A categorical's `value_counts()` lists every declared category, including ones no row uses,
+    with a count of `0` (`nunique`/`unique` do not); counting levels off that bare result treats
+    an unused category as a present level. Every level-counting site uses this instead -- the
+    measured consequence of not doing so was a split refusing a categorical target over a class
+    with 0 rows that no row ever had, and `summarize_class_target` reporting `minority_share`
+    `0.0` for a 70/30 target with one unused category."""
+    counts = series.value_counts()
+    return counts[counts > 0]
+
+
 def iso8601_parse_share(values: pd.Series) -> float:
     """Share of `values`' non-null entries that parse as ISO 8601. `0.0` when there are no
     non-null values. Moved from `intake.py` unchanged (§3.1) -- behaviour must not change, so

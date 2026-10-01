@@ -12,24 +12,26 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 ## State
 
 **9 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Chunk 10 next.
+underway. Chunk 11 next.
 
-| Verified 2026-10-01, after revision batch 09r | |
+| Verified 2026-10-01, after chunk 10 | |
 |---|---|
-| Tests | 1484 (1483 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (2289 stmts, 588 branches, 0 missed) |
-| mypy | `--strict` clean on 71 source files, `init_typed = true` |
+| Tests | 1563 (1562 passed, 1 skipped — chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (2478 stmts, 636 branches, 0 missed) |
+| mypy | `--strict` clean on 74 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — 09r added zero new ones in either category |
-| Git | local `master`, 09r applied and **uncommitted**, otherwise tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 10 added **zero** new ones in either category |
+| Git | local `master`, chunk 10 applied and **uncommitted**, otherwise tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
 Milestones passed: **M1** (chunk 07) — an external MCP client completes `tools/list` and a
 round-trip `call_tool` over real HTTP; a tokenless request is rejected. **M2** (chunk 08) — the
 five intake tools pass contract tests, mismatches produce precise field-level errors, and a real
-CSV loads to a `raw` artifact over a real MCP session.
+CSV loads to a `raw` artifact over a real MCP session. **M3** (chunks 09 + 10) — every intake,
+profiling and splitting tool tested on fixtures; `verify_split` catches a deliberately
+overlapping split (and, via P3, a relabelled duplicate that index overlap cannot see).
 
 ---
 
@@ -262,6 +264,12 @@ read it:
   JSON once `save_json`'s `allow_nan=False` is reached. `json_scalar` is also the one place
   `pd.Timestamp`/`datetime.date` become `isoformat()` strings, replacing the old `isoformat`
   duck-typing in `describe_artifact`.
+- **Count levels with `_frame.observed_counts`, never bare `value_counts()`** (chunk 10 review): a
+  categorical's `value_counts()` lists unused categories with count 0, which a bare count mistakes
+  for present levels — it made a split refuse a categorical target over a class no row had, and
+  `summarize_class_target` report `minority_share` 0.0. `observed_counts` drops the zero-count rows.
+  `intake.py`'s two sites are exempt (`_majority_share` takes only the top value; `_level_purity`'s
+  groupby uses `observed=True`).
 - **No unreachable code, therefore no `pragma: no cover`.** If a line cannot be reached, delete it. If
   you want to bypass a validator to reach a line, that line is the problem.
 - **`# type: ignore` is banned in production and permitted in tests only** where a runtime check must
@@ -371,29 +379,71 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: chunk 10
+## Next: chunk 11
 
-Revision batch 09r (`REVISIONS_IMPLEMENTED.md` R1–R7) is **applied and verified** — the schema and
-wire fields chunk 10 depends on are in place. The next step is chunk 10.
+Chunk 10 is **applied and verified**. The next step is chunk 11 (cleaning tools).
 
-### Chunk 10 — splitting tools
+### Chunk 11 — cleaning tools
 
-Read D32–D34 in `PLAN.md` first. They change what the split tools record and when they must refuse
-(small-split guard, unavailable strategies). The split tools must set `ArtifactMeta.split` on each
-split frame (so the lineage lock has a typed fact to key on, not a label) and return the run's
-`test_fingerprint` in their summary; the backend stores it with `repository.set_test_fingerprint`
-(chunk 21). Tools never touch the database.
+Nine tools with the `fit_*`/`apply_*` separation (§6.1 rule 3). Two things from D34d and this
+chunk's handoff carry directly into node 4:
 
-Two of the four per-strategy split tools (`split_random`, `split_stratified`; temporal and grouped
-follow at M7) plus `verify_split`'s four independent checks. Together with chunk 09, this
-closes milestone **M3** (`PLAN.md` §8: "every tool tested on fixtures; `verify_split` catches a
-deliberately overlapping split") — chunk 09 alone does not complete M3, only profiling's half of
-it. `summarize_target`'s class-share logic (chunk 09's `summarize_class_target`, factored out as
-a plain function precisely so chunk 10 could reuse it) is one candidate for `verify_split`'s
-class-proportion-across-three-frames check; chunk 09's own report (item 7) found it directly
-reusable, not just similar in shape — the function already takes one series and returns shares,
-counts, minority share and imbalance ratio, exactly what comparing three frames' proportions
-needs computed once per frame and compared pairwise.
+- **`drop_duplicate_rows` must be allowed in `data_splitting`.** D34d's structural, target-independent
+  pre-split drops (exact duplicates) run once in node 4, before the split tool — so this tool's
+  `allow_in` must include `data_splitting`, not only a cleaning phase. The duplicate the split would
+  otherwise let leak across train/test is exactly what `verify_split`'s check 2 exists to catch; D34d
+  removes the leak at the source.
+- **No catalogue tool yet drops rows above a `drop_rows_above` missing share, and D34d needs one in
+  node 4** (`00_index.md` row 11). Decide in chunk 11 whether that is a new tool or a mode of an
+  existing one. Chunk 10's report (item 7) argues for a **mode of `drop_duplicate_rows`** (or a shared
+  `drop_rows` tool with a `reason`): both are target-independent, per-row structural drops that run at
+  the same point in node 4, count what they removed, and return the trimmed frame — the same shape the
+  null-target drop already takes inside the split tools. A separate single-purpose tool would duplicate
+  that plumbing for one predicate. The frames seen here (churn 240×7, messy 60×11) are small and
+  row-wise; neither drop needs streaming or chunking, so one row-mask-and-count tool covers both.
+
+Nothing in chunk 11 touches `backend/` or `contracts/`.
+
+## Chunk 10 — completed (summary)
+
+`split_random`, `split_stratified`, `verify_split` (`splitting.py`), plus `is_class_target`
+extracted to `_frame.py` and `save_dataframe(split=...)`. Verified by the gates below and by the
+full DoD mutation sweep. Gates after the 2026-10-01 review corrections: **1562 passed, 1 skipped**
+(1563 total), **100 % line and branch** coverage (2478 stmts, 636 branches, 0 missed), mypy
+`--strict` clean on **74 source files**, ruff `check` + `format --check` clean. `splitting.py` adds
+**no** `# type: ignore` (the two production
+suppressions are still only `tool.py`'s `__signature__` stub gap) and uses **no** sklearn and **no**
+`reset_index`. Nothing under `backend/`/`contracts/` changed.
+
+**Mutation evidence** (each applied, tests run, restored; `splitting.py` has no residual diff):
+
+| Mutation | Tests that failed |
+|---|---|
+| `MIN_SPLIT_ROWS = 0` | `test_guard_too_few_total_rows`, `test_guard_too_few_rows_continuous_target`, `test_min_split_rows_is_30`, `verify_split::test_29_row_valid_fails_size` (4) |
+| `MIN_CLASS_ROWS_PER_SPLIT = 0` | `test_guard_minority_class_too_small_stratified`, `test_guard_tiny_class_under_random`, `verify_split::test_zero_of_a_class_fails`, `verify_split::test_four_of_a_class_fails` (4) |
+| drop `sort_index()` from the fingerprint | `test_tool_fingerprint_is_row_order_invariant` (1) |
+| `index=True` in the duplicate hash | `verify_split::test_relabelled_duplicate_fails_duplicates_not_overlap`, `test_shuffled_column_order_still_detects_duplicate`, `test_messy_copies_fail_duplicates` (3) |
+| remove the null-target drop | `test_null_targets_dropped_and_warned`, `test_null_drop_gives_same_sizes_as_prefiltered` (2) |
+| `reset_index(drop=True)` on the outputs | `test_partitions_are_disjoint_and_cover_the_input`, `test_labels_preserved_on_non_range_index`, `test_different_seed_differs`, `test_stratified_outputs_disjoint_and_cover`, `verify_split::test_clean_split_passes_all_four` + 2 clean-split checks (7) |
+
+The `sort_index` mutation is the one that nearly slipped through: a comparison against the stored
+test artifact cannot catch it, because the tool's output index is always ascending
+(`iloc[np.sort(...)]`), so `sort_index` is a no-op there. Catching it needs a direct test of
+`_fingerprint` on a deliberately row-shuffled frame — the "passes by construction" trap the handoff
+named, found and closed before the gate rather than after.
+
+**Measured answers to the report questions:** `split_stratified` on `churn_frame` holds class
+proportions to `max_drift ≈ 0.004` (train 100/44, valid 33/15, test 33/15, pooled 0.69/0.31) — a
+`max_drift_z` well below the `BALANCE_DRIFT_Z_WARN = 3.0` threshold, so it never warns.
+`verify_split` on a hand-built overlapping split fails both `index_overlap` (train/test = 10) and
+`duplicate_rows` (train/test = 10) with `passed = false`. **Review correction (2026-10-01):** the
+original absolute `BALANCE_DRIFT_WARN = 0.05` was NOISE — `split_random` on `churn_frame` warned on
+**60 of seeds 0–99**, because one standard deviation of a 31 %-minority share at n=48 is ~0.066.
+It was replaced by a z-score rule (`z = |share_in_split − share_in_pooled| / sqrt(p*(1-p)/n_split)`,
+warn at `z > 3`): over 200 random seeds the max z was 2.56 (0 warnings), while a split cut from the
+target-sorted frame scores z = 5.34. So `split_random` on `churn_frame` over seeds 0–49 now never
+warns, and the reason to prefer `split_stratified` for a class target stays measurable. Nothing
+about parquet or hashing surprised beyond the documented P1–P3 (they reproduced exactly).
 
 ## Revision batch 09r — completed (summary)
 

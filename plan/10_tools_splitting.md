@@ -1,8 +1,35 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 08, 09, 09r]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  Three tools in `splitting.py` (`split_random`, `split_stratified`, `verify_split`), plus
+  `is_class_target` extracted to `_frame.py` (profiling's two inline copies now call it; its
+  tests pass unedited) and `save_dataframe(split=...)`. No sklearn, no `reset_index`, no new
+  dependency, no `backend/`/`contracts/` change.
+
+  1550 tests pass (1 skipped by design), 100% line + branch coverage (2469 stmts / 636
+  branches), mypy --strict clean on 74 files, ruff clean. All six DoD mutations fail at least
+  one test and were restored (splitting.py has no residual diff).
+
+  Verified facts worth carrying forward:
+  - P1-P3 reproduced under pandas 3.0.5, `-W error`: parquet keeps a non-range index; a
+    RangeIndex stays one; `hash_pandas_object(..., index=False)` makes a relabelled duplicate
+    hash equal, which is what `verify_split`'s duplicate check (not its overlap check) catches.
+  - The `sort_index` drop in the fingerprint is INVISIBLE to a comparison against the stored
+    test artifact, because the tool's output index is always ascending (`iloc[np.sort(...)]`).
+    Catching that mutation needs a direct test of `_fingerprint` on a row-shuffled frame
+    (`test_tool_fingerprint_is_row_order_invariant`) -- the exact "passes by construction" trap
+    the handoff warned about.
+  - The `BALANCE_DRIFT_WARN = 0.05` absolute tolerance was NOISE, not signal (review
+    correction, see §6): `split_random` on `churn_frame` (31% minority, 48-row valid/test)
+    warned on 60 of seeds 0-99 because one standard deviation of a 31% share at n=48 is ~0.066.
+    Replaced by a z-score rule `BALANCE_DRIFT_Z_WARN = 3.0`: over 200 random seeds the max z was
+    2.56 (0 warnings), while a split cut from the target-sorted frame scores z = 5.34.
+    `split_stratified` still never warns.
+  - Review also made `seed` required (no default) in both split tools, as the spec said, and
+    added `observed_counts` to `_frame.py` so a categorical target's unused level (count 0) is
+    no longer counted as a class a split "lacks".
 ---
 
 # Chunk 10 — Splitting tools
@@ -96,9 +123,11 @@ receives a test-derived artifact before node 12". It produces no artifact, so no
 inherits test lineage from it.
 
 **D-h. Drift tolerance is a constant, not a parameter.** §6.3 says "configurable", but the agent
-has no basis for choosing a tolerance and the node logic never varies it.
-`BALANCE_DRIFT_WARN = 0.05` is an absolute share difference, and it only warns. Failures come
-from D33c's counts.
+has no basis for choosing a tolerance and the node logic never varies it. The tolerance is a
+z-score threshold `BALANCE_DRIFT_Z_WARN = 3.0` (review correction, see §6): a split warns when a
+per-class share is further from the pooled share than a random split would plausibly produce. It
+only warns; failures come from D33c's counts. (The first implementation used an absolute
+`BALANCE_DRIFT_WARN = 0.05`, which fired on 60% of random splits — noise, not signal.)
 
 ### What this chunk does NOT do
 
@@ -153,7 +182,7 @@ call site keeps working. Nothing else in `artifacts.py` changes.
 ### 3.3 `splitting.py`
 
 Constants (all `Final`): `MIN_SPLIT_ROWS = 30`, `MIN_CLASS_ROWS_PER_SPLIT = 5`,
-`BALANCE_DRIFT_WARN = 0.05`, `OVERLAP_EXAMPLES = 5`. The split order is always
+`BALANCE_DRIFT_Z_WARN = 3.0`, `OVERLAP_EXAMPLES = 5`. The split order is always
 `("train", "valid", "test")` and the pairs are `train/valid`, `train/test`, `valid/test`.
 
 **Check results.** Each check returns `dict[str, JsonValue]` with `"status"` in
@@ -165,15 +194,18 @@ Constants (all `Final`): `MIN_SPLIT_ROWS = 30`, `MIN_CLASS_ROWS_PER_SPLIT = 5`,
 - `_check_balance(splits, target)` returns `{"status": "skipped", "reason": "continuous target"}`
   when `not is_class_target(pooled)`, where `pooled` is the three target columns concatenated.
   Otherwise:
-  - The classes are those of `pooled.dropna()`. Per-split counts come from
-    `value_counts().reindex(classes, fill_value=0)`, so a class absent from a split shows as `0`.
-    Do not reuse `summarize_class_target` here: it omits absent classes, which is exactly the case
-    this check exists for. Class keys are `str(value)`.
+  - The classes are those of `observed_counts(pooled.dropna())`, so a categorical's unused level
+    (count 0) is not counted as a class. Per-split counts come from
+    `observed_counts(...).reindex(classes, fill_value=0)`, so a class absent from a split still
+    shows as `0`. Do not reuse `summarize_class_target` here: it omits absent classes, which is
+    exactly the case this check exists for. Class keys are `str(value)`.
   - It fails when any class has fewer than `MIN_CLASS_ROWS_PER_SPLIT` rows in any split.
-  - It warns when `max_drift` exceeds `BALANCE_DRIFT_WARN`. `max_drift` is the largest
-    `|share_in_split − share_in_pooled|`, with shares computed over non-null values.
+  - It warns when `max_drift_z` exceeds `BALANCE_DRIFT_Z_WARN`. `max_drift_z` is the largest
+    per-split, per-class z-score `|share_in_split − share_in_pooled| / sqrt(p*(1-p)/n_split)`,
+    `p` the pooled share; a single-class target's standard error is 0, giving z = 0.0. The
+    absolute `max_drift` (largest `|share_in_split − share_in_pooled|`) is still reported too.
   - Result: `{"status", "classes": {split: {class: count}}, "pooled_shares": {class: share},
-    "max_drift", "problems": [str]}`.
+    "max_drift", "max_drift_z", "problems": [str]}`.
 - `_check_overlap(splits)` gives `{"status", "pairs": {"train/valid": n, …}, "examples":
   [≤ OVERLAP_EXAMPLES labels]}` from `a.index.intersection(b.index)`. It fails when any pair is
   non-zero.
@@ -371,3 +403,39 @@ frames are saved with `save_dataframe` and `new_artifact_ref()`.
 7. For chunk 11: no catalogue tool drops rows above `drop_rows_above` missing share, and D34d
    needs one in node 4. Should that be a new tool, or a mode of an existing one? Base the answer
    on what you saw of the frame shapes here.
+
+
+## 6. Addendum — review corrections (2026-10-01)
+
+Three defects found in review of the implemented-but-uncommitted chunk, fixed in the working
+tree (code + tests + these docs):
+
+1. **`observed_counts` for unobserved categorical levels.** `pd.Series.value_counts()` on a
+   categorical lists every *declared* category, including ones no row uses, with count 0
+   (`nunique`/`unique` do not). Counting levels off that bare result treats an unused category
+   as a present level. Measured consequences: `split_random`/`split_stratified` *refused* a
+   categorical target with an unused category ("train has 0 rows of class unused"), and
+   `summarize_class_target` reported `minority_share` 0.0 (and `imbalance_ratio` None) for a
+   70/30 target with one unused category — which wrongly fired the imbalance warning that drives
+   D33d's PR-AUC default. Fix: `_frame.observed_counts(series)` returns `value_counts()` with
+   the zero-count rows dropped, used at every level-counting site in `profiling.py`
+   (`_categorical_top`, `summarize_class_target`, `plot_distribution`'s bar branch,
+   `plot_target_relation`'s 'bars' and 'box' branches) and `splitting.py` (`_check_balance`,
+   both pooled and per-split, before the `reindex(classes, fill_value=0)` that must stay).
+   `intake.py`'s two `value_counts` sites are unaffected (`_majority_share` takes only the top
+   value; `_level_purity`'s groupby already uses `observed=True`).
+
+2. **z-score drift rule replacing D-h's absolute 0.05.** `BALANCE_DRIFT_WARN = 0.05` was noise:
+   on `churn_frame` (48-row valid/test, ~31% positives) `split_random` warned on **60 of 100
+   seeds**, because one standard deviation of a 31% share at n=48 is ~0.066. Replaced by
+   `BALANCE_DRIFT_Z_WARN = 3.0`, warning when the largest per-split, per-class z-score
+   `|share_in_split − share_in_pooled| / sqrt(p*(1-p)/n_split)` exceeds 3. Over **200 random
+   seeds the max z was 2.56 (0 warnings)**; a split cut from the target-sorted frame scores
+   z = 5.34. The check still reports the absolute `max_drift` and now also `max_drift_z`; status
+   is `warn` iff `max_drift_z > 3.0`. Fail conditions (D33c counts) are unchanged. (This answers
+   §5 handoff question 5: the absolute tolerance was noise, the z rule is the signal.)
+
+3. **`seed` made required with no default.** As the spec said, `seed` is a required parameter of
+   both split tools with no default, declared before the defaulted ratios — like `load_csv`'s
+   `dataset`. The first implementation defaulted it to 0, which would let a missed orchestrator
+   injection split silently with the wrong seed instead of failing schema validation.

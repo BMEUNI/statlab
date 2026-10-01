@@ -858,3 +858,86 @@ def test_s14_every_profiling_and_intake_tool_survives_strict_json_dump(
     assert len(results) >= 10
     for _name, payload in results:
         json.dumps(payload, allow_nan=False)
+
+
+# --- unobserved categorical levels (review correction 2026-10-01) --------------------------------
+
+
+def _unused_level_frame() -> pd.DataFrame:
+    """A 70/30 categorical column (`y`) whose dtype declares a third category no row uses, plus
+    a numeric companion for the target-relation plot. 100 rows: 70 'a', 30 'b', 0 'unused'."""
+    values = ["a"] * 70 + ["b"] * 30
+    return pd.DataFrame(
+        {
+            "y": pd.Categorical(values, categories=["a", "b", "unused"]),
+            "x": [float(i) for i in range(100)],
+        }
+    )
+
+
+def test_summarize_target_ignores_unused_categorical_level(
+    run_paths: RunPaths,
+) -> None:
+    """A 70/30 categorical target with one unused category: minority_share is 0.3, not 0.0, and
+    no imbalance warning fires. FAILS under bare `value_counts()`, which counts the unused
+    category as a 0-share class, making `minority_share` 0.0 and tripping the warning."""
+    ref = _save(run_paths, _unused_level_frame())
+    result = summarize_target(run_paths, ref, target="y")
+    assert _num(result.summary["minority_share"]) == pytest.approx(0.3)
+    classes = _dict(result.summary["classes"])
+    assert set(classes) == {"a", "b"}
+    assert result.warnings == ()
+
+
+def test_summarize_categorical_counts_only_observed_levels(
+    run_paths: RunPaths,
+) -> None:
+    """A categorical column with 3 observed values but 70 declared categories reports 3 levels
+    and `truncated` False. FAILS under bare `value_counts()`: it would see 70 levels and, with
+    the default top_k, report `truncated` True."""
+    values = ["a"] * 10 + ["b"] * 10 + ["c"] * 10
+    categories = ["a", "b", "c"] + [f"unused_{i}" for i in range(67)]
+    frame = pd.DataFrame({"col": pd.Categorical(values, categories=categories)})
+    ref = _save(run_paths, frame)
+    result = summarize_categorical(run_paths, ref, columns=("col",))
+    col = _dict(_dict(result.summary["columns"])["col"])
+    assert col["n_unique"] == 3
+    assert len(_list(col["top"])) == 3
+    assert col["truncated"] is False
+
+
+def test_plot_distribution_no_level_warning_for_unused_categories(
+    run_paths: RunPaths,
+) -> None:
+    """`plot_distribution`'s bar branch counts only observed levels: a 2-level categorical with
+    68 declared-but-unused categories reports total_levels 2 and emits no 'showing N of M
+    levels' warning. FAILS under bare `value_counts()`, which sees 70 levels (> PLOT_MAX_
+    CATEGORIES) and warns."""
+    values = ["a"] * 50 + ["b"] * 50
+    categories = ["a", "b"] + [f"unused_{i}" for i in range(68)]
+    frame = pd.DataFrame({"col": pd.Categorical(values, categories=categories)})
+    ref = _save(run_paths, frame)
+    result = plot_distribution(run_paths, ref, column="col")
+    assert result.summary["total_levels"] == 2
+    assert result.summary["shown_levels"] == 2
+    assert result.warnings == ()
+
+
+def test_plot_target_relation_no_level_warning_for_unused_categories(
+    run_paths: RunPaths,
+) -> None:
+    """`plot_target_relation`'s 'bars' branch (class target, non-numeric feature) counts only
+    observed feature levels: a 2-level feature with 68 unused declared categories emits no
+    'showing N of M levels' warning. FAILS under bare `value_counts()`."""
+    feature = ["p"] * 50 + ["q"] * 50
+    categories = ["p", "q"] + [f"unused_{i}" for i in range(68)]
+    frame = pd.DataFrame(
+        {
+            "feat": pd.Categorical(feature, categories=categories),
+            "y": ["a"] * 25 + ["b"] * 25 + ["a"] * 25 + ["b"] * 25,
+        }
+    )
+    ref = _save(run_paths, frame)
+    result = plot_target_relation(run_paths, ref, column="feat", target="y")
+    assert result.summary["kind"] == "bars"
+    assert result.warnings == ()

@@ -5,7 +5,8 @@ pandas 3.0 facts (verified, `00_index.md`): string columns are dtype `str`, not 
 datetimes default to `datetime64[us]`. Neither matters for this module's own code, since it
 does no dtype inspection or comparison — parquet round-trips all seven tested dtypes (`str`,
 `category`, `int64`, `float64`, `bool`, `datetime64[us]`, `Int64`) unchanged, measured before
-writing this module. No dtype preservation or restoration logic is added because none is
+writing this module. Exception found in chunk 10's review: an integer-valued `category` reads
+back as `int64`; string-valued categories survive (`00_index.md`, pandas 3.0 block). No dtype preservation or restoration logic is added because none is
 needed; see test A1.
 
 No atomic temp-file-then-`os.replace` write. Every tool call mints a fresh artifact id, so a
@@ -25,6 +26,7 @@ import pyarrow
 from matplotlib.figure import Figure
 from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef
+from statlab_contracts.vocabulary import SplitRole
 
 
 class ToolArtifactError(Exception):
@@ -61,6 +63,7 @@ def save_dataframe(
     ref: ArtifactRef,
     kind: ArtifactKind = "dataframe",
     label: str | None = None,
+    split: SplitRole | None = None,
 ) -> ArtifactMeta:
     """Write `frame` as parquet. Returns the `ArtifactMeta` describing it."""
     _check_ref_matches_path(path, ref)
@@ -69,7 +72,7 @@ def save_dataframe(
     except (OSError, pyarrow.ArrowException) as exc:
         raise ToolArtifactError(str(path), f"cannot write dataframe: {exc}", cause=exc) from exc
     rows, cols = frame.shape
-    return ArtifactMeta(ref=ref, kind=kind, rows=rows, cols=cols, label=label)
+    return ArtifactMeta(ref=ref, kind=kind, rows=rows, cols=cols, label=label, split=split)
 
 
 def load_dataframe(path: Path) -> pd.DataFrame:

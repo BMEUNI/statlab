@@ -12,10 +12,12 @@ import pandas as pd
 import pytest
 from statlab_tools.tools._frame import (
     CLASS_TARGET_MAX_LEVELS,
+    is_class_target,
     is_numeric_column,
     iso8601_parse_share,
     json_list,
     json_scalar,
+    observed_counts,
 )
 
 # --- json_scalar: value AND type, per case (§4.2's table) --------------------------------------
@@ -278,3 +280,58 @@ def test_is_numeric_column_true_for_nullable_int64() -> None:
 def test_iso8601_parse_share_is_a_float_not_numpy_scalar() -> None:
     result = iso8601_parse_share(pd.Series(["2024-01-01"]))
     assert type(result) is float
+
+
+# --- is_class_target (§3.1, shared by profiling and splitting) ---------------------------------
+
+
+def test_is_class_target_true_for_str() -> None:
+    assert is_class_target(pd.Series(["a", "b", "c"], dtype="str")) is True
+
+
+def test_is_class_target_true_for_bool() -> None:
+    assert is_class_target(pd.Series([True, False, True])) is True
+
+
+def test_is_class_target_true_for_low_cardinality_int() -> None:
+    """A numeric column with at most CLASS_TARGET_MAX_LEVELS distinct values is class-shaped."""
+    assert is_class_target(pd.Series(list(range(20)), dtype="int64")) is True
+
+
+def test_is_class_target_false_for_high_cardinality_int() -> None:
+    assert is_class_target(pd.Series(list(range(21)), dtype="int64")) is False
+
+
+def test_is_class_target_false_for_float_with_nan() -> None:
+    """`nunique()` excludes NaN, so a continuous float column stays continuous. 21 distinct
+    non-null values plus a NaN -> above the level cap."""
+    values = [float(i) for i in range(21)] + [float("nan")]
+    assert is_class_target(pd.Series(values, dtype="float64")) is False
+
+
+def test_is_class_target_true_for_all_null() -> None:
+    """An all-null numeric column has `nunique() == 0`, below the cap -> class-shaped (the
+    degenerate case; a caller decides whether an all-null target is itself a problem)."""
+    assert is_class_target(pd.Series([None, None, None], dtype="float64")) is True
+
+
+# --- observed_counts (review correction 2026-10-01) ----------------------------------------------
+
+
+def test_observed_counts_drops_zero_count_categorical_level() -> None:
+    """A categorical lists its unused category with count 0; `observed_counts` must drop it, so
+    level-counting sites do not treat an unused category as a present level. FAILS under a bare
+    `value_counts()`, which keeps the `zz: 0` entry."""
+    series = pd.Series(pd.Categorical(["a", "a", "b"], categories=["a", "b", "zz"]))
+    result = observed_counts(series)
+    assert list(result.index) == ["a", "b"]
+    assert result.to_dict() == {"a": 2, "b": 1}
+    assert "zz" not in result.index
+
+
+def test_observed_counts_leaves_a_non_categorical_series_unchanged() -> None:
+    """On an ordinary (non-categorical) series there are no zero-count levels to drop, so the
+    result equals bare `value_counts()`."""
+    series = pd.Series(["a", "a", "b", "c"])
+    result = observed_counts(series)
+    assert result.to_dict() == series.value_counts().to_dict()

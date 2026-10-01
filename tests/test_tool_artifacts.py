@@ -86,6 +86,21 @@ def test_a4b_save_dataframe_kind_can_be_predictions(tmp_path: Path) -> None:
     assert meta.kind == "predictions"
 
 
+def test_a4c_save_dataframe_split_sets_meta_split(tmp_path: Path) -> None:
+    """Chunk 10 §3.2: `save_dataframe(split="test")` sets `meta.split`; the default is `None`."""
+    frame = pd.DataFrame({"y": [0, 1, 1]})
+    path, ref = _ref_path(tmp_path, ".parquet")
+    meta = save_dataframe(path, frame, ref=ref, split="test")
+    assert meta.split == "test"
+
+
+def test_a4d_save_dataframe_split_defaults_to_none(tmp_path: Path) -> None:
+    frame = pd.DataFrame({"y": [0, 1, 1]})
+    path, ref = _ref_path(tmp_path, ".parquet")
+    meta = save_dataframe(path, frame, ref=ref)
+    assert meta.split is None
+
+
 def test_a5_empty_frame_round_trips(tmp_path: Path) -> None:
     """A5."""
     frame = pd.DataFrame({"x": pd.array([], dtype="int64")})

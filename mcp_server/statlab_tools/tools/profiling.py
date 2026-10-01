@@ -37,10 +37,11 @@ from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import load_dataframe, save_json, save_plot
 from statlab_tools.tool import ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import (
-    CLASS_TARGET_MAX_LEVELS,
+    is_class_target,
     is_numeric_column,
     json_list,
     json_scalar,
+    observed_counts,
 )
 
 CORRELATION_TOP_PAIRS: Final = 10
@@ -203,7 +204,7 @@ def summarize_numeric(
 
 def _categorical_top(series: pd.Series, *, top_k: int) -> tuple[list[JsonValue], bool]:
     non_null = series.dropna()
-    counts = non_null.value_counts()
+    counts = observed_counts(non_null)
     total = len(non_null)
     truncated = len(counts) > top_k
     top: list[JsonValue] = [
@@ -323,7 +324,7 @@ def summarize_class_target(series: pd.Series) -> dict[str, JsonValue]:
     answer, left to the caller to decide whether that is itself worth flagging.
     """
     non_null = series.dropna()
-    counts = non_null.value_counts()
+    counts = observed_counts(non_null)
     total = len(non_null)
     classes: dict[str, JsonValue] = {
         str(value): {"count": json_scalar(count), "share": json_scalar(count / total)}
@@ -362,11 +363,9 @@ def summarize_target(
             f"target {target!r} is not a column in the data", field_errors={"target": "unknown"}
         )
     series = data[target]
-    is_class_target = (
-        not is_numeric_column(series) or series.dropna().nunique() <= CLASS_TARGET_MAX_LEVELS
-    )
+    is_target_class = is_class_target(series)
     warnings: list[str] = []
-    if is_class_target:
+    if is_target_class:
         result = summarize_class_target(series)
         minority_share = result["minority_share"]
         if isinstance(minority_share, float) and minority_share < IMBALANCE_WARNING:
@@ -560,7 +559,7 @@ def plot_distribution(
         ax.set_ylabel("count", parse_math=False)
     else:
         kind = "bar"
-        counts = non_null.value_counts()
+        counts = observed_counts(non_null)
         total_levels = len(counts)
         shown_levels = min(PLOT_MAX_CATEGORIES, total_levels)
         top = counts.head(PLOT_MAX_CATEGORIES)
@@ -613,24 +612,22 @@ def plot_target_relation(
 
     target_series = pair[target]
     feature_series = pair[column]
-    is_class_target = (
-        not is_numeric_column(target_series) or target_series.nunique() <= CLASS_TARGET_MAX_LEVELS
-    )
+    is_target_class = is_class_target(target_series)
     feature_is_numeric = is_numeric_column(feature_series)
 
     fig, ax = _new_figure()
     warnings: list[str] = []
 
-    if is_class_target and feature_is_numeric:
+    if is_target_class and feature_is_numeric:
         kind = "box"
         classes = sorted(target_series.unique(), key=str)
         groups = [feature_series[target_series == cls].to_numpy() for cls in classes]
         ax.boxplot(groups, tick_labels=[str(v) for v in classes])
         ax.set_xlabel(str(target), parse_math=False)
         ax.set_ylabel(str(column), parse_math=False)
-    elif is_class_target and not feature_is_numeric:
+    elif is_target_class and not feature_is_numeric:
         kind = "bars"
-        level_counts = feature_series.value_counts()
+        level_counts = observed_counts(feature_series)
         levels = list(level_counts.head(PLOT_MAX_CATEGORIES).index)
         total_levels = len(level_counts)
         if total_levels > PLOT_MAX_CATEGORIES:
@@ -655,14 +652,14 @@ def plot_target_relation(
         ax.set_xlabel(str(column), parse_math=False)
         ax.set_ylabel(f"share of {target}", parse_math=False)
         ax.legend()
-    elif not is_class_target and feature_is_numeric:
+    elif not is_target_class and feature_is_numeric:
         kind = "scatter"
         ax.scatter(feature_series.to_numpy(), target_series.to_numpy())
         ax.set_xlabel(str(column), parse_math=False)
         ax.set_ylabel(str(target), parse_math=False)
     else:
         kind = "box"
-        counts = feature_series.value_counts()
+        counts = observed_counts(feature_series)
         total_levels = len(counts)
         top_levels = counts.head(PLOT_MAX_CATEGORIES).index
         if total_levels > PLOT_MAX_CATEGORIES:
