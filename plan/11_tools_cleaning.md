@@ -1,8 +1,21 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 08, 09, 10]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  Ten tools in cleaning.py; fitted state is a frozen dataclass (FittedImputer/FittedClipper)
+  pickled as kind transformer. P1/P2/P4 reproduced exactly. One pandas 3.0 fact NOT in P1-P7:
+  pd.Categorical built with a dtype whose categories do not cover a non-null value raises a
+  Pandas4Warning (-> error under -W error); cast_dtypes' ordinal branch maps out-of-level values
+  to None before construction. is_string_dtype(Categorical) is True, so _is_str_column excludes
+  categorical explicitly (constant on a categorical must be tool_param, P2). Review corrections
+  (2026-10-01, see §6): cast_dtypes gained a required `target` (never cast; an agent role for it
+  is warned and ignored); a shared `_as_str` helper routes the string/ordinal/boolean casts
+  through Int64 so integral floats do not stringify as "1.0"; apply_outlier_clipper casts to
+  float64 before clip_iqr/winsorize and emits a plain-bool flag column. After corrections: 1627
+  passed, 1 skipped; cleaning.py 100% line+branch; mypy --strict clean on 77 files; ruff clean.
+  All 8 DoD mutations caught. No sklearn, no reset_index, no backend/contracts change beyond the
+  one-line transformer comment.
 ---
 
 # Chunk 11 — Cleaning tools
@@ -136,12 +149,16 @@ into a private helper in `intake.py` and import it. Intake tests must pass **wit
   greater** than `threshold`, matching the contract's `drop_rows_above`.
 - Summary: `{"rows_before", "rows_dropped", "threshold"}`. Label `sparse_rows_dropped`.
 
-**`cast_dtypes(frame, roles: dict[str, ColumnRole] = {})`**
+**`cast_dtypes(frame, target, roles: dict[str, ColumnRole] = {})`**
 - `allow_in=["data_profiling", "data_splitting"]`.
 - The effective roles are `roles` overlaid by the snapshot's `features.roles`. A role for a
   column not in the frame is `tool_param` on `roles` when it came from the agent; it is
   **ignored with a warning** when it came from the contract (`validate_contract` already reports
   it). Columns with no role are unchanged.
+- The `target` is **never cast** (D-e): an agent role for it (e.g. `infer_column_roles`'
+  `boolean` for a 0/1 target) is ignored with a warning, since the target's dtype is governed by
+  contract `target.type`, not roles (the contract validator already forbids naming the target in
+  `features.roles`, so only the agent side needs the guard).
 
 | Role | Cast | Already that type |
 |---|---|---|
@@ -330,3 +347,32 @@ answers, so that no expected value is computed by the code under test.
 7. For chunk 12: the encoders face the same "unseen column / unseen level at apply" question as
    `apply_imputer`. Should an unseen *level* be an error, ignored, or mapped to an "other" column?
    Answer from what you saw of the fixtures.
+
+---
+
+## 6. Addendum — review corrections (2026-10-01)
+
+Four defects reproduced in review of the implemented `cleaning.py`, fixed in the working tree
+(no behaviour outside these four changed). Each has a test that fails on the pre-fix code.
+
+1. **`cast_dtypes` cast the TARGET.** `infer_column_roles` returns `churned: 'boolean'`; passed in
+   `roles`, that turned the 0/1 target into nullable `boolean`, so `validate_contract` with
+   `positive_class '1'` reported "`positive_class '1'` does not occur in the target" (breaking
+   D-e). Fix: `cast_dtypes` gains a required `target` parameter (the `_Target` alias); the target
+   is never cast, and an agent role for it is ignored with a warning. Signature is now
+   `cast_dtypes(df, target, roles)`.
+
+2 & 3. **Integral floats stringified as `"1.0"`, destroying data in two casts.** A float64 column
+   `[1.0, 0.0, NaN]*10` with role `boolean` nulled every value (newly_null 30: `"1.0"` is not a
+   boolean token); a float64 column `[1.0, 2.0, 3.0, NaN]*10` with role `ordinal` and levels
+   `['1','2','3']` nulled every value too. Integer-coded columns with a null load as float64, so
+   this was the common case. Fix (once): the Int64-route from `_cast_string` is extracted into
+   `_as_str(series)` and used by the string, ordinal, and boolean casts; ordinal compares
+   `_as_str`'s output against the levels.
+
+4. **Clipping an Int64 column crashed.** `fit_outlier_clipper(method='clip_iqr')` then
+   `apply_outlier_clipper` on an Int64 column raised `TypeError: Invalid value '59.5' for dtype
+   'Int64'` (P1 again); `flag_only` on Int64 produced a nullable `BooleanDtype` flag with NA. Fix:
+   `apply_outlier_clipper` casts the column to `float64` before `clip_iqr`/`winsorize` (on every
+   frame, as `apply_imputer` does for mean/median), and `flag_only` produces a plain `bool` column
+   with a null value flagged `False`.

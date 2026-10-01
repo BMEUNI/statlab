@@ -24,7 +24,7 @@ matches only the absolute end.
 ArtifactKind = Literal[
     "dataframe",  # parquet
     "predictions",  # parquet: one column of predictions, or class probabilities
-    "transformer",  # a fitted sklearn transformer (imputer, encoder, scaler)
+    "transformer",  # a fitted transformer (imputer, clipper, encoder, scaler)
     "model",  # a fitted sklearn estimator
     "inferential_fit",  # a fitted statsmodels results object
     "curve",  # json: roc / pr / calibration curve data (compute, not render)

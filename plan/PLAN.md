@@ -882,7 +882,7 @@ drop_duplicate_rows(df, subset)             node 4 only, pre-split (D34d)
 drop_high_missing_rows(df, threshold)       node 4 only, pre-split (D34d)
 drop_constant_columns(train, target)        decides on train; valid/test via drop_columns
 drop_high_missing_columns(train, threshold, target)    same
-cast_dtypes(df, roles)                      pre-split; contract-declared roles override `roles`
+cast_dtypes(df, target, roles)              pre-split; target never cast; contract roles override `roles`
 fit_imputer(train, target, default, per_column) → imputer artifact    [v1]
 apply_imputer(imputer, df)                                             [v1]
 fit_outlier_clipper(train, target, method, columns)

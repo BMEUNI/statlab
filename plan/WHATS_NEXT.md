@@ -11,18 +11,18 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**9 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Chunk 11 next.
+**10 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Chunk 12 next.
 
-| Verified 2026-10-01, after chunk 10 | |
+| Verified 2026-10-01, after chunk 11 (incl. review corrections) | |
 |---|---|
-| Tests | 1563 (1562 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (2478 stmts, 636 branches, 0 missed) |
-| mypy | `--strict` clean on 74 source files, `init_typed = true` |
+| Tests | 1628 (1627 passed, 1 skipped — chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (2792 stmts, 738 branches, 0 missed) |
+| mypy | `--strict` clean on 77 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 10 added **zero** new ones in either category |
-| Git | local `master`, chunk 10 applied and **uncommitted**, otherwise tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 32 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 11 added **zero** new ones in either category |
+| Git | local `master`, chunk 11 applied and **uncommitted**, otherwise tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -379,32 +379,121 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: chunk 11
+## Next: chunk 12
 
-Chunk 10 is **applied and verified**. The next step is chunk 11 (cleaning tools).
+Chunk 11 is **applied and verified**. The next step is chunk 12 (encoding/scaling), which completes
+**M4**.
 
-### Chunk 11 — cleaning tools
+### Chunk 12 — encoding tools
 
-Nine tools with the `fit_*`/`apply_*` separation (§6.1 rule 3). Two things from D34d and this
-chunk's handoff carry directly into node 4:
+The `fit_*`/`apply_*` pattern of chunk 11 carries straight across: encoders and scalers learn on
+`train`, replay on any frame. Three things chunk 11 settled that chunk 12 inherits:
 
-- **`drop_duplicate_rows` must be allowed in `data_splitting`.** D34d's structural, target-independent
-  pre-split drops (exact duplicates) run once in node 4, before the split tool — so this tool's
-  `allow_in` must include `data_splitting`, not only a cleaning phase. The duplicate the split would
-  otherwise let leak across train/test is exactly what `verify_split`'s check 2 exists to catch; D34d
-  removes the leak at the source.
-- **No catalogue tool yet drops rows above a `drop_rows_above` missing share, and D34d needs one in
-  node 4** (`00_index.md` row 11). Decide in chunk 11 whether that is a new tool or a mode of an
-  existing one. Chunk 10's report (item 7) argues for a **mode of `drop_duplicate_rows`** (or a shared
-  `drop_rows` tool with a `reason`): both are target-independent, per-row structural drops that run at
-  the same point in node 4, count what they removed, and return the trimmed frame — the same shape the
-  null-target drop already takes inside the split tools. A separate single-purpose tool would duplicate
-  that plumbing for one predicate. The frames seen here (churn 240×7, messy 60×11) are small and
-  row-wise; neither drop needs streaming or chunking, so one row-mask-and-count tool covers both.
+- **Fitted state as a frozen dataclass pickled as kind `transformer`**, type-checked in `apply_*`
+  (a wrong ref is `tool_param`, not an `AttributeError`). The encoder/scaler fitted objects follow
+  the same shape; `export_pipeline_script` (chunk 20) reads them without un-pickling bespoke classes.
+- **The apply-time column contract.** `apply_imputer` requires the frame's columns minus the target
+  to equal the fitted columns, with the target present or absent (D-e). An encoder faces the same
+  question *plus* a new one chunk 11 did not: an unseen **category level** at apply time (a value in
+  valid/test that train never saw). Chunk 11's report (question 7) answers from the fixtures: see the
+  completed summary below — the short version is **an unseen level must be representable, not an
+  error**, because churn's `plan`/`satisfaction` are small closed vocabularies but D15's small splits
+  make a rare level landing only in valid/test entirely plausible; a hard error would make a legal
+  split un-encodable. Prefer an explicit "unseen → zero vector / dedicated column", logged, over
+  raising.
+- **No `reset_index`, target never transformed, `json_scalar` on every summary number.** Same
+  invariants, same reasons.
 
-Nothing in chunk 11 touches `backend/` or `contracts/`.
+D34c (target encoding is cross-fitted out-of-fold on train, `apply_target_encoder` for valid/test
+only) lands here too. Nothing in chunk 12 touches `backend/` or `contracts/`.
 
-## Chunk 10 — completed (summary)
+
+## Chunk 11 — completed (summary)
+
+Ten cleaning tools in `cleaning.py`: pre-split (`drop_duplicate_rows`, `drop_high_missing_rows`,
+`cast_dtypes`), decide-on-train (`drop_constant_columns`, `drop_high_missing_columns`, `fit_imputer`,
+`fit_outlier_clipper`), apply (`drop_columns`, `apply_imputer`, `apply_outlier_clipper`). Fitted state
+is a frozen dataclass (`FittedImputer`/`FittedClipper`) pickled as kind `transformer` — **no sklearn**.
+One import line in `tools/__init__.py`; the `"transformer"` comment in `contracts/.../artifacts.py`
+updated to "a fitted transformer (imputer, clipper, encoder, scaler)" — the only change outside
+`mcp_server/`. Gates (after the 2026-10-01 review corrections): **1627 passed, 1 skipped** (1628
+total), **100 % line and branch** (2792 stmts, 738 branches, 0 missed), mypy `--strict` clean on
+**77 source files**, ruff `check` + `format --check`
+clean. `cleaning.py` adds **no** `# type: ignore`, uses **no** sklearn, **no** `reset_index`, **no**
+bare `value_counts()`.
+
+**Review corrections (2026-10-01, see `11_tools_cleaning.md` §6).** Four defects fixed, each with a
+test that fails on the pre-fix code (proven by revert-run-restore): (1) `cast_dtypes` now takes a
+required `target` and never casts it — an agent `boolean` role for a 0/1 target no longer breaks the
+`positive_class` contract check (end-to-end test); (2+3) a shared `_as_str` helper routes the
+string/ordinal/boolean casts through `Int64`, so integral floats no longer stringify as `"1.0"` and
+null every value; (4) `apply_outlier_clipper` casts to `float64` before `clip_iqr`/`winsorize` (the
+Int64 clip crash, P1 again) and emits a plain-`bool` flag column with a null flagged `False`.
+
+**The core leak test is real, not passing-by-construction.** `fit_imputer` on a train whose median is
+10 then `apply_imputer` on a valid whose own median is 99 fills with **10**; the clipper's bounds learned
+on a 0–10 train clip a 1000–3000 valid to the train upper bound. Both are built by hand so a refit on the
+applied frame gives a different, detectable answer — proven by mutation M1 (recompute the fill from the
+applied frame → 4 tests fail, incl. the leak test) and M2 (recompute bounds at apply → 2 fail).
+
+**Mutation evidence** (each applied, the two cleaning test files run, restored; `cleaning.py` has no
+residual diff — confirmed by `diff` against a backup):
+
+| Mutation | Tests that failed (count) |
+|---|---|
+| `apply_imputer` recomputes the fill from the frame it is given | leak + 3 others (4) |
+| the clipper's bounds are recomputed at apply | leak + 1 (2) |
+| imputation `drop` uses `dropna` (rows) instead of dropping the column | `test_drop_removes_column_keeps_row_count` (1) |
+| remove the target exclusion in `fit_imputer` (`_feature_columns` returns all) | 14 (target-exclusion is shared by the deciders too) |
+| `>` → `<` (strict `>` loosened) in `drop_high_missing_rows` | `test_row_at_threshold_kept_above_dropped` (1) |
+| `reset_index(drop=True)` on every frame output | 5 (label/order preservation across apply + deciders) |
+| remove the `float64` cast before mean/median fills | `test_int64_fractional_median...` (1, the P1 crash) |
+| remove the constant-column skip in the clipper | `test_constant_column_skipped_with_warning` (1) |
+
+**Report answers.**
+
+3. `fit_imputer` on `churn_frame`'s 144-row train from `split_stratified(seed=42)`, summary verbatim:
+```json
+{"strategies": {"customer_id": "median", "age": "median", "plan": "most_frequent", "signup_date": "most_frequent", "satisfaction": "most_frequent", "notes_free_text": "most_frequent"}, "fills": {"customer_id": 123.5, "age": 46.5, "plan": "basic", "signup_date": "2023-03-27", "satisfaction": "medium", "notes_free_text": "Customer discussed plan options extensively during the support call, mentioning competitor pricing and overall service quality concerns 100."}, "dropped": [], "fitted_rows": 144}
+```
+with four warnings, one per string column, that the `median` default fell back to `most_frequent`.
+
+4. `cast_dtypes` on `messy_frame` with `infer_column_roles`' roles, summary verbatim:
+```json
+{"columns": {"target": {"role": "boolean", "source": "agent", "from": "int64", "to": "boolean", "newly_null": 0}}}
+```
+Only `target` is listed: it is the one column whose dtype actually changes (int64 → nullable boolean).
+Every numeric/datetime column is already its role's dtype (no-op), and `many_levels` arrives as object
+dtype, which `cast_dtypes` treats as already-string for a `categorical` role. No warnings.
+
+5. **Where the fallback/all-null rules felt like the tool deciding.** The `median → most_frequent`
+fallback is the one that comes closest. On `churn_frame` the agent passes the default `median` and gets
+four silent strategy swaps for the string columns — the summary and a warning record each, but the tool
+chose `most_frequent` without being asked. It is defensible (a median of strings is meaningless and the
+only sensible statistic is the mode), and it is auditable (recorded in `strategies` + a warning), but it
+is a decision the agent arguably should make per column. The all-null → `drop` rule felt less like
+overreach: a column with no non-null value in train genuinely *cannot* be imputed, so the tool is
+reporting an impossibility, not choosing between options — and it too warns.
+
+6. **A pandas 3.0 surprise not in P1–P7:** building a `pd.Categorical` with a `categories=` list that
+does not cover a present non-null value raises a `Pandas4Warning` (→ error under `-W error`); the old
+silent out-of-category → NaN coercion is deprecated. `cast_dtypes`' ordinal branch therefore maps
+out-of-level values (and nulls) to `None` *before* constructing the categorical. Also recorded:
+`pandas.api.types.is_string_dtype(categorical)` is `True`, so the string-fill predicate must exclude
+`CategoricalDtype` explicitly or `constant` on a categorical would silently fill instead of raising (P2).
+Both added to `00_index.md`'s pandas 3.0 block.
+
+7. **For chunk 12 — unseen category level at apply.** From the fixtures: `churn_frame`'s `plan` and
+`satisfaction` are small closed vocabularies (3 levels each), but D15 targets small data and
+`split_stratified(seed=42)` leaves train at 144 rows — a rare level landing only in valid/test is
+plausible, and a hard error would make an otherwise-legal split un-encodable. So an unseen level should
+be **representable, not an error**: map it to an all-zero one-hot row (or a dedicated "unseen" column),
+and log it as a warning the way `cast_dtypes` logs `newly_null`. This mirrors `apply_imputer`'s stance
+that an unseen *column* is a hard error (a structural mismatch the agent controls) while a null *value*
+is routine (data the agent does not control); an unseen level is a value, not a column, so it falls on
+the routine side.
+
+
 
 `split_random`, `split_stratified`, `verify_split` (`splitting.py`), plus `is_class_target`
 extracted to `_frame.py` and `save_dataframe(split=...)`. Verified by the gates below and by the
