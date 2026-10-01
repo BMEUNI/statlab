@@ -264,7 +264,7 @@ def _build_schema_fn(
     def schema_fn(**kwargs: object) -> ToolSuccess:
         raise NotImplementedError("schema_fn exists only for signature introspection")
 
-    schema_fn.__signature__ = original_signature.replace(  # type: ignore[attr-defined]
+    schema_fn.__signature__ = original_signature.replace(  # type: ignore[attr-defined]  # stub gap: assigning __signature__ is how inspect.signature is overridden and the runtime honours it, but mypy's function type does not declare the attribute writable
         parameters=kept_params, return_annotation=ToolSuccess | ToolFailure
     )
     return schema_fn
@@ -362,7 +362,7 @@ def tool(
             logger.info("tool %s succeeded in %.1fms", func.__name__, duration_ms)
             return result
 
-        wrapper.__signature__ = inspect.signature(schema_source)  # type: ignore[attr-defined]
+        wrapper.__signature__ = inspect.signature(schema_source)  # type: ignore[attr-defined]  # same stub gap as schema_fn above
         wrapper.__name__ = func.__name__
         wrapper.__doc__ = description
 

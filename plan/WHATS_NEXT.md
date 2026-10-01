@@ -13,14 +13,14 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 **7 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) started. Chunk 08 next.
 
-| Verified at commit `c2c796a` | |
+| Verified 2026-10-01, after chunk 07 §9 | |
 |---|---|
 | Tests | 1112 (1111 passed, 1 skipped — chunk 06's F9, by spec) |
 | Coverage | 100 % line **and** branch (1550 stmts, 338 branches, 0 missed) |
 | mypy | `--strict` clean on 60 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes) and **3 in production** — one avoidable, being removed by chunk 07 §9 |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline |
 | Git | local `master`, never pushed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.

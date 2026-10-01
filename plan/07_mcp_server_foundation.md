@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: completed
 dependencies: [01, 02, 06]
 completion_date: 2026-09-11
 implementation_notes: |
@@ -616,3 +616,12 @@ real stub gap from a shortcut.
 2. The suppression grep, verbatim.
 3. Whether typing `app: ASGIApp` required any other change — if the tests construct the middleware
    directly with something that is not an `ASGIApp`, say so.
+
+### 9.5 Outcome (2026-10-01)
+
+Applied directly rather than through the implementation agent — three lines, fully specified.
+`_BearerAuthMiddleware.__init__` now takes `app: ASGIApp`; its `arg-type` suppression is gone. No test
+constructed the middleware directly, so nothing depended on the widened type. The two `__signature__`
+assignments keep `attr-defined` with inline justification. Production suppression grep returns exactly
+those two lines. 1112 tests unchanged (1111 passed, 1 skipped), 100 % line and branch, mypy clean on 60
+files.

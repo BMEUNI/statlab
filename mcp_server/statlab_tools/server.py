@@ -18,6 +18,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.types import ASGIApp
 
 from statlab_tools import tool as tool_module
 from statlab_tools import tools as _tools  # noqa: F401 -- import registers every tool module
@@ -37,8 +38,8 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
     applies.
     """
 
-    def __init__(self, app: object, *, token: str) -> None:
-        super().__init__(app)  # type: ignore[arg-type]
+    def __init__(self, app: ASGIApp, *, token: str) -> None:
+        super().__init__(app)
         self._token = token
 
     async def dispatch(
