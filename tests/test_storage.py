@@ -237,6 +237,8 @@ def test_artifact_row_rejects_unknown_column_via_extra_forbid() -> None:
                 "produced_by": "x",
                 "ts": "ts",
                 "pruned_at": None,
+                "split": None,
+                "derived_from_test": False,
                 "extra_field": 1,
             }
         )
@@ -609,3 +611,149 @@ def test_create_artifact_rejects_ref_meta_ref_mismatch(
             meta=meta,
             produced_by="load_csv",
         )
+
+
+# --- R4: create_artifact split / derived_from_test ----------------------------------------------
+
+
+def test_create_artifact_split_and_derived_default(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    """R4: an ordinary artifact is not a split frame (`split=None`) and is not test-derived
+    (`derived_from_test=False`) unless told otherwise."""
+    row = _make_artifact(migrated_db, run_paths, run)
+    assert row.split is None
+    assert row.derived_from_test is False
+
+
+def test_create_artifact_records_split_and_derived_from_test(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    """R4: both fields round-trip through the registry, with `derived_from_test` mapped back
+    to a real `bool` (not the raw INTEGER 0/1)."""
+    ref = ArtifactRef("a_0000000000000041")
+    path = _write_artifact_file(run_paths, ref)
+    meta = ArtifactMeta(ref=ref, kind="dataframe", split="test", rows=1, cols=1)
+    row = create_artifact(
+        migrated_db,
+        ref=ref,
+        run_id=run.id,
+        kind="dataframe",
+        path=path,
+        meta=meta,
+        produced_by="split_random",
+        split="test",
+        derived_from_test=True,
+    )
+    assert row.split == "test"
+    assert row.derived_from_test is True
+    fetched = get_artifact(migrated_db, row.id)
+    assert fetched is not None
+    assert fetched.split == "test"
+    assert fetched.derived_from_test is True
+
+
+def test_create_artifact_rejects_meta_split_mismatch(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    """R4: if `meta.split` is set it must equal the `split` argument -- the same guard shape as
+    the `meta.ref == ref` check. Trigger the disagreement the guard forbids."""
+    ref = ArtifactRef("a_0000000000000042")
+    path = _write_artifact_file(run_paths, ref)
+    meta = ArtifactMeta(ref=ref, kind="dataframe", split="train", rows=1, cols=1)
+    with pytest.raises(PersistenceError, match="split mismatch"):
+        create_artifact(
+            migrated_db,
+            ref=ref,
+            run_id=run.id,
+            kind="dataframe",
+            path=path,
+            meta=meta,
+            produced_by="split_random",
+            split="test",
+        )
+
+
+def test_create_artifact_allows_none_meta_split_with_set_split_arg(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    """R4: the guard only fires when `meta.split` is *set* and disagrees. A `None` `meta.split`
+    with a concrete `split` argument is fine -- the meta simply did not carry the fact."""
+    ref = ArtifactRef("a_0000000000000043")
+    path = _write_artifact_file(run_paths, ref)
+    meta = ArtifactMeta(ref=ref, kind="dataframe", rows=1, cols=1)  # split unset
+    row = create_artifact(
+        migrated_db,
+        ref=ref,
+        run_id=run.id,
+        kind="dataframe",
+        path=path,
+        meta=meta,
+        produced_by="split_random",
+        split="valid",
+    )
+    assert row.split == "valid"
+
+
+def test_forked_test_artifact_keeps_split_and_derived_from_test(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow, project: ProjectRow
+) -> None:
+    """R4's required test: after a fork, the parent's test artifact is still test.
+
+    The implemented design (chunk 06, PLAN.md D11): `fork_artifacts` hard-links each file into
+    the child's `artifacts/` under the **same** ref and creates **no** registry rows. Refs are
+    globally unique, so the registry is keyed by ref, not by `(run, ref)`; the single parent
+    row carries the lineage flags, and a fork inherits them for free by referring to the same
+    ref. Nothing is copied, so nothing can disagree, and `row.id == Path(row.path).stem` holds
+    for the one row that exists.
+    """
+    from statlab.storage import fork_artifacts
+
+    parent_ref = ArtifactRef("a_0000000000000051")
+    parent_path = _write_artifact_file(run_paths, parent_ref)
+    parent_meta = ArtifactMeta(ref=parent_ref, kind="dataframe", split="test", rows=1, cols=1)
+    parent_row = create_artifact(
+        migrated_db,
+        ref=parent_ref,
+        run_id=run.id,
+        kind="dataframe",
+        path=parent_path,
+        meta=parent_meta,
+        produced_by="split_random",
+        split="test",
+        derived_from_test=True,
+    )
+
+    child_contract = create_contract(
+        migrated_db, project_id=project.id, path=Path("/c_child.json"), contract=_CONTRACT
+    )
+    child_run = create_run(
+        migrated_db,
+        project_id=project.id,
+        contract_id=child_contract.id,
+        mode="autonomous",
+        config_json="{}",
+        forked_from_run_id=run.id,
+    )
+    child_paths = RunPaths(
+        data_dir=run_paths.data_dir, slug=run_paths.slug, run_id="r_forkchild00000"
+    )
+    ensure_run_layout(child_paths)
+
+    linked = fork_artifacts(run_paths, child_paths, [parent_row])
+    assert linked == (ArtifactRef(parent_row.id),)
+
+    # The linked file keeps the parent's ref as its stem and shares the parent's inode.
+    child_file = child_paths.artifacts / Path(parent_row.path).name
+    assert child_file.stem == parent_ref
+    assert child_file.stat().st_ino == Path(parent_row.path).stat().st_ino
+
+    # Resolving that ref yields the single parent row, still test, still test-derived.
+    resolved = get_artifact(migrated_db, parent_ref)
+    assert resolved is not None
+    assert resolved.id == parent_ref
+    assert resolved.split == "test"
+    assert resolved.derived_from_test is True
+
+    # No child rows are created: a fork links files, it does not register artifacts.
+    assert list_artifacts(migrated_db, child_run.id) == ()

@@ -384,6 +384,16 @@ Rows where the target is null are dropped before L2/L3. Summary: `suspects` — 
 **This is a heuristic and its docstring must say so.** A flagged column is a question for node 1's gate,
 not a verdict; a column that genuinely predicts the outcome is the whole point of modelling.
 
+> Superseded 2026-10-01 for numeric features — see REVISIONS_IMPLEMENTED.md R2 and R3. L3's `pd.qcut`
+> binning and `_QCUT_BINS` were removed: a numeric feature against a class target now takes a
+> rank-based one-vs-rest AUC (`_rank_auc`, folded `max(auc, 1−auc)`, max over classes with ≥
+> `LEAK_MIN_CLASS_ROWS = 10` rows, flagged at `LEAK_AUC = 0.99`, rule `rank_auc`), because binned
+> purity reaches 1.0 only when the class boundary lands on a decile edge. `_level_purity` is now
+> non-numeric-only (and returns `None` below `LEAK_MIN_ROWS = 20` paired rows), and
+> `LEAK_UNIQUE_SHARE_SKIP` gates non-numeric features only. L2 (rank correlation) now runs whenever
+> both feature and target are `is_numeric_column`, not only above `CLASS_TARGET_MAX_LEVELS` distinct
+> values.
+
 ### 3.7 `tests/test_boundary_compute_libs.py` (D-b)
 
 Source scan, same technique as the existing boundary tests: no `.py` under `backend/` or `contracts/`

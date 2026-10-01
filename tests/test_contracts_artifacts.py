@@ -144,3 +144,38 @@ def test_artifact_meta_json_round_trip(ref: ArtifactRef) -> None:
     )
     restored = ArtifactMeta.model_validate_json(meta.model_dump_json())
     assert restored == meta
+
+
+# --- R4: ArtifactMeta.split ---------------------------------------------------------------------
+
+
+def test_artifact_meta_split_defaults_to_none(ref: ArtifactRef) -> None:
+    """R4: `split` is `None` for every artifact that is not a split frame."""
+    meta = ArtifactMeta(ref=ref, kind="dataframe")
+    assert meta.split is None
+
+
+@pytest.mark.parametrize("split", ["train", "valid", "test"])
+def test_artifact_meta_split_accepts_every_role(ref: ArtifactRef, split: str) -> None:
+    """R4: every `SplitRole` member is accepted."""
+    meta = ArtifactMeta.model_validate({"ref": ref, "kind": "dataframe", "split": split})
+    assert meta.split == split
+
+
+def test_artifact_meta_split_rejects_non_member(ref: ArtifactRef) -> None:
+    """R4: a non-`SplitRole` value is rejected -- `model_validate`, since `init_typed = true`
+    makes mypy correctly reject a bad Literal as a constructor argument."""
+    with pytest.raises(ValidationError):
+        ArtifactMeta.model_validate({"ref": ref, "kind": "dataframe", "split": "holdout"})
+
+
+def test_artifact_meta_with_split_round_trips_byte_identically(ref: ArtifactRef) -> None:
+    """R4: `meta_json` stays verbatim `model_dump_json()`. An `ArtifactMeta` carrying `split`
+    must survive the store-as-text / reload path byte-for-byte, the same fidelity requirement
+    (chunk 05 §3.7) that the registry depends on."""
+    meta = ArtifactMeta(ref=ref, kind="dataframe", split="test", rows=3, cols=2)
+    dumped = meta.model_dump_json()
+    restored = ArtifactMeta.model_validate_json(dumped)
+    assert restored == meta
+    assert restored.split == "test"
+    assert restored.model_dump_json() == dumped

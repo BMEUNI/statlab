@@ -11,18 +11,18 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**9 of 41 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 10
-next.
+**9 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Chunk 10 next.
 
-| Verified 2026-10-01, after chunk 09 | |
+| Verified 2026-10-01, after revision batch 09r | |
 |---|---|
-| Tests | 1433 (1432 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (2225 stmts, 574 branches, 0 missed) |
+| Tests | 1484 (1483 passed, 1 skipped — chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (2289 stmts, 588 branches, 0 missed) |
 | mypy | `--strict` clean on 71 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 09 added zero new ones in either category |
-| Git | local `master`, never pushed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — 09r added zero new ones in either category |
+| Git | local `master`, 09r applied and **uncommitted**, otherwise tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -302,9 +302,10 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Sixteen defects, plus one methodology review (17). Rows 14–17 came from the full review of
-2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Of rows 1–13,
-seven were mine (chunks 01–07); four more were caught during
+Nineteen defects, plus one methodology review (17). Rows 14–17 came from the full review of
+2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Rows 18–19 are two
+defects in my *own* 09r revision text and its first implementation, caught in review before 09r was
+accepted. Of rows 1–13, seven were mine (chunks 01–07); four more were caught during
 chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
 the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
 a legitimate `Literal[...]`) — not mine, not latent in `PLAN.md`, found and fixed in the same pass
@@ -329,9 +330,11 @@ loop working.
 | 12 | `@tool`'s async wrapper ran sync bodies on the event loop, serialising every tool call across all parallel runs (D17). T17 passed regardless: it proved two calls *finished*, not that they *overlapped* | Body offloaded with `anyio.to_thread.run_sync`; T17b uses a barrier that deadlocks unless bodies overlap, and was confirmed to fail on the old code |
 | 13 | Chunk 07's T23 (`no module holds a tool-name list`) source-scan regex matched any `["x", "y"]`-shaped string pair, including a legitimate `Literal["pearson", "spearman"]` type annotation chunk 09 introduced | Negative lookbehind for `Literal` added to the regex; confirmed it still catches a real tool-name-list shape |
 | 14 | The walking skeleton (chunk 15) fit an inferential model with tools owned by chunk 16, sequenced after it — the same defect as the earlier `rank_models` fix, missed for inference | Chunks swapped: inference is 15, the gate is 16 (review 2026-10-01) |
-| 15 | My chunk 08 spec told L3 to skip features with unique share > 0.5 *before* binning, so `detect_leaky_columns` never flagged any continuous leak against a class target. Green, because tests planted leaks only in categoricals | `REVISIONS_IMPLEMENTED.md` R2 |
-| 16 | `validate_contract` compared target values as strings; a 0/1 target with one null loads as float, so valid contracts reported mismatches | R1 |
+| 15 | My chunk 08 spec told L3 to skip features with unique share > 0.5 *before* binning, so `detect_leaky_columns` never flagged any continuous leak against a class target. Green, because tests planted leaks only in categoricals | Applied as `REVISIONS_IMPLEMENTED.md` R2: numeric feature vs class target now uses rank AUC (`_rank_auc`, `LEAK_AUC = 0.99`, rule `rank_auc`); `_level_purity` is non-numeric-only. Flagged at 221/210/60/20/10 positives of 400 and with 20 % nulls |
+| 16 | `validate_contract` compared target values as strings; a 0/1 target with one null loads as float, so valid contracts reported mismatches | Applied as R1: `_declared_matches_observed` + `_as_float_repr` compare as floats when the target is `is_numeric_column`; float64 0/1 with a null and `positive_class=1` → valid |
 | 17 | Methodology: the test lock keyed on one artifact id (transformed test copies and forks escaped it); the champion's validation score was reported as if unbiased; tuning-by-CV and tuning-on-valid both specified; calibration and target encoding had no leak-safe fold; post-EDA p-values reported as confirmatory, uncorrected | `PLAN.md` D32–D35 |
+| 18 | My R4 text said `fork_artifacts` copies `split`/`derived_from_test` onto *child rows* — contradicting chunk 06's shared-ref design (a fork hard-links under the same ref and creates no rows). The first implementation's test "proved" the copy by registering a child row whose id differed from its file stem, violating `row.id == Path(row.path).stem` | R4 amended (PLAN.md D11): forks keep the parent's refs, hard-link files under the same ref, create no rows; lineage is inherited. Test renamed `test_f2_fork_keeps_parent_refs`, asserts same stem, same inode, resolved row `split='test'`/`derived_from_test=True`, `list_artifacts(child) == ()` |
+| 19 | R2's first fix (skip the unique-share rule for numeric features + purity over paired non-null rows) passed its own test only because the test used an exactly balanced 200/200 `np.tile` target: binned purity of a perfect leak reaches 1.0 only when the class boundary falls on a decile edge (0.975 at 210/400, 0.9525 at 221, 0.950 at 180/60/20), so it still missed most real leaks | R2 final rule: rank-based one-vs-rest AUC, balance-insensitive, 1.000 at every split; tests parametrised over 200/210/221/60/20 positives so an exact split alone is no longer evidence |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -368,20 +371,18 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: the revision batch, then chunk 10
+## Next: chunk 10
 
-**Before chunk 10, apply `REVISIONS_IMPLEMENTED.md` R1–R4** (R5–R7 can ride along). These came out of
-the full review of 2026-10-01 (`PLAN.md` v1.8). R1–R3 fix wrong results in shipped intake tools. Most
-seriously, `detect_leaky_columns` never flagged a continuous leak against a class target. R4 adds the
-schema and wire fields chunk 10's split tools and chunk 21's lineage lock are built on, so skipping it
-means migrating later. Treat the batch like a chunk: write a spec from the revision file, hand it over,
-verify, commit.
+Revision batch 09r (`REVISIONS_IMPLEMENTED.md` R1–R7) is **applied and verified** — the schema and
+wire fields chunk 10 depends on are in place. The next step is chunk 10.
 
-### Then chunk 10 — splitting tools
+### Chunk 10 — splitting tools
 
-Read D32–D34 in `PLAN.md` first. They change what the split tools record (`ArtifactMeta.split`,
-`runs.test_fingerprint`) and when they must refuse (small-split guard, unavailable strategies).
-
+Read D32–D34 in `PLAN.md` first. They change what the split tools record and when they must refuse
+(small-split guard, unavailable strategies). The split tools must set `ArtifactMeta.split` on each
+split frame (so the lineage lock has a typed fact to key on, not a label) and call
+`repository.set_test_fingerprint` for the run (R4, D32) so cross-run test exposure through forks can
+be counted.
 
 Four per-strategy split tools (`split_random`, `split_stratified`, `split_temporal`,
 `split_grouped`) plus `verify_split`'s four independent checks. Together with chunk 09, this
@@ -393,6 +394,57 @@ class-proportion-across-three-frames check; chunk 09's own report (item 7) found
 reusable, not just similar in shape — the function already takes one series and returns shares,
 counts, minority share and imbalance ratio, exactly what comparing three frames' proportions
 needs computed once per frame and compared pairwise.
+
+## Revision batch 09r — completed (summary)
+
+Seven fixes (R1–R7) from the full review of 2026-10-01 (`PLAN.md` v1.8), applied as one batch before
+chunk 10, verified by the reviewer, and recorded in `REVISIONS_IMPLEMENTED.md`. Gates after the batch:
+1483 passed, 1 skipped (1484 total), 100 % line and branch coverage (2289 stmts, 588 branches), mypy
+`--strict` clean on 71 source files, 2 production `# type: ignore` and 23 in tests — zero new
+suppressions. `001_initial.sql` was edited **in place** (nothing is deployed), as in chunks 05/06.
+
+**R1 — `validate_contract` compares as floats on numeric targets.** `_declared_matches_observed` +
+`_as_float_repr` replace the inline `str()` comparison in C7/C8. A float64 0/1 target with one null and
+`positive_class=1` is now valid; `positive_class=2`/`'abc'` is a mismatch (not a crash); numeric
+multiclass with a null and `class_order=['0','1','2']` is valid.
+
+**R2 — the leak rule for a numeric feature vs a class target.** The first fix was found **incomplete**:
+binned purity of a perfect leak reaches 1.0 only when the class boundary lands on a decile edge, so it
+missed the leak at most balances and passed its own test only because that test used an exactly balanced
+`np.tile` target. The final rule is a rank-based one-vs-rest AUC (`_rank_auc`, folded `max(auc, 1−auc)`,
+max over classes with ≥ `LEAK_MIN_CLASS_ROWS = 10` rows, flagged at `LEAK_AUC = 0.99`, rule `rank_auc`).
+`_level_purity` is now non-numeric-only — its `pd.qcut` branch and `_QCUT_BINS` were deleted — and
+`LEAK_UNIQUE_SHARE_SKIP` gates non-numeric features only. The perfect leak is flagged at 221, 210, 60,
+20 and 10 positives of 400 and with 20 % nulls; a random feature vs a 10/400 minority class gives 0
+false positives in 200 seeds; mutation check: `LEAK_AUC = 1.01` fails 9 tests. This is the lesson of
+row 19: a test on an exactly balanced split is not evidence that a balance-sensitive rule works.
+
+**R3 — L2 runs whenever both sides are numeric.** The `not is_class_target` condition was dropped and
+both sides now use `is_numeric_column` (bool excluded), with a constant-column skip added because L2
+now also sees class targets. A 15-level numeric target with a near-duplicate feature is flagged
+`rank_correlation`. Measured bound: a perfectly monotone feature's max rank correlation is 0.866 (k=2),
+0.943 (k=3), 0.980 (k=5), 0.986 (k=6), so L2 cannot fire below 6 levels — where L3 covers the leak.
+
+**R4 — schema and wire fields for the D32 lineage lock.** `SplitRole`; `ArtifactMeta.split`;
+`RunStatus + 'superseded'`; `runs.test_fingerprint`; `artifacts.split`/`derived_from_test`/`kind`
+CHECKs; `repository.set_test_fingerprint` (write-once) and `count_prior_test_scorings`;
+`create_artifact` gains `split`/`derived_from_test` with a `meta.split == split` guard. The
+CHECK-vs-`Literal` drift test was extended to `kind` and `split`. The fork-semantics correction (row 18)
+is the important one: forks keep the parent's refs, hard-link under the same ref and create **no** rows;
+lineage is inherited. `test_f2` was renamed `test_f2_fork_keeps_parent_refs` and now asserts same stem,
+same inode, resolved row `split='test'`/`derived_from_test=True`, and `list_artifacts(child) == ()`. One
+integration fix: `tests/test_db_migrations.py` `known_valid_values` gained `'kind': 'dataframe'` because
+the new kind CHECK fired before the FK in `test_m13`.
+
+**R5–R7 — small.** `envelope.py`'s comment uses the canonical `autonomous` token (no test);
+`detect_outliers`' summary key renamed `share` → `share_of_non_null`, value unchanged (one test); the
+`@tool` module docstring now states that bodies run in worker threads and a running body cannot be
+cancelled, so cancel/pause take effect only between calls and a time budget must be enforced in the body
+(documentation only).
+
+**One environment fact for later chunks:** under pandas 3.0 copy-on-write, `Series.to_numpy()` returns
+a **read-only** array — use `to_numpy(copy=True)` before mutating. Recorded in `00_index.md`'s pandas
+3.0 block.
 
 ## Chunk 09 — completed (summary)
 

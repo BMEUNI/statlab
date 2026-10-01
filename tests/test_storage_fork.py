@@ -73,13 +73,15 @@ def test_f1_linked_file_is_same_inode(
     assert parent_stat.st_nlink == 2
 
 
-def test_f2_child_gets_new_ref_and_run_id(
+def test_f2_fork_keeps_parent_refs(
     migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
 ) -> None:
-    """F2: refs are not shared across runs -- returned refs equal the source rows' own ids,
-    since `fork_artifacts` links files but does not mint new registry rows itself (the caller,
-    chunk 31's rewind handler, creates the child's rows); this test pins that the returned refs
-    identify which source artifacts were linked, for the caller to act on."""
+    """F2: a fork keeps the parent's refs (D11). Refs are globally unique (64 random bits), so
+    the registry is keyed by ref, not by `(run, ref)`. `fork_artifacts` hard-links each file
+    into the child under the **same** ref and creates no registry rows; the lineage facts live
+    on the single parent row and a fork inherits them by referring to that same ref. The
+    returned refs are therefore the parents' own ids -- they identify which files were linked,
+    not new child artifacts."""
     row = _make_artifact(migrated_db, run_paths, run)
     child = _child_paths(run_paths, "r_child0000000000")
     linked = fork_artifacts(run_paths, child, [row])

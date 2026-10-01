@@ -81,3 +81,12 @@ def test_vocabularies_contain_no_duplicates() -> None:
     ):
         values = get_args(vocabulary)
         assert len(values) == len(set(values)), f"{vocabulary!r} has duplicate members"
+
+
+def test_split_role_members() -> None:
+    """R4: `SplitRole` is the closed vocabulary the D32 lineage lock keys on. Pin its exact
+    members so a tool cannot invent a fourth split role, and so the DDL CHECK drift test has a
+    fixed truth to derive against."""
+    from statlab_contracts.vocabulary import SplitRole
+
+    assert set(get_args(SplitRole)) == {"train", "valid", "test"}

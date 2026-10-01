@@ -10,9 +10,10 @@ import pytest
 from statlab.errors import PersistenceError
 from statlab.persistence.db import connect
 from statlab.persistence.ids import new_id, parse_ts
-from statlab.persistence.models import ProjectRow
+from statlab.persistence.models import ProjectRow, RunRow
 from statlab.persistence.repository import (
     claim_test_scoring,
+    count_prior_test_scorings,
     create_contract,
     create_dataset,
     create_project,
@@ -26,6 +27,7 @@ from statlab.persistence.repository import (
     latest_contract,
     list_projects,
     list_runs,
+    set_test_fingerprint,
     update_run_status,
 )
 from statlab_contracts.candidate import CandidateSpec
@@ -830,3 +832,163 @@ def test_claim_test_scoring_accepts_explicit_timestamp(
     fetched = get_run(migrated_db, run.id)
     assert fetched is not None
     assert fetched.test_scored_at == explicit
+
+
+# --- R4: set_test_fingerprint and count_prior_test_scorings --------------------------------------
+
+
+def _make_run(
+    conn: sqlite3.Connection,
+    project: ProjectRow,
+    contract: DataContract,
+    *,
+    slug_path: str = "/c.json",
+) -> RunRow:
+    """One run under `project`, with its own contract. A local helper only for the R4 tests
+    below, which each need a run but not a specific contract version."""
+    contract_row = create_contract(
+        conn, project_id=project.id, path=Path(slug_path), contract=contract
+    )
+    return create_run(
+        conn,
+        project_id=project.id,
+        contract_id=contract_row.id,
+        mode="autonomous",
+        config_json="{}",
+    )
+
+
+def test_new_run_has_no_test_fingerprint(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: `test_fingerprint` is `None` before a run scores on test."""
+    run = _make_run(migrated_db, project, contract)
+    assert run.test_fingerprint is None
+
+
+def test_set_test_fingerprint_first_write_returns_true(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: the first write-once set wins."""
+    run = _make_run(migrated_db, project, contract)
+    assert set_test_fingerprint(migrated_db, run.id, "fp_abc") is True
+    fetched = get_run(migrated_db, run.id)
+    assert fetched is not None
+    assert fetched.test_fingerprint == "fp_abc"
+
+
+def test_set_test_fingerprint_second_write_is_refused(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: write-once. A second write returns False and does not overwrite the first value --
+    this is the guard, so trigger the failure it prevents (a second fingerprint clobbering the
+    first)."""
+    run = _make_run(migrated_db, project, contract)
+    assert set_test_fingerprint(migrated_db, run.id, "fp_first") is True
+    assert set_test_fingerprint(migrated_db, run.id, "fp_second") is False
+    fetched = get_run(migrated_db, run.id)
+    assert fetched is not None
+    assert fetched.test_fingerprint == "fp_first"
+
+
+def test_set_test_fingerprint_unknown_run_id_raises(migrated_db: sqlite3.Connection) -> None:
+    """R4: an unknown `run_id` is a caller bug, distinguishable from 'already set'."""
+    with pytest.raises(PersistenceError, match="no run"):
+        set_test_fingerprint(migrated_db, "r_doesnotexist00", "fp")
+
+
+def test_run_row_test_fingerprint_round_trips(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: `RunRow.test_fingerprint` round-trips as `None` then as the stored string."""
+    run = _make_run(migrated_db, project, contract)
+    assert run.test_fingerprint is None
+    set_test_fingerprint(migrated_db, run.id, "fp_round_trip")
+    fetched = get_run(migrated_db, run.id)
+    assert fetched is not None
+    assert fetched.test_fingerprint == "fp_round_trip"
+
+
+def test_count_prior_test_scorings_counts_matching_runs_excluding_self(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: counts runs in the project with the same fingerprint and a non-null
+    `test_scored_at`, excluding the asking run. Sets up a sibling that scored the same
+    fingerprint, then asserts the current run sees exactly one prior exposure."""
+    sibling = _make_run(migrated_db, project, contract, slug_path="/c1.json")
+    current = _make_run(migrated_db, project, contract, slug_path="/c2.json")
+    set_test_fingerprint(migrated_db, sibling.id, "fp_shared")
+    claim_test_scoring(migrated_db, sibling.id)
+    set_test_fingerprint(migrated_db, current.id, "fp_shared")
+
+    count = count_prior_test_scorings(
+        migrated_db, project_id=project.id, fingerprint="fp_shared", exclude_run_id=current.id
+    )
+    assert count == 1
+
+
+def test_count_prior_test_scorings_ignores_runs_not_yet_scored(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: a sibling with the same fingerprint but no `test_scored_at` is not a prior exposure
+    -- it set the fingerprint but never scored. Trigger the near-miss the `IS NOT NULL` guard
+    exists to exclude."""
+    sibling = _make_run(migrated_db, project, contract, slug_path="/c1.json")
+    current = _make_run(migrated_db, project, contract, slug_path="/c2.json")
+    set_test_fingerprint(migrated_db, sibling.id, "fp_shared")  # fingerprint set, never scored
+    set_test_fingerprint(migrated_db, current.id, "fp_shared")
+
+    count = count_prior_test_scorings(
+        migrated_db, project_id=project.id, fingerprint="fp_shared", exclude_run_id=current.id
+    )
+    assert count == 0
+
+
+def test_count_prior_test_scorings_ignores_other_fingerprints(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: a scored sibling with a *different* fingerprint does not count."""
+    sibling = _make_run(migrated_db, project, contract, slug_path="/c1.json")
+    current = _make_run(migrated_db, project, contract, slug_path="/c2.json")
+    set_test_fingerprint(migrated_db, sibling.id, "fp_other")
+    claim_test_scoring(migrated_db, sibling.id)
+    set_test_fingerprint(migrated_db, current.id, "fp_shared")
+
+    count = count_prior_test_scorings(
+        migrated_db, project_id=project.id, fingerprint="fp_shared", exclude_run_id=current.id
+    )
+    assert count == 0
+
+
+def test_count_prior_test_scorings_ignores_other_projects(
+    migrated_db: sqlite3.Connection, contract: DataContract
+) -> None:
+    """R4: a scored run with the same fingerprint in a *different* project does not count --
+    the exposure budget is per project."""
+    p1 = create_project(migrated_db, slug="p1", name="P1")
+    p2 = create_project(migrated_db, slug="p2", name="P2")
+    other = _make_run(migrated_db, p2, contract)
+    current = _make_run(migrated_db, p1, contract)
+    set_test_fingerprint(migrated_db, other.id, "fp_shared")
+    claim_test_scoring(migrated_db, other.id)
+    set_test_fingerprint(migrated_db, current.id, "fp_shared")
+
+    count = count_prior_test_scorings(
+        migrated_db, project_id=p1.id, fingerprint="fp_shared", exclude_run_id=current.id
+    )
+    assert count == 0
+
+
+def test_count_prior_test_scorings_excludes_the_asking_run_itself(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    """R4: the asking run, even if it has scored its own test with that fingerprint, is not a
+    *prior* exposure to itself -- `exclude_run_id` must drop it."""
+    current = _make_run(migrated_db, project, contract)
+    set_test_fingerprint(migrated_db, current.id, "fp_shared")
+    claim_test_scoring(migrated_db, current.id)
+
+    count = count_prior_test_scorings(
+        migrated_db, project_id=project.id, fingerprint="fp_shared", exclude_run_id=current.id
+    )
+    assert count == 0

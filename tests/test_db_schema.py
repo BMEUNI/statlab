@@ -41,6 +41,7 @@ _EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "ended_at",
         "config_json",
         "test_scored_at",
+        "test_fingerprint",
     ),
     "sessions": ("id", "project_id", "title", "created_at"),
     "messages": ("id", "session_id", "run_id", "role", "content", "meta_json", "ts"),
@@ -80,7 +81,18 @@ _EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "duration_ms",
         "ts",
     ),
-    "artifacts": ("id", "run_id", "kind", "path", "meta_json", "produced_by", "ts", "pruned_at"),
+    "artifacts": (
+        "id",
+        "run_id",
+        "kind",
+        "path",
+        "meta_json",
+        "produced_by",
+        "ts",
+        "pruned_at",
+        "split",
+        "derived_from_test",
+    ),
     "models": ("id", "run_id", "candidate_id", "name", "params_json", "artifact_id", "created_at"),
     "metrics": ("id", "run_id", "candidate_id", "model_id", "split", "name", "value"),
     "gates": ("id", "run_id", "node_execution_id", "question_json", "answer_json", "status", "ts"),
@@ -469,6 +481,105 @@ def test_node_executions_status_check_matches_node_execution_statuses() -> None:
     end = text.index("CREATE TABLE tool_calls")
     checks = _parse_check_constraints(text[start:end])
     assert checks["status"] == NODE_EXECUTION_STATUSES
+
+
+def _artifacts_table_text() -> str:
+    """The `artifacts` CREATE TABLE block, sliced out before parsing CHECKs -- `split` and
+    `kind` are column names that could collide with CHECKs elsewhere, so scope to this block
+    the same way the `runs`/`node_executions` status tests do."""
+    sql_path = Path(str(files("statlab.persistence") / "migrations" / "001_initial.sql"))
+    text = sql_path.read_text(encoding="utf-8")
+    start = text.index("CREATE TABLE artifacts")
+    end = text.index("CREATE INDEX idx_artifacts_run_id")
+    return text[start:end]
+
+
+def test_artifacts_kind_check_matches_artifact_kind_literal() -> None:
+    """R4: `artifacts.kind` was unconstrained TEXT, unlike every status column. Its new CHECK
+    is policed by the same drift mechanism -- derived from `get_args(ArtifactKind)`, never
+    hand-listed, so adding a kind without the DDL is a test failure rather than an
+    `IntegrityError` on a rare path."""
+    from statlab_contracts.artifacts import ArtifactKind
+
+    checks = _parse_check_constraints(_artifacts_table_text())
+    assert checks["kind"] == frozenset(get_args(ArtifactKind))
+
+
+def test_artifacts_split_check_matches_split_role_literal() -> None:
+    """R4: `artifacts.split`'s CHECK derived from `get_args(SplitRole)`, same mechanism."""
+    from statlab_contracts.vocabulary import SplitRole
+
+    checks = _parse_check_constraints(_artifacts_table_text())
+    assert checks["split"] == frozenset(get_args(SplitRole))
+
+
+# --- R4 behavioural guards: each CHECK rejects what it forbids ----------------------------------
+
+
+def _seed_artifact_insert(conn: sqlite3.Connection, *, kind: str, split: str | None) -> None:
+    """INSERT one artifact row with explicit `kind`/`split`, leaving `derived_from_test` to its
+    DEFAULT. Used by the CHECK-rejection tests, each of which supplies one deliberately-bad
+    value to trigger the guard it is testing. Values are bound as parameters so the CHECK is
+    exercised against the literal value, not against SQL text."""
+    _seed_run(conn)
+    conn.execute(
+        "INSERT INTO artifacts (id, run_id, kind, path, meta_json, produced_by, ts, split) "
+        "VALUES ('a_1', 'r_1', ?, '/p', '{}', 'tool', 'ts', ?)",
+        (kind, split),
+    )
+
+
+def test_artifacts_kind_check_rejects_non_member(migrated_db: sqlite3.Connection) -> None:
+    """R4: a `kind` outside `ArtifactKind` is rejected by the DB, not stored as free text."""
+    with pytest.raises(sqlite3.IntegrityError):
+        _seed_artifact_insert(migrated_db, kind="not_a_kind", split=None)
+
+
+def test_artifacts_split_check_rejects_non_member(migrated_db: sqlite3.Connection) -> None:
+    """R4: a `split` outside `SplitRole` is rejected by the DB."""
+    with pytest.raises(sqlite3.IntegrityError):
+        _seed_artifact_insert(migrated_db, kind="dataframe", split="holdout")
+
+
+def test_artifacts_derived_from_test_check_rejects_two(migrated_db: sqlite3.Connection) -> None:
+    """R4: `derived_from_test` is a 0/1 flag; the CHECK rejects any other integer."""
+    _seed_run(migrated_db)
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated_db.execute(
+            "INSERT INTO artifacts "
+            "(id, run_id, kind, path, meta_json, produced_by, ts, derived_from_test) "
+            "VALUES ('a_1', 'r_1', 'dataframe', '/p', '{}', 'tool', 'ts', 2)"
+        )
+
+
+def test_artifacts_derived_from_test_defaults_to_zero(migrated_db: sqlite3.Connection) -> None:
+    """R4: an INSERT that omits `derived_from_test` lands on the DEFAULT 0 (false)."""
+    _seed_run(migrated_db)
+    migrated_db.execute(
+        "INSERT INTO artifacts (id, run_id, kind, path, meta_json, produced_by, ts) "
+        "VALUES ('a_1', 'r_1', 'dataframe', '/p', '{}', 'tool', 'ts')"
+    )
+    (value,) = migrated_db.execute(
+        "SELECT derived_from_test FROM artifacts WHERE id = 'a_1'"
+    ).fetchone()
+    assert value == 0
+
+
+def test_runs_status_check_accepts_superseded(migrated_db: sqlite3.Connection) -> None:
+    """R4: the DDL CHECK must accept `superseded`, the status a rewind marks the parent with."""
+    migrated_db.execute(
+        "INSERT INTO projects (id, slug, name, created_at) VALUES ('p', 's', 'n', 't')"
+    )
+    migrated_db.execute(
+        "INSERT INTO contracts (id, project_id, path, json, version, created_at) "
+        "VALUES ('ct', 'p', '/c', '{}', 1, 't')"
+    )
+    migrated_db.execute(
+        "INSERT INTO runs (id, project_id, contract_id, mode, status, started_at, config_json) "
+        "VALUES ('r', 'p', 'ct', 'autonomous', 'superseded', 't', '{}')"
+    )
+    (status,) = migrated_db.execute("SELECT status FROM runs WHERE id = 'r'").fetchone()
+    assert status == "superseded"
 
 
 def test_runs_mode_check_matches_run_mode_literal() -> None:

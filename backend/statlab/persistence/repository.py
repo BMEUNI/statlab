@@ -275,3 +275,46 @@ def claim_test_scoring(conn: sqlite3.Connection, run_id: str, *, at: str | None 
             (claimed_at, run_id),
         )
         return cursor.rowcount == 1
+
+
+def set_test_fingerprint(conn: sqlite3.Connection, run_id: str, fingerprint: str) -> bool:
+    """Write-once record of the test set this run scored (R4, D32).
+
+    Returns True if this call set the fingerprint, False if it was already set. Raises
+    `PersistenceError` if `run_id` does not exist -- distinguishable from "already set", since
+    one is a caller bug and the other is the write-once guarantee working.
+
+    Same compare-and-set shape as `claim_test_scoring`: one `UPDATE ... WHERE id = ? AND
+    test_fingerprint IS NULL`, `rowcount == 1` means this call won. The existence check runs
+    inside the same `BEGIN IMMEDIATE` transaction as the `UPDATE`, so "unknown run" and "already
+    set" -- both leaving `rowcount == 0` on the `UPDATE` alone -- stay distinguishable without a
+    race window of their own.
+    """
+    with transaction(conn):
+        exists = conn.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if exists is None:
+            raise PersistenceError(f"no run with id {run_id!r}")
+        cursor = conn.execute(
+            "UPDATE runs SET test_fingerprint = ? WHERE id = ? AND test_fingerprint IS NULL",
+            (fingerprint, run_id),
+        )
+        return cursor.rowcount == 1
+
+
+def count_prior_test_scorings(
+    conn: sqlite3.Connection, *, project_id: str, fingerprint: str, exclude_run_id: str
+) -> int:
+    """Count runs in `project_id` that already scored the test set identified by `fingerprint`
+    (R4, D32) -- i.e. have that `test_fingerprint` and a non-null `test_scored_at` -- excluding
+    `exclude_run_id` (the run asking).
+
+    Used to detect cross-run test exposure through forks: a fork inherits the parent's test set,
+    so the same fingerprint scored by a sibling counts against this run's single-exposure budget.
+    """
+    (count,) = conn.execute(
+        "SELECT COUNT(*) FROM runs "
+        "WHERE project_id = ? AND test_fingerprint = ? AND test_scored_at IS NOT NULL "
+        "AND id != ?",
+        (project_id, fingerprint, exclude_run_id),
+    ).fetchone()
+    return int(count)

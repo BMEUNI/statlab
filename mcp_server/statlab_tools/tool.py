@@ -3,6 +3,13 @@ D17 fit semaphore. Every later tool (~85 of them) is a function wearing this dec
 shape here is eighty call sites to fix later, so the decorator owns everything a tool body must
 not repeat.
 
+Tool bodies are synchronous and run in a worker thread via `anyio.to_thread.run_sync` (D17: this
+keeps the event loop free so runs proceed in parallel and serialise only at heavy fits). A
+running thread cannot be interrupted, so cancellation and pause take effect only *between* tool
+calls, never mid-body -- a cancelled run resolves at its next tool-call boundary. A time budget a
+tool must honour therefore has to be enforced *inside* the body; there is no timeout hook on this
+decorator that could stop a body already executing (PLAN.md D36c).
+
 PLAN.md §6.1, §6.1.1, §6.2, D17, D22, D23.
 """
 

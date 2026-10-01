@@ -13,13 +13,24 @@ from typing import Final, Literal, get_args
 from pydantic import BaseModel, ConfigDict, ValidationError
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta
 from statlab_contracts.contract import DataContract
+from statlab_contracts.vocabulary import SplitRole
 
 from statlab.domains.base import NodeStatus
 from statlab.errors import PersistenceError
 
 RunStatus = Literal[
-    "pending", "running", "awaiting_user", "paused", "failed", "cancelled", "completed"
+    "pending",
+    "running",
+    "awaiting_user",
+    "paused",
+    "failed",
+    "cancelled",
+    "completed",
+    "superseded",
 ]
+"""`superseded` (R4) is the status a rewind marks the parent run with (D17, PLAN.md §5): the
+parent halted and a fork continues from it. Without it the DDL CHECK would reject the write
+D36b performs."""
 RunMode = Literal["guided", "autonomous"]
 
 PreTerminalStatus = Literal["pending", "running"]
@@ -133,6 +144,11 @@ class RunRow(BaseModel):
     `claim_test_scoring` wins the claim; set to the claim timestamp thereafter, never cleared.
     The other half of D26 ("test unreadable before node 12") needs no column -- it is already
     `champion_model_id IS NULL`."""
+    test_fingerprint: str | None
+    """R4: the fingerprint of the test set this run scored, or `None` before it scores. Chunk 21
+    sets it once (write-once, via `set_test_fingerprint`) and `count_prior_test_scorings` uses it
+    to count cross-run test exposures through forks (D32). Nullable: most runs never reach node
+    12."""
 
 
 class ArtifactRow(BaseModel):
@@ -155,6 +171,13 @@ class ArtifactRow(BaseModel):
     explanation would make deliberate pruning indistinguishable from data loss. Same reasoning
     that put `RunRow.test_scored_at` in the schema rather than in process memory.
     """
+    split: SplitRole | None
+    """R4: which split a frame artifact is (`train`/`valid`/`test`), or `None`. Only chunk 10's
+    split tools set it. The D32 lineage lock keys on this rather than the free-string `label`."""
+    derived_from_test: bool
+    """R4: whether this artifact descends from the test split. The INTEGER column holds 0/1;
+    `_artifact_row_from` maps it to `bool` explicitly, since pydantic would otherwise accept the
+    raw int and leave the type a lie. Chunk 21 propagates the lock through this flag."""
 
     def meta(self) -> ArtifactMeta:
         """Parse the stored `meta_json`.

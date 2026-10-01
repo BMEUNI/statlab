@@ -23,6 +23,13 @@
 --        the row: deleting would break `tool_calls`' reference to the artifact id, and leaving
 --        a row whose `path` points at a missing file with no explanation makes deliberate
 --        pruning indistinguishable from data loss. Same reasoning as `test_scored_at`.
+--   R4   schema and wire fields for the D32 test-set lineage lock, also edited in place:
+--        `runs.status` CHECK gains 'superseded' (the status a rewind marks the parent run with,
+--        D17/§5); `runs.test_fingerprint TEXT` (nullable, the test set a run scored, for
+--        counting cross-run exposures); `artifacts.kind` gains a CHECK over every ArtifactKind
+--        member (previously unconstrained TEXT, unlike every status column, policed by the same
+--        drift test); `artifacts.split TEXT` (nullable, CHECK over SplitRole) and
+--        `artifacts.derived_from_test INTEGER NOT NULL DEFAULT 0 CHECK (... IN (0, 1))`.
 
 CREATE TABLE projects (
     id         TEXT PRIMARY KEY NOT NULL,
@@ -62,7 +69,8 @@ CREATE TABLE runs (
     mode               TEXT NOT NULL CHECK (mode IN ('guided', 'autonomous')),
     status             TEXT NOT NULL CHECK (
         status IN (
-            'pending', 'running', 'awaiting_user', 'paused', 'failed', 'cancelled', 'completed'
+            'pending', 'running', 'awaiting_user', 'paused', 'failed', 'cancelled',
+            'completed', 'superseded'
         )
     ),
     current_node       TEXT,
@@ -71,7 +79,8 @@ CREATE TABLE runs (
     started_at         TEXT NOT NULL,
     ended_at           TEXT,
     config_json        TEXT NOT NULL,
-    test_scored_at     TEXT
+    test_scored_at     TEXT,
+    test_fingerprint   TEXT
 );
 
 CREATE INDEX idx_runs_project_id ON runs(project_id);
@@ -154,14 +163,21 @@ CREATE INDEX idx_tool_calls_run_id ON tool_calls(run_id);
 CREATE INDEX idx_tool_calls_node_execution_id ON tool_calls(node_execution_id);
 
 CREATE TABLE artifacts (
-    id          TEXT PRIMARY KEY NOT NULL,
-    run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL,
-    path        TEXT NOT NULL,
-    meta_json   TEXT NOT NULL,
-    produced_by TEXT NOT NULL,
-    ts          TEXT NOT NULL,
-    pruned_at   TEXT
+    id                TEXT PRIMARY KEY NOT NULL,
+    run_id            TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind              TEXT NOT NULL CHECK (
+        kind IN (
+            'dataframe', 'predictions', 'transformer', 'model', 'inferential_fit',
+            'curve', 'table', 'plot', 'report'
+        )
+    ),
+    path              TEXT NOT NULL,
+    meta_json         TEXT NOT NULL,
+    produced_by       TEXT NOT NULL,
+    ts                TEXT NOT NULL,
+    pruned_at         TEXT,
+    split             TEXT CHECK (split IN ('train', 'valid', 'test')),
+    derived_from_test INTEGER NOT NULL DEFAULT 0 CHECK (derived_from_test IN (0, 1))
 );
 
 CREATE INDEX idx_artifacts_run_id ON artifacts(run_id);

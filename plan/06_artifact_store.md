@@ -268,6 +268,8 @@ The child's registry rows are new rows with new ids pointing at the child's path
 shared across runs: D11 says one run is exactly one reproducible path, and a shared artifact id
 would make `list_artifacts(child)` return rows whose `run_id` is the parent's.
 
+> Superseded 2026-10-01: forks keep the parent's refs and create no rows — see PLAN.md D11 and REVISIONS_IMPLEMENTED.md R4.
+
 #### Pruning — `prune_intermediates`
 
 ```python
@@ -419,6 +421,8 @@ bad `run_id` FK, `list_artifacts` ordering, and:
 | F7 | EXDEV wraps in `ArtifactError` | monkeypatch `os.link` to raise `OSError(errno.EXDEV, ...)`; assert both paths appear in the message |
 | F8 | empty artifact list | returns `()`, creates no files |
 | F9 | 200 MB forked four times | *skip by default*; if included, assert `nlink` rather than measuring disk. The point is that no bytes are copied, and `nlink` proves it without writing 200 MB |
+
+> F2 superseded 2026-10-01: forks keep the parent's refs and create no rows — see PLAN.md D11 and REVISIONS_IMPLEMENTED.md R4.
 
 ### 4.5 `test_storage_prune.py` (~30)
 

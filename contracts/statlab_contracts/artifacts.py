@@ -8,6 +8,8 @@ from typing import Final, Literal, NewType
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from statlab_contracts.vocabulary import SplitRole
+
 ArtifactRef = NewType("ArtifactRef", str)
 """An artifact ID. Opaque to the LLM; resolved to a path by chunk 06's registry."""
 
@@ -82,3 +84,7 @@ class ArtifactMeta(BaseModel):
     label: str | None = Field(default=None, max_length=120)
     rows: int | None = Field(default=None, ge=0)
     cols: int | None = Field(default=None, ge=0)
+    split: SplitRole | None = None
+    """Which split this frame is, when it is one. `None` for every artifact that is not a split
+    frame. Only chunk 10's split tools set it; it exists here (R4) so the D32 lineage lock can
+    key on a closed vocabulary instead of the free-string `label`."""

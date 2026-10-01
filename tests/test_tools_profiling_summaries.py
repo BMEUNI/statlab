@@ -676,6 +676,20 @@ def test_detect_outliers_no_outliers_reports_zero_on_a_real_non_constant_column(
     assert column["rows"] == []
 
 
+def test_r6_detect_outliers_share_key_is_share_of_non_null(run_paths: RunPaths) -> None:
+    """R6: the key is `share_of_non_null`, not `share`, because its denominator is the count of
+    non-null values (not all rows, as `report_missingness`'s share is). The old key name is
+    gone, and the value is count / non-null count. 10% of non-null values are extreme outliers
+    here; the four nulls are not part of the denominator."""
+    values: list[float | None] = [50.0] * 90 + [100000.0] * 10 + [None, None, None, None]
+    frame = pd.DataFrame({"v": values})
+    ref = _save(run_paths, frame)
+    result = detect_outliers(run_paths, ref, columns=("v",), method="zscore")
+    column = _dict(_dict(result.summary["columns"])["v"])
+    assert "share" not in column
+    assert _num(column["share_of_non_null"]) == pytest.approx(_num(column["count"]) / 100)
+
+
 def test_detect_outliers_unknown_column_names_all_unknowns(
     run_paths: RunPaths, churn_frame_fixture: pd.DataFrame
 ) -> None:

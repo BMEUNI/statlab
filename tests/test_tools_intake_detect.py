@@ -5,17 +5,22 @@ Calls both tools through their decorated callables directly.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactRef, new_artifact_ref
+from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import save_dataframe
 from statlab_tools.tool import ToolParamError
 from statlab_tools.tools.intake import (
     ID_UNIQUE_SHARE,
+    LEAK_AUC,
     LEAK_CORRELATION,
     LEAK_MAJORITY_SHARE_GUARD,
+    LEAK_MIN_CLASS_ROWS,
+    LEAK_MIN_ROWS,
     LEAK_PURITY,
     MIN_ROWS_FOR_ID,
     detect_id_columns,
@@ -421,3 +426,207 @@ def test_l3_constant_numeric_feature_against_a_class_target_is_not_flagged(
     result = detect_leaky_columns(run_paths, ref, target="y")
     columns = [str(_dict(s)["column"]) for s in _list(result.summary["suspects"])]
     assert "const" not in columns
+
+
+# --- R2: continuous numeric leaks are scored by rank AUC (not binned purity) -----------------
+
+
+def _rule_for(result: ToolSuccess, column: str) -> str | None:
+    for s in _list(result.summary["suspects"]):
+        entry = _dict(s)
+        if str(entry["column"]) == column:
+            return str(entry["rule"])
+    return None
+
+
+def _entry_for(result: ToolSuccess, column: str) -> dict[str, JsonValue]:
+    return next(
+        _dict(s) for s in _list(result.summary["suspects"]) if str(_dict(s)["column"]) == column
+    )
+
+
+def _sorted_binary_leak(positives: int, *, n: int = 400, seed: int) -> pd.DataFrame:
+    """A perfect continuous leak against a binary target with exactly `positives` ones.
+
+    Targets are deterministic and sorted (`positives` ones after `n - positives` zeros), so the
+    class boundary falls at an arbitrary row rather than a decile edge -- the exact case binned
+    purity missed. `leak = target*10 + N(0, 0.01)` keeps the two classes perfectly separated
+    with fixed-seed noise, so the rank AUC is 1.0 regardless of balance.
+    """
+    rng = np.random.default_rng(seed)
+    target = np.array([0] * (n - positives) + [1] * positives)
+    leak = target * 10 + rng.normal(scale=0.01, size=n)
+    return pd.DataFrame({"y": target, "leak": leak})
+
+
+@pytest.mark.parametrize("positives", [200, 210, 221, 60, 20])
+def test_r2_perfect_continuous_leak_is_flagged_as_rank_auc_at_every_balance(
+    run_paths: RunPaths, positives: int
+) -> None:
+    """The amended rule: a perfect continuous leak against a binary target is flagged with rule
+    `rank_auc` at every class balance. Binned purity only reached 1.0 at the exactly-balanced
+    200/400 split (0.975 at 210, 0.9525 at 221, 0.950 at 60 and 20) and so missed the leak at
+    every other split -- the defect R2's amendment fixes. The rank AUC of this leak is 1.0
+    throughout."""
+    import numpy as np  # noqa: F401  -- used indirectly via the helper's module-level import
+
+    frame = _sorted_binary_leak(positives, seed=100 + positives)
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    entry = _entry_for(result, "leak")
+    assert entry["rule"] == "rank_auc"
+    assert float(str(entry["score"])) >= 0.99
+    assert "rank AUC" in str(_list(entry["evidence"])[0])
+
+
+def test_r2_perfect_leak_with_20pct_missing_still_flagged(run_paths: RunPaths) -> None:
+    """20% of the feature missing. Rank AUC is computed over paired non-null rows, so missing
+    feature values neither crash it nor pull the score down (the old purity path divided by the
+    full frame length and scored ~0.76 here). Still flagged `rank_auc` with score >= 0.99."""
+    frame = _sorted_binary_leak(200, seed=12)
+    # copy=True: under pandas 3.0 copy-on-write, to_numpy() returns a read-only view.
+    leak = frame["leak"].to_numpy(copy=True)
+    rng = np.random.default_rng(99)
+    missing_idx = rng.choice(len(leak), size=len(leak) // 5, replace=False)
+    leak[missing_idx] = np.nan
+    frame["leak"] = leak
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    entry = _entry_for(result, "leak")
+    assert entry["rule"] == "rank_auc"
+    assert float(str(entry["score"])) >= 0.99
+
+
+def test_r2_perfect_leak_against_balanced_three_class_target_is_flagged(
+    run_paths: RunPaths,
+) -> None:
+    """A perfect continuous leak against a balanced 3-class target: each class occupies a
+    contiguous band of the feature, so every one-vs-rest AUC is 1.0 and the feature is flagged
+    `rank_auc`."""
+    rng = np.random.default_rng(21)
+    y = np.repeat(np.arange(3), 130)
+    leak = y * 10 + rng.normal(scale=0.01, size=y.size)
+    frame = pd.DataFrame({"y": y, "leak": leak})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "leak") == "rank_auc"
+
+
+def test_r2_class_below_min_class_rows_is_not_scored(run_paths: RunPaths) -> None:
+    """A 3-class target whose only separable class has fewer than LEAK_MIN_CLASS_ROWS rows: the
+    tiny class is skipped, the two large classes overlap on the feature (AUC ~0.5), so the
+    feature is not flagged. If LEAK_MIN_CLASS_ROWS did not gate the tiny class, its perfect
+    separation would score 1.0 and flag the feature."""
+    rng = np.random.default_rng(30)
+    big = 195
+    tiny = LEAK_MIN_CLASS_ROWS - 5
+    target = pd.Series([0] * big + [1] * big + [2] * tiny)
+    feature = pd.Series(list(rng.normal(size=big * 2)) + [1000.0] * tiny)
+    frame = pd.DataFrame({"y": target, "x": feature})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "x") is None
+
+
+def test_r2_random_continuous_feature_is_not_flagged(run_paths: RunPaths) -> None:
+    """A random continuous feature on a balanced binary target scores a rank AUC near 0.5 --
+    well below LEAK_AUC -- so the rule discriminates rather than firing on everything numeric."""
+    rng = np.random.default_rng(13)
+    n = 400
+    target = np.tile([0, 1], n // 2)
+    frame = pd.DataFrame({"y": target, "x": rng.normal(size=n)})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "x") is None
+    from statlab_tools.tools.intake import _rank_auc
+
+    scored = _rank_auc(frame["x"], frame["y"])
+    assert scored is not None
+    assert scored[0] < 0.6
+
+
+def test_r2_tied_three_value_feature_mixed_within_values_is_not_flagged(
+    run_paths: RunPaths,
+) -> None:
+    """A numeric feature with only three distinct values, each holding a balanced mix of both
+    classes: average-rank ties give every class an AUC of 0.5, so the feature is not flagged.
+    This is the case a boundary-counting rule could mistake for a clean split."""
+    n = 399
+    feature = pd.Series([v for v in (0.0, 1.0, 2.0) for _ in range(n // 3)])
+    target = pd.Series([i % 2 for i in range(n)])
+    frame = pd.DataFrame({"y": target, "x": feature})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "x") is None
+
+
+def test_r2_leak_constants_are_named() -> None:
+    assert LEAK_AUC == 0.99
+    assert LEAK_MIN_CLASS_ROWS == 10
+    assert LEAK_MIN_ROWS == 20
+
+
+def test_r2_level_purity_returns_none_below_min_rows(run_paths: RunPaths) -> None:
+    """`_level_purity` (now the non-numeric path only) returns None when fewer than
+    LEAK_MIN_ROWS paired non-null rows remain -- a purity over a handful of rows is noise.
+    Triggers the guard directly with a categorical feature."""
+    from statlab_tools.tools.intake import _level_purity
+
+    n = LEAK_MIN_ROWS - 1
+    feature = pd.Series([f"v{i % 3}" for i in range(n)])
+    target = pd.Series([i % 2 for i in range(n)])
+    assert _level_purity(feature, target) is None
+
+
+# --- R3: L2 runs whenever feature and target are both numeric --------------------------------
+
+
+def test_r3_fifteen_level_numeric_target_near_duplicate_is_flagged_by_l2(
+    run_paths: RunPaths,
+) -> None:
+    """A 15-level numeric target (<= CLASS_TARGET_MAX_LEVELS, so is_class_target) with
+    dup = 2*y + N(0, 0.001). Before R3, L2 was gated on `not is_class_target`, so it never ran
+    and L3's ten decile bins could not reach 0.99 purity against 15 levels -> no suspects. It
+    must now be flagged by L2 (rule rank_correlation)."""
+    import numpy as np
+
+    rng = np.random.default_rng(14)
+    y = np.repeat(np.arange(15), 20)
+    dup = 2.0 * y + rng.normal(scale=0.001, size=y.size)
+    frame = pd.DataFrame({"y": y, "dup": dup})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "dup") == "rank_correlation"
+
+
+def test_r3_perfect_separating_continuous_feature_on_binary_is_l3_not_l2(
+    run_paths: RunPaths,
+) -> None:
+    """A continuous feature that perfectly separates a binary target is caught by the
+    class-target rule (rank AUC for numeric features, R2), not L2 -- at k=2 the maximum rank
+    correlation is 0.866, below LEAK_CORRELATION, so L2 cannot fire. Confirms the measured bound
+    R3 records."""
+    import numpy as np
+
+    rng = np.random.default_rng(15)
+    n = 400
+    target = np.tile([0, 1], n // 2)
+    sep = target * 100 + rng.normal(scale=0.01, size=n)
+    frame = pd.DataFrame({"y": target, "sep": sep})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "sep") == "rank_auc"
+
+
+def test_r3_bool_feature_is_not_passed_to_l2(run_paths: RunPaths) -> None:
+    """is_numeric_column excludes bool, so a bool feature never reaches L2's rank correlation
+    -- it is a categorical-shaped column and L3's purity path is where it belongs. A bool
+    feature identical in shape to a binary target must not be flagged with rule
+    rank_correlation."""
+    n = 400
+    target = [0, 1] * (n // 2)
+    boolfeat = [bool(v) for v in target]
+    frame = pd.DataFrame({"y": target, "flag": boolfeat})
+    ref = _save(run_paths, frame)
+    result = detect_leaky_columns(run_paths, ref, target="y")
+    assert _rule_for(result, "flag") != "rank_correlation"

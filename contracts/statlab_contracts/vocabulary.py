@@ -10,6 +10,11 @@ ColumnRole = Literal["numeric", "categorical", "ordinal", "datetime", "boolean",
 
 SplitStrategy = Literal["random", "stratified", "temporal", "grouped"]
 
+SplitRole = Literal["train", "valid", "test"]
+"""Which split a frame belongs to. Carried on `ArtifactMeta.split` so the D32 test-set lineage
+lock keys on a closed vocabulary rather than a free-string `label` -- an implicit string
+convention `WHATS_NEXT.md` forbids. Only chunk 10's split tools set it."""
+
 ImputationStrategy = Literal["mean", "median", "most_frequent", "constant", "drop"]
 OutlierPolicy = Literal["none", "clip_iqr", "winsorize", "flag_only"]
 ScalingMethod = Literal["none", "standard", "minmax", "robust"]

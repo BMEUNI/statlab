@@ -256,6 +256,7 @@ def test_m13_every_fk_is_enforceable(migrated_db: sqlite3.Connection) -> None:
     known_valid_values = {
         "mode": "autonomous",
         "status": "pending",
+        "kind": "dataframe",
     }
     tables = [
         row["name"]

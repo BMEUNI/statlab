@@ -14,7 +14,7 @@ ErrorClass = Literal["transient", "tool_param", "data", "bug"]
 transient   — network, timeout, 429, transient IO. Retry with backoff.
 tool_param  — schema-valid but semantically wrong arguments. Repairable by the agent.
 data        — the data cannot support the request. NOT repairable by retrying; escalate
-              to the user even in auto mode.
+              to the user even in autonomous mode.
 bug         — an unexpected exception. Escalate with a traceback (server log only).
 """
 

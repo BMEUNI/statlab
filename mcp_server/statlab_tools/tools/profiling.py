@@ -501,7 +501,7 @@ def detect_outliers(
         rows = json_list(flagged_index[:OUTLIER_ROWS_CAP].tolist())
         stats[column] = {
             "count": count,
-            "share": json_scalar(count / mask.size) if mask.size else 0.0,
+            "share_of_non_null": json_scalar(count / mask.size) if mask.size else 0.0,
             "rows": rows,
             "truncated": count > OUTLIER_ROWS_CAP,
         }

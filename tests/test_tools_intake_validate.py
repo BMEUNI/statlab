@@ -708,3 +708,103 @@ def test_c11_skips_an_ordinal_levels_key_that_c1_already_reported(
     mismatches = _list(result.summary["mismatches"])
     assert len(mismatches) == 1
     assert _dict(mismatches[0])["field"] == "features.ordinal_levels.ghost"
+
+
+# --- R1: numeric target values compared as floats, not strings ------------------------------
+
+
+def test_r1_positive_class_int_against_int64_target_no_mismatch(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """int64 0/1 target, positive_class=1: the str() path already handled this, kept as the
+    baseline that must stay green after the float comparison replaces it."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "binary", "positive_class": 1}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1, 0, 1]})
+    assert frame["y"].dtype == "int64"
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    assert result.summary["valid"] is True
+
+
+def test_r1_positive_class_int_against_float64_target_with_null_no_mismatch(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """A 0/1 target with one missing value loads as float64 ({0.0, 1.0}); positive_class=1 must
+    still match. This is the exact false mismatch R1 fixes -- it FAILED on the str() code,
+    which compared "1" against {"0.0", "1.0"}."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "binary", "positive_class": 1}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1, 0, None]})
+    assert frame["y"].dtype == "float64"
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    assert result.summary["valid"] is True
+
+
+def test_r1_class_order_against_numeric_multiclass_with_null_no_mismatch(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """A numeric multiclass target with a null loads as float64 ({0.0, 1.0, 2.0}); the declared
+    class_order is always strings (typed tuple[str, ...]). They must still match -- this FAILED
+    on the str() code (C8), which compared {"0","1","2"} against {"0.0","1.0","2.0"}."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "multiclass", "class_order": ["0", "1", "2"]}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1, 2, None]})
+    assert frame["y"].dtype == "float64"
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    assert result.summary["valid"] is True
+
+
+def test_r1_positive_class_string_against_string_target_no_mismatch(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """A string target compares as strings, unchanged by R1."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "binary", "positive_class": "yes"}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": ["yes", "no", "yes"]})
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    assert result.summary["valid"] is True
+
+
+def test_r1_positive_class_absent_from_numeric_target_is_a_mismatch(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """positive_class=2 against a 0/1 target: one mismatch, as before -- the float path must
+    not accidentally make everything match."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "binary", "positive_class": 2}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1, 0, 1]})
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    fields = _fields(result.summary["mismatches"])
+    assert "target.positive_class" in fields
+
+
+def test_r1_unparseable_declared_value_against_numeric_target_is_a_mismatch_not_a_crash(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    """positive_class="abc" against a numeric target cannot parse as a number. R1 requires this
+    to be a mismatch, never an exception. The old str() code happened not to crash, but the
+    new float path must handle the un-parseable value as "absent", not raise ValueError."""
+    contract = DataContract.model_validate(
+        {"target": {"column": "y", "type": "binary", "positive_class": "abc"}}
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1, 0, 1]})
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    fields = _fields(result.summary["mismatches"])
+    assert "target.positive_class" in fields

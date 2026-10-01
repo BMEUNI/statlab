@@ -52,6 +52,7 @@ Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1
 |---|---|
 | String columns have dtype **`str`**, not `object` | **Never** detect strings with `dtype == object`. Use `pandas.api.types.is_string_dtype`. A role-inference function written against pandas 2 conventions fails silently here. |
 | Copy-on-write is **always on**, cannot be disabled | Helps D22's immutable-artifact rule; tools cannot accidentally mutate a caller's frame through a view. Never rely on mutation-through-view. |
+| Under copy-on-write, `Series.to_numpy()` returns a **read-only** array | Use `to_numpy(copy=True)` before mutating the result; writing to the shared buffer raises. |
 | Datetimes default to `datetime64[us]`, not `[ns]` | Assert on `[us]` in fixtures; temporal splits and datetime-part extraction must not hardcode `[ns]`. |
 | Parquet round-trip preserves `str`, `category`, `datetime64[us]`, `bool` exactly | Chunk 06 can assert full dtype equality after round-trip rather than tolerating drift. |
 | `Pandas4Warning` exists as a deprecation category | With `filterwarnings = ["error"]`, touching a pandas-4-deprecated API fails the suite. That is intended. |
@@ -201,7 +202,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | completed | 01, 02, 06 |
 | 08 | [`08_tools_intake.md`](./08_tools_intake.md) — `load_csv` (takes the upload's sha256, not a path: traversal unrepresentable by schema), `infer_column_roles`, `validate_contract` (reads the run's contract snapshot; reports every mismatch as a finding), `detect_id_columns`, `detect_leaky_columns`. Widens the pandas boundary rule to `mcp_server/` with a test over `backend/` + `contracts/`. Milestone **M2** | completed | 03, 06, 07 |
 | 09 | [`09_tools_profiling.md`](./09_tools_profiling.md) — 9 profiling tools; shared `_frame.py` helpers (`json_scalar`: np.int64 fails the envelope, NaN must not reach JSON); `save_json` made strict; plots via pyplot-free `Figure` with `parse_math=False` (bodies now run in threads) Milestone **M3** (profiling half; completed by chunk 10) | completed | 06, 07, 08 |
-| 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks. Writes split roles so the lineage lock has something typed to key on, and `runs.test_fingerprint` (D32). Small-split guard (D33c). Temporal/grouped stay deferred, and an unavailable strategy escalates rather than falling back. Completes **M3** with chunk 09. **Requires `REVISIONS_IMPLEMENTED.md` R4 first** | untouched | 07, 08, 09 |
+| 09r | [`REVISIONS_IMPLEMENTED.md`](./REVISIONS_IMPLEMENTED.md) — revision batch from the v1.8 review: R1-R3 intake contract/leak fixes, R4 schema and wire fields for the D32 lineage lock, R5-R7 small fixes | completed | 08, 09 |
+| 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks. Writes split roles so the lineage lock has something typed to key on, and `runs.test_fingerprint` (D32). Small-split guard (D33c). Temporal/grouped stay deferred, and an unavailable strategy escalates rather than falling back. Completes **M3** with chunk 09. | untouched | 07, 08, 09 |
 | 11 | `11_tools_cleaning.md` — 9 tools; `fit_*`/`apply_*` separation | untouched | 07, 08 |
 | 12 | `12_tools_encoding.md` — 8 tools; one-hot / ordinal / target / scaler, all fit+apply. `fit_target_encoder` returns OOF-encoded train (D34c) | untouched | 07, 11 |
 | 13 | `13_tools_training.md` — `ESTIMATORS` registry (6 estimators, D25), `train_estimator` (calibration by CV on train, D34b), `tune_estimator` (CV within train, `max_fit_seconds` enforced in the body, D34a/D36c), `predict`, `predict_proba`; explicit `seed`, `n_jobs=1` (D34e) | untouched | 07, 12 |
@@ -217,7 +219,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, injection of `project`/`run`/`dataset`/`seed`, **test-set lineage lock** (D32a–b: `derived_from_test` propagation, `fit_*` never on test-derived, transform-only flow in node 12, one `score_*` via `test_scored_at`), error mapping. **Requires `REVISIONS_IMPLEMENTED.md` R4 first** | untouched | 02, 05, 06, 07 |
+| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, injection of `project`/`run`/`dataset`/`seed`, **test-set lineage lock** (D32a–b: `derived_from_test` propagation, `fit_*` never on test-derived, transform-only flow in node 12, one `score_*` via `test_scored_at`), error mapping. | untouched | 02, 05, 06, 07 |
 | 22 | `22_graph_engine_core.md` — `RunState`, checkpointer, event bus with monotonic `seq` → `events.jsonl`, declared `NodeSpec` spine traversal, shared-node sequential execution. If the spec exceeds ~200 tests, split checkpointer/event bus from traversal | untouched | 02, 04, 05, 06, 21 |
 | 23 | `23_restart_reconciliation.md` — boot-time status scan, node-boundary resume, interrupted-run marking (§5.1) | untouched | 22 |
 | 24 | `24_candidate_fanout.md` — parallel candidate execution, shared-split guarantee, test-lock integration, budget caps, search waves, pause/cancel at tool-call boundaries (D36c) | untouched | 06, 21, 22 |
@@ -238,7 +240,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
 | 30 | `30_control_router.md` — interrupt router classifier, out-of-band Q&A, status explainer | untouched | 22, 26 |
-| 31 | `31_control_recovery.md` — recovery/retry by `error_class`, cancel/pause/resume lifecycle | untouched | 22, 30 |
+| 31 | `31_control_recovery.md` — recovery/retry by `error_class`, cancel/pause/resume lifecycle; rewind handler: forks keep the parent's artifact refs and create no rows (D11); listing follows `forked_from_run_id` | untouched | 22, 30 |
 | 32 | `32_control_gates_rewind.md` — HITL gates (7 actions), guided mode `gate_policy`, fork-based rewind with hard-linking | untouched | 24, 31 |
 
 ## Phase F — HTTP API (33–35)

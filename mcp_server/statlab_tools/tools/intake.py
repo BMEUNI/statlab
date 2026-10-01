@@ -17,6 +17,7 @@ silently, and returns `0.9999999999999999` rather than `1.0` -- compared with `>
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -30,7 +31,12 @@ from statlab_contracts.vocabulary import ColumnRole
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
-from statlab_tools.tools._frame import CLASS_TARGET_MAX_LEVELS, iso8601_parse_share
+from statlab_tools.tools._frame import (
+    CLASS_TARGET_MAX_LEVELS,
+    is_numeric_column,
+    iso8601_parse_share,
+    json_scalar,
+)
 
 _OPTS: Final = DatasetOptions()
 """`load_csv`'s defaults and bounds come from here, not restated -- the contract and the tool
@@ -83,11 +89,27 @@ LEAK_MAJORITY_SHARE_GUARD: Final = 0.95
 between a real leak and an imbalanced target."""
 
 LEAK_UNIQUE_SHARE_SKIP: Final = 0.5
-"""L3 skips any feature whose own unique share exceeds this -- an id-like column is trivially
-100% "pure" against any target and is `detect_id_columns`' concern, not a leak."""
+"""L3 skips any *non-numeric* feature whose own unique share exceeds this -- a string id is
+trivially 100% "pure" against any target and is `detect_id_columns`' concern, not a leak.
+Numeric features no longer take the purity path at all (they go through rank AUC), so this
+skip only ever gates string-shaped features now."""
 
-_QCUT_BINS: Final = 10
-"""L3: number of quantile bins a numeric feature is split into before computing purity."""
+LEAK_AUC: Final = 0.99
+"""A numeric feature against a class target is flagged when its rank-based one-vs-rest AUC
+reaches this. AUC is insensitive to class balance, so -- unlike the binned-purity path -- a
+perfect continuous leak scores 1.0 at every split, not only when the class boundary happens to
+fall on a decile edge (R2's amendment). Compared with `>=`."""
+
+LEAK_MIN_CLASS_ROWS: Final = 10
+"""The rank-AUC path scores a class only when it has at least this many rows among the paired
+non-null rows. A class with a handful of members produces a noisy extreme AUC that means
+nothing; AUC's balance-insensitivity makes a tiny class the one way it can still mislead."""
+
+LEAK_MIN_ROWS: Final = 20
+"""L3: `_level_purity` returns `None` when fewer than this many rows have both a non-null level
+and a non-null target. A separate constant from `MIN_ROWS_FOR_ID` -- same value today,
+different meaning (purity needs enough paired rows to mean anything, not enough rows to judge
+uniqueness), and the two must be free to diverge."""
 
 
 # --- load_csv ------------------------------------------------------------------------------------
@@ -348,6 +370,42 @@ def _mismatch(field: str, message: str) -> _Mismatch:
     return {"field": field, "message": message}
 
 
+def _declared_matches_observed(
+    declared: Iterable[str | int | bool], observed: pd.Series
+) -> tuple[set[str], set[str]]:
+    """Render a declared set of target values and the observed non-null values onto a common
+    representation so C7/C8 compare like with like.
+
+    When the target column is numeric (`is_numeric_column`, which excludes bool), both sides are
+    compared as floats: a 0/1 column with one missing value loads as `float64`, so its observed
+    set is `{0.0, 1.0}` while a declared `positive_class=1` would stringify to `"1"` and never
+    match (R1). A declared value that does not parse as a number against a numeric target is a
+    *mismatch*, not an exception -- it is rendered as a sentinel that cannot equal any observed
+    float, so it falls out of the comparison without a crash. Otherwise both sides are compared
+    as strings.
+
+    `declared` is typed to the exact scalar union the contract allows (`positive_class` is
+    `str | int | bool`, `class_order` entries are `str`), so `float(value)` type-checks with no
+    narrowing and there is no unreachable "not a scalar" branch to cover.
+    """
+    non_null = observed.dropna()
+    declared_list = list(declared)
+    if is_numeric_column(observed):
+        observed_repr = {repr(float(v)) for v in non_null}
+        return {_as_float_repr(v) for v in declared_list}, observed_repr
+    return {str(v) for v in declared_list}, {str(v) for v in non_null}
+
+
+def _as_float_repr(value: str | int | bool) -> str:
+    """`repr(float(value))`, or a sentinel when a string does not parse as a number (R1: that
+    is a mismatch, not an exception). `int`/`bool`/numeric `str` all parse; only a non-numeric
+    `str` reaches the `except`."""
+    try:
+        return repr(float(value))
+    except ValueError:
+        return f"__unparseable__{value!r}"
+
+
 def _check_columns_exist(
     contract: DataContract, columns: set[str]
 ) -> tuple[list[_Mismatch], set[str]]:
@@ -434,9 +492,9 @@ def _check_target(
                     "target.type is 'count' but values are not all non-negative integers",
                 )
             )
-    if target.positive_class is not None:  # C7, str() alignment -- JSON 1 vs frame int64 1
-        observed = {str(v) for v in distinct}
-        if str(target.positive_class) not in observed:
+    if target.positive_class is not None:  # C7
+        declared, observed = _declared_matches_observed([target.positive_class], series)
+        if not declared <= observed:
             mismatches.append(
                 _mismatch(
                     "target.positive_class",
@@ -444,14 +502,13 @@ def _check_target(
                 )
             )
     if target.class_order is not None:  # C8
-        observed = {str(v) for v in distinct}
-        declared = {str(v) for v in target.class_order}
+        declared, observed = _declared_matches_observed(target.class_order, series)
         if observed != declared:
             mismatches.append(
                 _mismatch(
                     "target.class_order",
                     f"class_order {list(target.class_order)!r} does not match the observed "
-                    f"values {sorted(observed)!r}",
+                    f"values {sorted({str(v) for v in distinct})!r}",
                 )
             )
     return mismatches
@@ -615,22 +672,49 @@ def _majority_share(series: pd.Series) -> float:
 
 
 def _level_purity(feature: pd.Series, target: pd.Series) -> float | None:
-    """L3: bins a numeric feature into `_QCUT_BINS` quantiles first; uses a categorical feature
-    as-is. Returns `None` when the feature cannot be grouped at all -- a constant numeric
-    column, an all-null numeric column, or too few non-null values collapse `qcut` to zero
-    bins rather than raising (verified against pandas 3.0.5: none of these raise `ValueError`
-    with `q=10, duplicates="drop"` fixed, so there is no separate exception branch to catch)."""
-    if pd.api.types.is_numeric_dtype(feature):
-        levels = pd.qcut(feature, q=_QCUT_BINS, duplicates="drop")
-        if levels.cat.categories.empty:
-            return None
-    else:
-        levels = feature
-    frame = pd.DataFrame({"level": levels, "target": target})
+    """L3, non-numeric features only: majority-class share summed over the feature's own
+    levels. Numeric features no longer reach this -- they take the rank-AUC path, which does
+    not depend on where a class boundary falls between decile edges (R2's amendment), so the
+    quantile-binning branch that used to live here is gone.
+
+    Purity is computed over rows whose level AND target are both non-null, and returns `None`
+    when fewer than `LEAK_MIN_ROWS` such paired rows remain -- a purity over a handful of rows
+    is noise, not evidence.
+    """
+    frame = pd.DataFrame({"level": feature, "target": target}).dropna()
+    if len(frame) < LEAK_MIN_ROWS:
+        return None
     majority_per_level = frame.groupby("level", observed=True)["target"].agg(
         lambda s: s.value_counts().iloc[0]
     )
     return float(majority_per_level.sum() / len(frame))
+
+
+def _rank_auc(feature: pd.Series, target: pd.Series) -> tuple[float, JsonValue] | None:
+    """Rank-based one-vs-rest AUC of a numeric feature against a class target, folded to
+    `max(auc, 1 - auc)` and maximised over classes (R2's amendment). For a class with `n1`
+    paired rows and `n0 = N - n1` rows in the rest,
+    `auc = (sum of the class's average ranks - n1*(n1+1)/2) / (n1*n0)`, where ranks come from
+    `Series.rank()` (average ties, no scipy). Only classes with at least `LEAK_MIN_CLASS_ROWS`
+    rows are scored; returns `None` when none qualifies, otherwise the best folded AUC and the
+    class that achieved it (for the evidence string). AUC is insensitive to class balance, so a
+    perfect continuous leak scores 1.0 at every split while a random feature sits near 0.5 --
+    the majority-share guard the purity path needs is unnecessary here.
+    """
+    aligned = pd.DataFrame({"f": feature, "t": target}).dropna()
+    ranks = aligned["f"].rank()
+    total = len(aligned)
+    best: tuple[float, JsonValue] | None = None
+    for value, group_ranks in ranks.groupby(aligned["t"], observed=True):
+        n1 = len(group_ranks)
+        n0 = total - n1
+        if n1 < LEAK_MIN_CLASS_ROWS or n0 == 0:
+            continue
+        auc = (float(group_ranks.sum()) - n1 * (n1 + 1) / 2) / (n1 * n0)
+        folded = max(auc, 1.0 - auc)
+        if best is None or folded > best[0]:
+            best = (folded, json_scalar(value))
+    return best
 
 
 @tool(phase="intake", allow_in=["intake"])
@@ -699,13 +783,15 @@ def detect_leaky_columns(
             continue
         feature_unique_share = non_null_feature.nunique() / len(non_null_feature)
 
-        if (
-            not is_class_target
-            and pd.api.types.is_numeric_dtype(series)
-            and pd.api.types.is_numeric_dtype(target_series)
-        ):  # L2
+        if is_numeric_column(series) and is_numeric_column(target_series):  # L2
             aligned = pd.DataFrame({"f": series, "t": target_series}).dropna()
-            if len(aligned) >= 2:
+            # A rank correlation needs both sides to vary: a constant feature or target has
+            # zero rank variance, so `.corr()` divides by zero and returns NaN -- which under
+            # `filterwarnings=error` raises a numpy RuntimeWarning rather than scoring. The old
+            # code never hit this because L2 ran only against continuous (never constant)
+            # targets; now that L2 also runs against class targets and binned-numeric features,
+            # a constant column must be skipped here (it is L3's or no rule's concern).
+            if len(aligned) >= 2 and aligned["f"].nunique() > 1 and aligned["t"].nunique() > 1:
                 score = abs(_rank_correlation(aligned["f"], aligned["t"]))
                 if score >= LEAK_CORRELATION:
                     suspects.append(
@@ -721,8 +807,36 @@ def detect_leaky_columns(
                     )
                     continue
 
-        if is_class_target and majority_share < LEAK_MAJORITY_SHARE_GUARD:  # L3
+        if is_class_target and is_numeric_column(series):  # L3a: numeric feature, class target
+            # Rank AUC, not binned purity: a perfect continuous leak reaches purity 1.0 only
+            # when the class boundary lands on a decile edge, so the binned rule missed it at
+            # most splits (R2's amendment). AUC is balance-insensitive, so the majority-share
+            # guard is not applied here -- `LEAK_MIN_CLASS_ROWS` inside `_rank_auc` is what
+            # keeps a tiny class from producing a noisy extreme.
+            auc = _rank_auc(series, target_series)
+            if auc is not None and auc[0] >= LEAK_AUC:
+                score, best_class = auc
+                suspects.append(
+                    (
+                        score,
+                        {
+                            "column": str(column),
+                            "rule": "rank_auc",
+                            "score": score,
+                            "evidence": [
+                                f"rank AUC {score:.4f} for class {best_class}",
+                                *evidence,
+                            ],
+                        },
+                    )
+                )
+            continue
+
+        if is_class_target and majority_share < LEAK_MAJORITY_SHARE_GUARD:  # L3b: non-numeric
             if feature_unique_share > LEAK_UNIQUE_SHARE_SKIP:
+                # The skip exists for string IDs, which are trivially 100% pure against any
+                # target. Numeric features never reach here -- they take the rank-AUC path
+                # above -- so this guards string-shaped features only.
                 continue
             purity = _level_purity(series, target_series)
             if purity is not None and purity >= LEAK_PURITY:
