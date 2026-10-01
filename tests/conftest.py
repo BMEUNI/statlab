@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 import pandas as pd
@@ -457,3 +457,70 @@ def write_snapshot(seeded_run: RunPaths) -> Callable[[DataContract], None]:
         seeded_run.contract_snapshot_json.write_text(contract.model_dump_json(), encoding="utf-8")
 
     return write
+
+
+# --- Profiling tools (chunk 09) ------------------------------------------------------------------
+
+MESSY_OUTLIER_ROWS: Final = (3, 17, 42)
+"""The exact row labels `messy_frame`'s three planted outliers live at -- S4 asserts
+`detect_outliers`'s `iqr` method reports exactly these, not merely "some outliers"."""
+
+MESSY_COMISSING_COLUMNS: Final = ("co_a", "co_b")
+"""`messy_frame`'s two columns missing on exactly the same rows -- S6 asserts these appear in
+`report_missingness`'s `co_missing` with Jaccard 1.0."""
+
+
+@pytest.fixture
+def messy_frame() -> pd.DataFrame:
+    """Built to trip every probe from this chunk's §1 and the handoff prompt's hazard list, in
+    one frame rather than scattered across many small ones -- a single property test (S14)
+    runs every tool over this frame, so every hazard needs to coexist in it:
+
+    - `int_with_nulls`: an int column with nulls (P1 -- `.count()`/`.sum()` return `np.int64`)
+    - `const`: one distinct non-null value (P6 -- every spread-based statistic must skip it)
+    - `flag`: a bool column (P4 -- numeric dtype per `is_numeric_dtype`, excluded by
+      `is_numeric_column`)
+    - `"price ($)"`: a column name containing paired `$` (silent mathtext mangling without
+      `parse_math=False`)
+    - `co_a`/`co_b`: null on exactly the same rows (`report_missingness`'s `co_missing`)
+    - `with_outliers`: numeric, with three planted outliers at `MESSY_OUTLIER_ROWS`
+    - `many_levels`: 60 distinct string values (D15's `PLOT_MAX_CATEGORIES` cap), one of whose
+      values is the literal string `"$\\frac$"` (mathtext mid-render crash without
+      `parse_math=False`)
+    - `"cost $ in $ usd"`: a second mathtext-shaped column name, distinct from `"price ($)"` so
+      a test can tell the two apart
+    - `event_time`: `datetime64[us]` (P1's `pd.Timestamp` -> `isoformat()` branch)
+    - `target`: a class target (0/1) for `summarize_target`/`plot_target_relation` tests that
+      need a target already in the same frame as every hazard above
+    """
+    n = 60
+    rng = np.random.default_rng(20260930)
+    int_with_nulls = pd.array([1, 2, None, 4, 5] * (n // 5), dtype="Int64")
+    # Evenly spaced base values with small jitter, not `rng.normal` -- a normal draw at this
+    # seed/scale puts one more point just outside the IQR fence alongside the three deliberately
+    # planted outliers, making "exactly these three" untestable. A tight, deterministic base
+    # guarantees the fence sits only around the three planted extremes.
+    with_outliers = np.linspace(45.0, 55.0, n) + rng.uniform(-0.5, 0.5, size=n)
+    with_outliers[list(MESSY_OUTLIER_ROWS)] = [500.0, -500.0, 600.0]
+    co_a = pd.array([None if i % 7 == 0 else float(i) for i in range(n)])
+    co_b = pd.array([None if i % 7 == 0 else float(i) * 2 for i in range(n)])
+    # A permutation of 60 distinct strings, not `rng.choice` over 60 candidates for 60 draws --
+    # `choice` with replacement collides well short of 60 distinct values at this sample size,
+    # which is the opposite of what the 60-level plot-cap test needs.
+    many_levels_values = [f"level_{i}" for i in range(59)] + [r"$\frac$"]
+    many_levels = rng.permutation(many_levels_values)
+    return pd.DataFrame(
+        {
+            "int_with_nulls": int_with_nulls,
+            "const": [7] * n,
+            "flag": rng.choice([True, False], size=n),
+            "price ($)": rng.normal(size=n),
+            "co_a": co_a,
+            "co_b": co_b,
+            "with_outliers": with_outliers,
+            "many_levels": many_levels,
+            "cost $ in $ usd": rng.normal(size=n),
+            "event_time": pd.date_range("2024-01-01", periods=n, freq="D"),
+            "target": rng.choice([0, 1], size=n, p=[0.6, 0.4]),
+        }
+    )

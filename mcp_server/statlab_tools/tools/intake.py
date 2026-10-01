@@ -30,6 +30,7 @@ from statlab_contracts.vocabulary import ColumnRole
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
+from statlab_tools.tools._frame import CLASS_TARGET_MAX_LEVELS, iso8601_parse_share
 
 _OPTS: Final = DatasetOptions()
 """`load_csv`'s defaults and bounds come from here, not restated -- the contract and the tool
@@ -70,10 +71,6 @@ MIN_ROWS_FOR_ID: Final = 20
 """`detect_id_columns`: fewer non-null rows than this and uniqueness is skipped -- it means
 nothing on a handful of rows."""
 
-CLASS_TARGET_MAX_LEVELS: Final = 20
-"""`detect_leaky_columns`: a target with at most this many distinct values is treated as
-categorical/class-shaped for L2/L3's branch choice, rather than continuous."""
-
 LEAK_CORRELATION: Final = 0.98
 """L2: `abs(rank_corr) >=` this flags a numeric feature against a numeric target."""
 
@@ -91,19 +88,6 @@ LEAK_UNIQUE_SHARE_SKIP: Final = 0.5
 
 _QCUT_BINS: Final = 10
 """L3: number of quantile bins a numeric feature is split into before computing purity."""
-
-
-# --- shared: ISO-8601 datetime detection (R7, C10) -----------------------------------------------
-
-
-def _iso8601_parse_share(values: pd.Series) -> float:
-    """Share of `values`' non-null entries that parse as ISO 8601. `0.0` when there are no
-    non-null values -- an all-null column is handled by R1/C1 before this is ever called."""
-    non_null = values.dropna()
-    if non_null.empty:
-        return 0.0
-    parsed = pd.to_datetime(non_null, format="ISO8601", errors="coerce")
-    return float(parsed.notna().mean())
 
 
 # --- load_csv ------------------------------------------------------------------------------------
@@ -313,7 +297,7 @@ def _role_for_column(series: pd.Series) -> tuple[ColumnRole, str] | None:
         if distinct_strings <= _BOOLEAN_LIKE_STRINGS and len(distinct_strings) == 2:  # R6
             return "boolean", "two boolean-like strings"
 
-        share = _iso8601_parse_share(series)
+        share = iso8601_parse_share(series)
         if share >= DATETIME_PARSE_SHARE:  # R7
             return "datetime", f"{share:.0%} parse as ISO 8601"
 
@@ -487,7 +471,7 @@ def _check_roles(
                 _mismatch(f"features.roles.{column}", "role is 'numeric' but column is not")
             )
         if role == "datetime":  # C10
-            share = _iso8601_parse_share(series)
+            share = iso8601_parse_share(series)
             if share < DATETIME_PARSE_SHARE:
                 mismatches.append(
                     _mismatch(
@@ -519,7 +503,7 @@ def _check_split_time_column(
     column = contract.split.time_column
     if column is None or column in missing_columns:
         return []
-    share = _iso8601_parse_share(data[column])
+    share = iso8601_parse_share(data[column])
     if share < DATETIME_PARSE_SHARE:
         return [_mismatch("split.time_column", f"only {share:.0%} of values parse as ISO 8601")]
     return []

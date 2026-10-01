@@ -15,6 +15,7 @@ from statlab_contracts.layout import EXTENSION_FOR_KIND, RunPaths
 
 from statlab_tools.artifacts import load_dataframe
 from statlab_tools.tool import ToolDataError, tool
+from statlab_tools.tools._frame import json_scalar
 
 _KIND_FOR_EXTENSION: dict[str, str] = {}
 for _kind, _ext in EXTENSION_FOR_KIND.items():
@@ -75,15 +76,12 @@ def describe_artifact(
     dtypes: dict[str, JsonValue] = {
         str(column): str(dtype) for column, dtype in frame.dtypes.items()
     }
-    # `to_dict` leaves datetime cells as `pandas.Timestamp`, which is not a valid JsonValue.
-    # Duck-typed on `isoformat` rather than `isinstance(value, pd.Timestamp)`, so this module
-    # never imports pandas -- the boundary rule from chunk 06 is "pandas in exactly one
-    # module", and that module is `statlab_tools.artifacts`, not this one.
+    # `to_dict` leaves integer cells as `np.int64` and datetime cells as `pandas.Timestamp`,
+    # neither a valid JsonValue on its own (P1) -- `_frame.json_scalar` is the one place every
+    # pandas-cell-to-JSON conversion in the project goes through, replacing the `isoformat`
+    # duck-typing this used before chunk 09 introduced that shared helper.
     head: list[JsonValue] = [
-        {
-            str(column): value.isoformat() if hasattr(value, "isoformat") else value
-            for column, value in row.items()
-        }
+        {str(column): json_scalar(value) for column, value in row.items()}
         for row in frame.head(head_rows).to_dict(orient="records")
     ]
     return ToolSuccess(

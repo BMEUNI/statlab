@@ -53,6 +53,9 @@ Dev: `pytest==9.1.1`, `pytest-cov==7.1.0`, `pytest-asyncio==1.4.0`, `mypy==2.3.1
 | Datetimes default to `datetime64[us]`, not `[ns]` | Assert on `[us]` in fixtures; temporal splits and datetime-part extraction must not hardcode `[ns]`. |
 | Parquet round-trip preserves `str`, `category`, `datetime64[us]`, `bool` exactly | Chunk 06 can assert full dtype equality after round-trip rather than tolerating drift. |
 | `Pandas4Warning` exists as a deprecation category | With `filterwarnings = ["error"]`, touching a pandas-4-deprecated API fails the suite. That is intended. |
+| `np.int64`/`np.float64`/etc. from a pandas reduction are not `int`/`float` for pydantic's `JsonValue` — `np.int64` is not an `int` subclass, though `np.float64` passes since it is a `float` subclass | Every value from `.count()`, `.sum()`, `value_counts()`, or integer `.iloc[i]` needs explicit conversion before it reaches a `ToolSuccess` summary or a JSON artifact. Chunk 09's `_frame.json_scalar` is the one place this happens. |
+| `json.dumps` writes `NaN`/`Infinity` as bare, non-standard tokens by default; `allow_nan=False` is required for strict JSON | A constant column's correlation is `NaN`; without the strict flag, `save_json` would write a file a browser's `JSON.parse` rejects. Chunk 09 made `save_json` strict for this reason. |
+| `pandas.api.types.is_numeric_dtype(bool_series)` is `True`, but `DataFrame.select_dtypes("number")` excludes `bool` | Two different "is this numeric" checks disagree on the same column. Pick one predicate (chunk 09's `_frame.is_numeric_column`: numeric dtype and not bool) and use it everywhere a tool needs to know. |
 
 **Tooling notes carried forward:**
 - `[tool.mypy] plugins = ["pydantic.mypy"]` is required — without it mypy rejects
@@ -195,7 +198,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 |---|---|---|---|
 | 07 | [`07_mcp_server_foundation.md`](./07_mcp_server_foundation.md) — Streamable HTTP app, static-bearer Starlette middleware, unauthenticated `/health` route, the `@tool` decorator (registration, `meta` for D12, mandatory docstring + parameter descriptions enforced at import, envelope, exception classification, timing, `heavy=` semaphore), and `list_artifacts` / `describe_artifact`. Milestone **M1** | completed | 01, 02, 06 |
 | 08 | [`08_tools_intake.md`](./08_tools_intake.md) — `load_csv` (takes the upload's sha256, not a path: traversal unrepresentable by schema), `infer_column_roles`, `validate_contract` (reads the run's contract snapshot; reports every mismatch as a finding), `detect_id_columns`, `detect_leaky_columns`. Widens the pandas boundary rule to `mcp_server/` with a test over `backend/` + `contracts/`. Milestone **M2** | completed | 03, 06, 07 |
-| 09 | [`09_tools_profiling.md`](./09_tools_profiling.md) — 9 profiling tools; shared `_frame.py` helpers (`json_scalar`: np.int64 fails the envelope, NaN must not reach JSON); `save_json` made strict; plots via pyplot-free `Figure` with `parse_math=False` (bodies now run in threads) | untouched | 06, 07, 08 |
+| 09 | [`09_tools_profiling.md`](./09_tools_profiling.md) — 9 profiling tools; shared `_frame.py` helpers (`json_scalar`: np.int64 fails the envelope, NaN must not reach JSON); `save_json` made strict; plots via pyplot-free `Figure` with `parse_math=False` (bodies now run in threads) | completed | 06, 07, 08 |
 | 10 | `10_tools_splitting.md` — 4 per-strategy split tools + `verify_split`'s 4 checks | untouched | 07, 08 |
 | 11 | `11_tools_cleaning.md` — 9 tools; `fit_*`/`apply_*` separation | untouched | 07, 08 |
 | 12 | `12_tools_encoding.md` — 8 tools; one-hot / ordinal / target / scaler, all fit+apply | untouched | 07, 11 |

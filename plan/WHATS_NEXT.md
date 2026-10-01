@@ -11,17 +11,17 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**8 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 09
+**9 of 40 chunks complete.** Phase A (foundation) done; Phase B (MCP server) underway. Chunk 10
 next.
 
-| Verified 2026-10-01, after chunk 08 | |
+| Verified 2026-10-01, after chunk 09 | |
 |---|---|
-| Tests | 1290 (1289 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (1894 stmts, 488 branches, 0 missed) |
-| mypy | `--strict` clean on 66 source files, `init_typed = true` |
+| Tests | 1433 (1432 passed, 1 skipped — chunk 06's F9, by spec) |
+| Coverage | 100 % line **and** branch (2225 stmts, 574 branches, 0 missed) |
+| mypy | `--strict` clean on 71 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 08 added zero new ones in either category |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 09 added zero new ones in either category |
 | Git | local `master`, never pushed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
@@ -253,6 +253,14 @@ read it:
   over `backend/` + `contracts/`.
 - **`disallow_any_explicit` must stay OFF** — incompatible with the pydantic mypy plugin for *every*
   `BaseModel`. `tests/test_no_explicit_any.py` replaces it and is stronger.
+- **Every value entering a `ToolSuccess` summary or a JSON artifact goes through
+  `_frame.json_scalar` / `json_list`** (chunk 09 D-a). A pandas reduction or cell is never placed
+  into either directly: `np.int64` fails `JsonValue` validation outright (it is not an `int`
+  subclass, unlike `np.float64`, which is a `float` subclass and passes silently while still being
+  the wrong type to assert on by value alone); `NaN`/`inf` pass validation but are not valid strict
+  JSON once `save_json`'s `allow_nan=False` is reached. `json_scalar` is also the one place
+  `pd.Timestamp`/`datetime.date` become `isoformat()` strings, replacing the old `isoformat`
+  duck-typing in `describe_artifact`.
 - **No unreachable code, therefore no `pragma: no cover`.** If a line cannot be reached, delete it. If
   you want to bypass a validator to reach a line, that line is the problem.
 - **`# type: ignore` is banned in production and permitted in tests only** where a runtime check must
@@ -293,11 +301,12 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Eleven defects found and fixed. Seven were mine (chunks 01–07); three more were caught during
-chunk 08's own implementation and belong to it (the `\Z`/`\z` regex-engine mismatch, the
-`LookupError` gap, the vacuous-empty-comparison bug) — not mine, not latent in `PLAN.md`, found
-and fixed in the same pass that introduced them, which is why they are not addenda. One was latent
-in `PLAN.md`. One of my *corrections*
+Twelve defects found and fixed. Seven were mine (chunks 01–07); four more were caught during
+chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
+the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
+a legitimate `Literal[...]`) — not mine, not latent in `PLAN.md`, found and fixed in the same pass
+that introduced or exposed them, which is why they are not addenda. One was latent in `PLAN.md`.
+One of my *corrections*
 was itself wrong and the agent reverted it — recorded because being overruled by evidence is the
 loop working.
 
@@ -314,7 +323,8 @@ loop working.
 | 9 | `SHA256_PATTERN` written `r"^[0-9a-f]{64}\Z"` — valid Python `re`, but fed to `pydantic.Field(pattern=...)`, which compiles with the Rust `regex` crate and does not recognise `\Z` | Lowercase `\z`, which both engines accept with the same end-of-string meaning |
 | 10 | `load_csv` caught only `ValueError` around `pd.read_csv`; an unknown codec name raises `LookupError`, a sibling hierarchy, not a `ValueError` subclass | `except (ValueError, LookupError)` |
 | 11 | `detect_leaky_columns` on an entirely-null target: two empty series compare equal under `.astype(str).equals()`, vacuously flagging every other column "identical to target" | Early return (no data, no finding) before any comparison runs |
-| 9 | `@tool`'s async wrapper ran sync bodies on the event loop, serialising every tool call across all parallel runs (D17). T17 passed regardless: it proved two calls *finished*, not that they *overlapped* | Body offloaded with `anyio.to_thread.run_sync`; T17b uses a barrier that deadlocks unless bodies overlap, and was confirmed to fail on the old code |
+| 12 | `@tool`'s async wrapper ran sync bodies on the event loop, serialising every tool call across all parallel runs (D17). T17 passed regardless: it proved two calls *finished*, not that they *overlapped* | Body offloaded with `anyio.to_thread.run_sync`; T17b uses a barrier that deadlocks unless bodies overlap, and was confirmed to fail on the old code |
+| 13 | Chunk 07's T23 (`no module holds a tool-name list`) source-scan regex matched any `["x", "y"]`-shaped string pair, including a legitimate `Literal["pearson", "spearman"]` type annotation chunk 09 introduced | Negative lookbehind for `Literal` added to the regex; confirmed it still catches a real tool-name-list shape |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -352,16 +362,67 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: chunk 09 — profiling tools
+## Next: chunk 10 — splitting tools
+
+Four per-strategy split tools (`split_random`, `split_stratified`, `split_temporal`,
+`split_grouped`) plus `verify_split`'s four independent checks. Together with chunk 09, this
+closes milestone **M3** (`PLAN.md` §8: "every tool tested on fixtures; `verify_split` catches a
+deliberately overlapping split") — chunk 09 alone does not complete M3, only profiling's half of
+it. `summarize_target`'s class-share logic (chunk 09's `summarize_class_target`, factored out as
+a plain function precisely so chunk 10 could reuse it) is one candidate for `verify_split`'s
+class-proportion-across-three-frames check; chunk 09's own report (item 7) found it directly
+reusable, not just similar in shape — the function already takes one series and returns shares,
+counts, minority share and imbalance ratio, exactly what comparing three frames' proportions
+needs computed once per frame and compared pairwise.
+
+## Chunk 09 — completed (summary)
 
 Nine profiling tools (`profile_schema`, `summarize_numeric`, `summarize_categorical`,
-`report_missingness`, `summarize_target`, plus the compute/render-split pair for correlations and
-distribution/target-relation plots). All five re-read `raw` with `load_dataframe`; chunk 08's own
-report (item 7) found this an acceptable cost at the data sizes D15 scopes for (never sampled, but
-also never more than the single-machine in-memory ceiling D15 already enforces) — repeated loads
-of a 200 MB-ceiling frame are cheap relative to the fits later nodes perform, and keeping each tool
-stateless (no shared in-memory cache between calls) is worth more than the saved reads, since a
-cache would be the first piece of hidden state in an otherwise fully auditable tool layer.
+`report_missingness`, `summarize_target`, `compute_correlations`, `detect_outliers`,
+`plot_distribution`, `plot_target_relation`) plus the shared `_frame.py` helper module (D-a):
+`json_scalar`/`json_list` (the fix for P1–P3), `is_numeric_column` (the fix for P4), and
+`iso8601_parse_share`/`CLASS_TARGET_MAX_LEVELS` moved from `intake.py` unchanged — chunk 08's
+intake tests pass without a single edit after the move, confirmed by a zero-diff `git diff`.
+
+**The cross-cutting problem this chunk actually solved:** every numeric summary written the
+direct way either fails `ToolSuccess` validation (`np.int64` is not an `int`) or writes invalid
+JSON (`NaN`/`inf` as bare tokens). `json_scalar` is now the one conversion point every tool in
+the catalogue is expected to use, and the chunk's own property test (S14) proves it holds across
+all nine profiling tools and three of chunk 08's five intake tools (not `load_csv`, which needs a
+real uploaded file, and `validate_contract`, covered by its own dedicated strict-JSON test) on
+two frames — not merely in the few places someone remembered to add a check.
+
+**A real pre-existing test bug found, not caused by sloppy new code:** chunk 07's T23 (`no module
+holds a tool-name list`) source-scans `tools/` with a regex matching any `["x", "y"]`-shaped
+string pair. `profiling.py`'s two legitimate `Literal["pearson", "spearman"]` /
+`Literal["iqr", "zscore"]` type annotations are not tool-name lists, but the regex could not tell
+the difference — it had simply never been exercised against a `Literal` before. Fixed with a
+negative lookbehind for `Literal` in the regex, verified the fix still flags a real tool-name-list
+shape.
+
+**Two genuinely unreachable branches deleted, one real reachable gap found alongside them:**
+`report_missingness`'s `if union == 0: continue` guard is mathematically unreachable — both
+columns in every pair come from `columns_with_nulls`, so each already has at least one null,
+which alone makes the union non-empty. But a sibling case right next to it, in
+`compute_correlations`, is real: two *non-constant* columns with zero overlapping non-null rows
+produce a genuinely `NaN` pairwise correlation (distinct from the already-handled constant-column
+case), and needed its own test rather than being assumed away.
+
+**On `describe_artifact`'s pre-existing `isoformat` duck-typing (chunk 07), now replaced by
+`json_scalar`:** investigating whether it was *already* broken for `np.int64` (the question the
+handoff prompt asked) found that `DataFrame.to_dict(orient="records")` already converts every
+numpy scalar to its native Python equivalent, including turning a nullable `Int64` NA into plain
+`None` — so the integer hazard was never real at that specific call site. The one real latent gap
+was `NaN` floats, which `to_dict()` leaves untouched and which `isoformat`-duck-typing had no
+reason to catch (`float("nan")` has no `.isoformat`): they would have passed `ToolSuccess`
+validation and silently become a bare `NaN` token if that summary were ever round-tripped through
+`save_json` — not currently exercised, since `describe_artifact` only ever returns a summary.
+
+**The concurrency test was verified by deliberately breaking it:** `plot_distribution`'s 8-way
+barrier test was confirmed to actually detect the serialisation bug T17b was written against, not
+just pass by construction — reverting `tool.py`'s `anyio.to_thread.run_sync` offload to an inline
+call made the barrier time out and the test fail, exactly as the regression it guards against
+would behave; reverted back to the real implementation afterward with a clean `git diff`.
 
 ## Chunk 08 — completed (summary)
 

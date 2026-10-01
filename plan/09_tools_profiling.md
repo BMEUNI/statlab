@@ -1,8 +1,49 @@
 ---
-status: untouched
+status: completed
 dependencies: [06, 07, 08]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-01
+implementation_notes: |
+  All nine tools (`profile_schema`, `summarize_numeric`, `summarize_categorical`,
+  `report_missingness`, `summarize_target`, `compute_correlations`, `detect_outliers`,
+  `plot_distribution`, `plot_target_relation`) implemented in
+  `mcp_server/statlab_tools/tools/profiling.py`, plus the shared `_frame.py` helper module
+  (`json_scalar`/`json_list`, `is_numeric_column`, `iso8601_parse_share`/
+  `CLASS_TARGET_MAX_LEVELS` moved unchanged from `intake.py`). 1433 tests total (1432 passed,
+  1 skipped), 100% line+branch coverage, mypy --strict clean on 71 files, ruff clean, zero new
+  `# type: ignore` in any chunk-09 file.
+
+  P1-P6 all held exactly as recorded against pandas 3.0.5/pydantic 2.13.5/matplotlib 3.11.1; no
+  STOP condition triggered. `intake.py`'s tests pass with zero edits after the helper move
+  (confirmed via `git diff` on the test files), so the move did not change behaviour.
+
+  The core cross-cutting fix: every pandas reduction/cell going into a `ToolSuccess` summary or
+  JSON artifact now passes through `_frame.json_scalar`/`json_list`. `np.int64` is not an `int`
+  subclass (fails validation outright); `NaN`/`inf` pass validation but are not valid strict
+  JSON once `save_json`'s new `allow_nan=False` is reached. The chunk's own property test (S14)
+  proves this holds across all nine profiling tools plus three of chunk 08's five intake tools
+  (on two fixture frames), not just in the places someone remembered to add a check.
+
+  Fixed one real pre-existing test bug, not introduced by this chunk's own carelessness: chunk
+  07's T23 source-scan regex (guards against a central tool-name list) matched any
+  `["x", "y"]`-shaped string pair, including the two legitimate `Literal["pearson", "spearman"]`
+  / `Literal["iqr", "zscore"]` type annotations this chunk introduces. Fixed with a negative
+  lookbehind for `Literal`, verified the fix still catches a genuine tool-name-list shape.
+
+  Deleted one genuinely unreachable branch (`report_missingness`'s `union == 0` guard --
+  mathematically impossible once both columns are drawn from `columns_with_nulls`, each
+  already non-empty) and found one real, distinct, reachable gap right beside it in
+  `compute_correlations`: two non-constant columns with zero overlapping non-null rows produce
+  a genuine `NaN` pairwise correlation and needed their own test and exclusion from `strongest`.
+
+  `save_json` made strict (`allow_nan=False`); `save_plot` no longer touches `pyplot` at all
+  (not even to close a figure -- tools build `Figure()` directly, so nothing is ever in
+  pyplot's registry). The 8-concurrent-plots test was verified to actually detect the
+  serialisation regression it guards against: reverting `tool.py`'s thread offload to an
+  inline call made the barrier time out and the test fail, then the revert was undone with a
+  clean `git diff`.
+
+  `00_index.md`'s pandas-facts block gained three one-liners (P1/P3/P4); `WHATS_NEXT.md` gained
+  the `json_scalar` convention, the state table, and the corrections table entries.
 ---
 
 # Chunk 09 — Profiling tools

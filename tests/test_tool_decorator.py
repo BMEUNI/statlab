@@ -796,11 +796,17 @@ def test_addendum_inject_run_params_rejects_none_directly() -> None:
 def test_t23_no_module_holds_a_tool_name_list() -> None:
     """T23: registering a tool needs no central list. Source-scan `tools/__init__.py` and
     `tools/artifacts.py` for a list/tuple literal of tool-name-shaped strings -- the only
-    "list" of tool names anywhere is the return value of `list_tools()` at runtime."""
+    "list" of tool names anywhere is the return value of `list_tools()` at runtime.
+
+    Excludes a `Literal["a", "b"]` type annotation (`typing.Literal[...]`): that is a parameter's
+    *allowed values*, declared once per parameter the normal Pydantic way, and is not a central
+    tool registry in the sense this test guards against -- chunk 09's `method: Literal["pearson",
+    "spearman"]` and `Literal["iqr", "zscore"]` are legitimate uses this regex must not flag.
+    """
     import re
 
     tools_dir = Path(__file__).resolve().parent.parent / "mcp_server" / "statlab_tools" / "tools"
-    name_list_pattern = re.compile(r"\[\s*[\"'][a-z_]+[\"']\s*,\s*[\"'][a-z_]+[\"']")
+    name_list_pattern = re.compile(r"(?<!Literal)\[\s*[\"'][a-z_]+[\"']\s*,\s*[\"'][a-z_]+[\"']")
     for path in tools_dir.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert not name_list_pattern.search(text), f"{path} appears to hold a tool-name list"

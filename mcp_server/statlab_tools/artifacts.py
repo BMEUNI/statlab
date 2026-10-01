@@ -110,21 +110,20 @@ def load_model(path: Path) -> object:
 def save_plot(
     path: Path, figure: Figure, *, ref: ArtifactRef, label: str | None = None
 ) -> ArtifactMeta:
-    """Write `figure` as PNG, then close it.
+    """Write `figure` as PNG.
 
-    Matplotlib keeps every created figure in a global registry until closed. A tool that
-    renders many plots without closing them leaks for the life of the process, and under
-    D17's parallel runs that is not hypothetical.
+    No `plt.close()`: this chunk's tools build `matplotlib.figure.Figure()` directly rather
+    than through `pyplot`, so the figure was never registered in pyplot's global figure
+    registry and there is nothing to close. `pyplot`'s registry is process-global and not
+    thread-safe, and tool bodies run concurrently in worker threads since `c5f23d3` -- touching
+    it here would reintroduce the exact hazard the direct-`Figure()` convention exists to avoid,
+    even though this function itself only ever receives an already-built figure.
     """
     _check_ref_matches_path(path, ref)
     try:
         figure.savefig(path, format="png")
     except OSError as exc:
         raise ToolArtifactError(str(path), f"cannot write plot: {exc}", cause=exc) from exc
-    finally:
-        import matplotlib.pyplot as plt
-
-        plt.close(figure)
     return ArtifactMeta(ref=ref, kind="plot", label=label)
 
 
@@ -136,9 +135,22 @@ def save_json(
     kind: ArtifactKind,
     label: str | None = None,
 ) -> ArtifactMeta:
+    """Write `payload` as strict JSON.
+
+    `allow_nan=False`: `JsonValue` validation accepts `NaN`/`inf` (they are valid Python
+    floats), but the default `json.dumps` then writes them as the bare tokens `NaN`/`Infinity`,
+    which are not valid JSON and a strict parser -- including a browser's `JSON.parse` -- would
+    reject (P3). A `ValueError` here means some upstream value should have gone through
+    `_frame.json_scalar` (which maps non-finite floats to `None`) and did not; that is a bug in
+    the caller, not something this function should paper over by writing invalid JSON.
+    """
     _check_ref_matches_path(path, ref)
     try:
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        text = json.dumps(payload, allow_nan=False)
+    except ValueError as exc:
+        raise ToolArtifactError(str(path), f"payload is not strict JSON: {exc}", cause=exc) from exc
+    try:
+        path.write_text(text, encoding="utf-8")
     except OSError as exc:
         raise ToolArtifactError(str(path), f"cannot write json: {exc}", cause=exc) from exc
     return ArtifactMeta(ref=ref, kind=kind, label=label)

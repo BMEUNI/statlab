@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
+from matplotlib.figure import Figure
 from pandas.testing import assert_frame_equal
 from pydantic import JsonValue
 from sklearn.linear_model import LogisticRegression
@@ -127,7 +128,8 @@ def test_a7b_save_model_kind_can_be_transformer(tmp_path: Path) -> None:
 
 def test_a8_plot_writes_valid_png(tmp_path: Path) -> None:
     """A8: first 8 bytes are the PNG signature."""
-    fig, ax = plt.subplots()
+    fig = Figure()
+    ax = fig.add_subplot()
     ax.plot([1, 2, 3])
     path, ref = _ref_path(tmp_path, ".png")
     meta = save_plot(path, fig, ref=ref)
@@ -135,26 +137,32 @@ def test_a8_plot_writes_valid_png(tmp_path: Path) -> None:
     assert meta.kind == "plot"
 
 
-def test_a9_save_plot_closes_the_figure(tmp_path: Path) -> None:
-    """A9."""
-    fig, ax = plt.subplots()
+def test_a9_save_plot_never_touches_pyplots_figure_registry(tmp_path: Path) -> None:
+    """A9, restated for chunk 09 (§3.2): `save_plot` no longer calls `plt.close` -- a figure
+    built via `matplotlib.figure.Figure()` directly, as every tool in this project now builds
+    one, was never in pyplot's global registry to begin with, so there is nothing to close.
+    `plt.get_fignums()` stays exactly as it was before the call -- the real invariant now is
+    that `save_plot` leaves pyplot's state alone entirely, not that it tidies up after it."""
+    fig = Figure()
+    ax = fig.add_subplot()
     ax.plot([1, 2, 3])
-    fignum = fig.number
+    before = plt.get_fignums()
     path, ref = _ref_path(tmp_path, ".png")
     save_plot(path, fig, ref=ref)
-    assert fignum not in plt.get_fignums()
+    assert plt.get_fignums() == before
 
 
-def test_a9b_save_plot_closes_figure_even_on_write_failure(tmp_path: Path) -> None:
-    """The figure is closed in a `finally`, so a write failure still cleans up the registry."""
-    fig, ax = plt.subplots()
+def test_a9b_save_plot_raises_tool_artifact_error_on_write_failure(tmp_path: Path) -> None:
+    """Restated for chunk 09: `save_plot` no longer has a `finally`-block figure-close to
+    prove works even on failure (there is nothing to close), so this now just confirms a write
+    failure still raises `ToolArtifactError`, same as every other `save_*`."""
+    fig = Figure()
+    ax = fig.add_subplot()
     ax.plot([1, 2, 3])
-    fignum = fig.number
     ref = new_artifact_ref()
     bad_path = tmp_path / "no_such_dir" / f"{ref}.png"
     with pytest.raises(ToolArtifactError):
         save_plot(bad_path, fig, ref=ref)
-    assert fignum not in plt.get_fignums()
 
 
 def test_a10_json_round_trip_nested_and_none(tmp_path: Path) -> None:
@@ -163,6 +171,67 @@ def test_a10_json_round_trip_nested_and_none(tmp_path: Path) -> None:
     path, ref = _ref_path(tmp_path, ".json")
     save_json(path, payload, ref=ref, kind="table")
     assert load_json(path) == payload
+
+
+def test_a10b_save_json_rejects_nan(tmp_path: Path) -> None:
+    """Chunk 09 §3.2/§4.5: `NaN` passes `JsonValue` validation (P2) but is not valid strict
+    JSON (P3). `save_json` must refuse to write it rather than silently emit the bare token
+    `NaN`, which a strict parser -- including the browser's `JSON.parse` -- rejects."""
+    payload: JsonValue = {"r": float("nan")}
+    path, ref = _ref_path(tmp_path, ".json")
+    with pytest.raises(ToolArtifactError):
+        save_json(path, payload, ref=ref, kind="table")
+    assert not path.exists()
+
+
+def test_a10c_save_json_rejects_inf(tmp_path: Path) -> None:
+    """Same as A10b for `inf`/`-inf` -- both pass `JsonValue` validation and both are invalid
+    strict JSON tokens."""
+    path, ref = _ref_path(tmp_path, ".json")
+    with pytest.raises(ToolArtifactError):
+        save_json(path, {"r": float("inf")}, ref=ref, kind="table")
+    path2, ref2 = _ref_path(tmp_path, ".json")
+    with pytest.raises(ToolArtifactError):
+        save_json(path2, {"r": float("-inf")}, ref=ref2, kind="table")
+
+
+def test_a10d_save_json_writes_none_as_null(tmp_path: Path) -> None:
+    """`None` is a legitimate, strict-JSON-compliant value -- distinguishing it from `NaN`/
+    `inf` is the whole point of `_frame.json_scalar` mapping the latter to the former rather
+    than to a sentinel string."""
+    path, ref = _ref_path(tmp_path, ".json")
+    save_json(path, {"r": None}, ref=ref, kind="table")
+    assert path.read_text(encoding="utf-8") == '{"r": null}'
+
+
+def test_a10e_save_json_output_loads_under_a_strict_parser(tmp_path: Path) -> None:
+    """The written file must be loadable by a parser that rejects non-standard tokens --
+    `json.loads` itself already does this (it has no `parse_constant` override by default that
+    would accept `NaN`), so a payload saved by `save_json` round-trips through the strictest
+    parser this project has without any special-casing."""
+    payload: JsonValue = {"a": [1, 2.5, None, True, "x"], "b": {"c": 3}}
+    path, ref = _ref_path(tmp_path, ".json")
+    save_json(path, payload, ref=ref, kind="table")
+    import json
+
+    with path.open(encoding="utf-8") as f:
+        # parse_constant raises on the very tokens allow_nan=False refuses to write; a file
+        # that still contained one would fail here even if load_json's own json.loads happened
+        # to tolerate it.
+        loaded = json.load(f, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)))
+    assert loaded == payload
+
+
+def test_a9c_save_plot_leaves_pyplots_registry_empty(tmp_path: Path) -> None:
+    """§4.5: with no figure ever created through `pyplot` in this test, `plt.get_fignums()`
+    stays empty across a `save_plot` call -- the registry was never touched at all."""
+    assert plt.get_fignums() == []
+    fig = Figure()
+    ax = fig.add_subplot()
+    ax.plot([1, 2, 3])
+    path, ref = _ref_path(tmp_path, ".png")
+    save_plot(path, fig, ref=ref)
+    assert plt.get_fignums() == []
 
 
 def test_a11_text_round_trip_utf8(tmp_path: Path) -> None:
