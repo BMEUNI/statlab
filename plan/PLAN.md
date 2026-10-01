@@ -1402,7 +1402,7 @@ node_executions(id, run_id, candidate_id, node_name, seq, attempt, status,
                 summary, error, concurrency_at_start, started_at, ended_at)
 tool_calls(id, run_id, node_execution_id, tool_name, args_json,
            result_json, duration_ms, ts)
-artifacts(id, run_id, kind, path, meta_json, produced_by, ts, pruned_at, derived_from_test)
+artifacts(id, run_id, kind, path, meta_json, produced_by, ts, pruned_at, split, derived_from_test)
 models(id, run_id, candidate_id, name, params_json, artifact_id, created_at)
 metrics(id, run_id, candidate_id, model_id, split, name, value)
 gates(id, run_id, node_execution_id, question_json, answer_json, status, ts)

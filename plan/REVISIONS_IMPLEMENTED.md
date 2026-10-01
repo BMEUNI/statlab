@@ -85,7 +85,8 @@ it is reached. The same probe measured 0.7625.
 - Apply `LEAK_UNIQUE_SHARE_SKIP` only when the feature is **not** `is_numeric_column`. Numeric
   features are binned first, so their raw uniqueness is irrelevant. The skip exists for string IDs.
 - In `_level_purity`, compute over rows with a non-null level and a non-null target, and return
-  `None` when fewer than `MIN_ROWS_FOR_ID` (20) such rows remain.
+  `None` when fewer than `LEAK_MIN_ROWS: Final = 20` such rows remain. A new constant, not
+  `MIN_ROWS_FOR_ID`: same value, different meaning, and they must be free to diverge.
 
 **Tests.**
 - The perfect continuous leak above is flagged with rule `level_purity`.
