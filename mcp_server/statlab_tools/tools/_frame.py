@@ -30,6 +30,11 @@ from typing import Final
 import numpy as np
 import pandas as pd
 from pydantic import JsonValue
+from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
+from statlab_contracts.layout import RunPaths
+
+from statlab_tools.artifacts import load_model, save_dataframe
+from statlab_tools.tool import ToolParamError
 
 CLASS_TARGET_MAX_LEVELS: Final = 20
 """A target (or target-shaped column) with at most this many distinct values is treated as
@@ -117,3 +122,46 @@ def json_scalar(value: object) -> JsonValue:
 def json_list(values: Iterable[object]) -> list[JsonValue]:
     """`json_scalar`, mapped over an iterable. For a pandas index or series' `.tolist()`."""
     return [json_scalar(v) for v in values]
+
+
+def as_str(series: pd.Series) -> pd.Series:
+    """Stringify, routing an all-integral numeric column through `Int64` first, so `2.0` becomes
+    `"2"`, not `"2.0"`; NaN stays NaN. Shared by every cast that compares string forms (chunk 11's
+    categorical/text, ordinal levels, boolean tokens; chunk 12's ordinal encoder): integer-coded
+    columns with a null load as `float64`, so without the Int64 route every such value stringifies
+    as `"1.0"` and silently falls outside the levels/token map (verified chunk 11, P3)."""
+    if is_numeric_column(series):
+        non_null = series.dropna()
+        if len(non_null) > 0 and bool((non_null == non_null.round()).all()):
+            return series.astype("Int64").astype("str")
+    return series.astype("str")
+
+
+def require_columns(frame: pd.DataFrame, names: tuple[str, ...], field: str) -> None:
+    """A column name not in `frame` is `tool_param`, naming the missing ones under `field`."""
+    missing = [name for name in names if name not in frame.columns]
+    if missing:
+        raise ToolParamError(
+            f"columns {missing!r} are not in the frame",
+            field_errors={field: f"not columns in the frame: {missing!r}"},
+        )
+
+
+def save_frame(paths: RunPaths, frame: pd.DataFrame, label: str) -> ArtifactMeta:
+    """Mint a ref and save `frame` as kind `dataframe` with `label`."""
+    ref = new_artifact_ref()
+    return save_dataframe(paths.artifact(ref, "dataframe"), frame, ref=ref, label=label)
+
+
+def load_fitted[T](paths: RunPaths, ref: ArtifactRef, expected: type[T], field: str) -> T:
+    """Load a fitted transformer and check its type. A wrong ref fails as `tool_param`, not an
+    `AttributeError` deep in apply (chunk 11 D-d). Generic over any type via an unconstrained PEP
+    695 `[T]`, so chunks 12-15 add their own fitted-state classes without editing a constraint
+    tuple here (chunk 12 §3.1)."""
+    obj = load_model(paths.artifact(ref, "transformer"))
+    if not isinstance(obj, expected):
+        raise ToolParamError(
+            f"{field} is a {type(obj).__name__}, not a {expected.__name__}",
+            field_errors={field: f"expected a {expected.__name__}"},
+        )
+    return obj

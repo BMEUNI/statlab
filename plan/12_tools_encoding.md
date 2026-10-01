@@ -1,8 +1,21 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 11]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  Eight encoding/scaling tools in `encoding.py` (one-hot, ordinal, target, scaler; fit+apply),
+  completing M4. The three shared helpers (`_require_columns`/`_save_frame`/`_load_fitted`) and
+  `_as_str` moved to `_frame.py` as public `require_columns`/`save_frame`/`load_fitted`/`as_str`;
+  `load_fitted` is now generic over an unconstrained PEP 695 `[T]`. Chunk 11 tests pass without
+  edits (only cleaning.py production code changed: imports + one local-variable rename to avoid
+  shadowing the now-public `as_str`). Target encoding is the only sklearn user, and sklearn is
+  imported lazily inside the two target-encoder bodies (not at module load) so chunk 09's
+  scipy-free spearman invariant survives `tools/__init__.py` importing this module at package
+  init. Gates: 1669 passed, 1 skipped (1670 total); 100% line+branch (3061 stmts, 812 branches,
+  0 missed); mypy --strict clean on 79 files; ruff clean. Zero new `# type: ignore`, no `Any`,
+  no `pragma: no cover`. All six DoD mutations fail at least one test (restore-verified, zero
+  residual diff). The OOF target-encoder test compares against BOTH `fit_transform` (equal) and
+  `fit().transform()` (differs), so an in-sample implementation does not pass.
 ---
 
 # Chunk 12 — Encoding tools

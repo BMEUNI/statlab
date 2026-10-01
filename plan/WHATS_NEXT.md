@@ -11,18 +11,18 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**10 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Chunk 12 next.
+**13 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Batch B2 (chunks 14 + 15) next; remaining work runs in batches (`00_index.md`).
 
-| Verified 2026-10-01, after chunk 11 (incl. review corrections) | |
+| Verified 2026-10-01, after batch B1 (chunks 12 + 13, incl. review) | |
 |---|---|
-| Tests | 1628 (1627 passed, 1 skipped — chunk 06's F9, by spec) |
-| Coverage | 100 % line **and** branch (2792 stmts, 738 branches, 0 missed) |
-| mypy | `--strict` clean on 77 source files, `init_typed = true` |
+| Tests | 1729 (1728 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 27 s |
+| Coverage | 100 % line **and** branch (3405 stmts, 886 branches, 0 missed) |
+| mypy | `--strict` clean on 83 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 32 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — chunk 11 added **zero** new ones in either category |
-| Git | local `master`, chunk 11 applied and **uncommitted**, otherwise tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B1 added **zero** |
+| Git | local `master`, batch B1 committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -31,7 +31,9 @@ round-trip `call_tool` over real HTTP; a tokenless request is rejected. **M2** (
 five intake tools pass contract tests, mismatches produce precise field-level errors, and a real
 CSV loads to a `raw` artifact over a real MCP session. **M3** (chunks 09 + 10) — every intake,
 profiling and splitting tool tested on fixtures; `verify_split` catches a deliberately
-overlapping split (and, via P3, a relabelled duplicate that index overlap cannot see).
+overlapping split (and, via P3, a relabelled duplicate that index overlap cannot see). **M4**
+(chunks 11 + 12) — every `fit_*` learns on train and every `apply_*` replays it unchanged on a
+frame with different statistics; the target encoder is out-of-fold and refuses train rows.
 
 ---
 
@@ -310,10 +312,11 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Nineteen defects, plus one methodology review (17). Rows 14–17 came from the full review of
+Twenty-one defects, plus one methodology review (17). Rows 14–17 came from the full review of
 2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Rows 18–19 are two
 defects in my *own* 09r revision text and its first implementation, caught in review before 09r was
-accepted. Of rows 1–13, seven were mine (chunks 01–07); four more were caught during
+accepted. Rows 20–21 came from batch B1's review. Defects caught in chunk 10/11 reviews
+are recorded in those chunks' addenda (§6), not here. Of rows 1–13, seven were mine (chunks 01–07); four more were caught during
 chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
 the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
 a legitimate `Literal[...]`) — not mine, not latent in `PLAN.md`, found and fixed in the same pass
@@ -343,6 +346,8 @@ loop working.
 | 17 | Methodology: the test lock keyed on one artifact id (transformed test copies and forks escaped it); the champion's validation score was reported as if unbiased; tuning-by-CV and tuning-on-valid both specified; calibration and target encoding had no leak-safe fold; post-EDA p-values reported as confirmatory, uncorrected | `PLAN.md` D32–D35 |
 | 18 | My R4 text said `fork_artifacts` copies `split`/`derived_from_test` onto *child rows* — contradicting chunk 06's shared-ref design (a fork hard-links under the same ref and creates no rows). The first implementation's test "proved" the copy by registering a child row whose id differed from its file stem, violating `row.id == Path(row.path).stem` | R4 amended (PLAN.md D11): forks keep the parent's refs, hard-link files under the same ref, create no rows; lineage is inherited. Test renamed `test_f2_fork_keeps_parent_refs`, asserts same stem, same inode, resolved row `split='test'`/`derived_from_test=True`, `list_artifacts(child) == ()` |
 | 19 | R2's first fix (skip the unique-share rule for numeric features + purity over paired non-null rows) passed its own test only because the test used an exactly balanced 200/200 `np.tile` target: binned purity of a perfect leak reaches 1.0 only when the class boundary falls on a decile edge (0.975 at 210/400, 0.9525 at 221, 0.950 at 180/60/20), so it still missed most real leaks | R2 final rule: rank-based one-vs-rest AUC, balance-insensitive, 1.000 at every split; tests parametrised over 200/210/221/60/20 positives so an exact split alone is no longer evidence |
+| 20 | Chunk 13's tuning CV used `n_jobs=-1`: it broke D17 and deadlocked the test run (loky workers started from a tool-body thread), stalling the implementation stage for an hour | Pin resource rules with a spy test, not a comment. Nothing in a tool body may spawn workers (`00_index.md`, sklearn block) |
+| 21 | Chunk 13's "predict uses frame column order" mutation survived: every test frame had its columns in fitted order | A mutation that survives means the tests share an accidental property. Vary it (here, reorder the columns) |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -379,40 +384,125 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B1 (chunks 12 + 13)
+## Next: batch B2 (chunks 14 + 15)
 
-Remaining work runs in batches (`00_index.md`, "Execution batches").
+Two specs, one cycle (`00_index.md`, "Execution batches"): chunk 14 (evaluation, plus
+`rank_models` and `compare_models`) and chunk 15 (inference). They are independent apart from
+shared fixtures, so they can run as two sequential stages with one review.
 
-### Chunk 12
+- **Chunk 14** scores `predictions` artifacts against truth. Chunk 13 indexes predictions by the
+  frame's labels, with columns `prediction` and `proba__{class}` in `FittedModel.classes` order.
+  Align by label, never by position, and refuse a label mismatch. Every `score_*` reports a
+  bootstrap 95 % CI (D33b): 1000 resamples, seeded. Precision, recall and F1 need
+  `zero_division=0`, because the zero-division warning is an error under `-W error` (chunk 13 P4).
+- **Chunk 15** builds the inferential matrix (dummy coding with an explicit reference level, no
+  scaling, D31) and the statsmodels fits. It applies D35: confirmatory/exploratory labels and Holm
+  correction. statsmodels is untyped here, like sklearn: keep it behind `object` and narrow.
+- Both chunks: import sklearn and statsmodels **lazily inside tool bodies** (chunk 12's scipy
+  fact). Use `n_jobs=1` in everything (chunk 13's deadlock).
 
-Chunk 11 is **applied and verified**. The next step is chunk 12 (encoding/scaling), which completes
-**M4**.
+## Batch B1 — completed (summary)
 
-### Chunk 12 — encoding tools
+**Chunk 13 (training).** `registry.ESTIMATORS` holds the six D25 estimators. The six training
+tools are `list_estimators`, `train_estimator`, `tune_estimator`, `predict`, `predict_proba` and
+`get_model_params`.
+- The contract snapshot owns `cv_folds` and the tuning budget.
+- CV always shuffles with the injected seed.
+- Calibration is `CalibratedClassifierCV` on train, after a class-count pre-check that turns
+  sklearn's `ValueError` into a `data` failure.
+- `tune_estimator` stops at `max_fit_seconds` and returns params.
+- Predictions keep the frame's labels.
 
-The `fit_*`/`apply_*` pattern of chunk 11 carries straight across: encoders and scalers learn on
-`train`, replay on any frame. Three things chunk 11 settled that chunk 12 inherits:
+The implementation stage **stalled and was cancelled**. `n_jobs=-1` in the tuning CV started loky
+workers from a tool-body thread, the test run deadlocked, and orphaned resource trackers were left
+behind. Review fixed it and pinned it with a spy test. Review also found that the DoD mutation
+"predict uses frame column order" survived, because every test frame happened to have its columns
+in fitted order. A reordered-columns test now pins it. Valid ROC-AUC on `churn_frame` (near-random
+by construction) after tune → calibrated train: 0.51 / 0.57 / 0.58 for logistic regression,
+random forest and HistGB. The point is that the whole 10 → 11 → 12 → 13 pipeline runs.
 
-- **Fitted state as a frozen dataclass pickled as kind `transformer`**, type-checked in `apply_*`
-  (a wrong ref is `tool_param`, not an `AttributeError`). The encoder/scaler fitted objects follow
-  the same shape; `export_pipeline_script` (chunk 20) reads them without un-pickling bespoke classes.
-- **The apply-time column contract.** `apply_imputer` requires the frame's columns minus the target
-  to equal the fitted columns, with the target present or absent (D-e). An encoder faces the same
-  question *plus* a new one chunk 11 did not: an unseen **category level** at apply time (a value in
-  valid/test that train never saw). Chunk 11's report (question 7) answers from the fixtures: see the
-  completed summary below — the short version is **an unseen level must be representable, not an
-  error**, because churn's `plan`/`satisfaction` are small closed vocabularies but D15's small splits
-  make a rare level landing only in valid/test entirely plausible; a hard error would make a legal
-  split un-encodable. Prefer an explicit "unseen → zero vector / dedicated column", logged, over
-  raising.
-- **No `reset_index`, target never transformed, `json_scalar` on every summary number.** Same
-  invariants, same reasons.
-
-D34c (target encoding is cross-fitted out-of-fold on train, `apply_target_encoder` for valid/test
-only) lands here too. Nothing in chunk 12 touches `backend/` or `contracts/`.
+**Chunk 12 (encoding)** follows.
 
 
-## Chunk 11 — completed (summary)
+
+Eight encoding/scaling tools in `encoding.py`: one-hot, ordinal, target, scaler — each a
+`fit_*`/`apply_*` pair, `phase="encoding"`, fit `allow_in=["feature_engineering"]`, apply
+`allow_in=["feature_engineering", "champion_selection"]`. **Completes M4.** One import line in
+`tools/__init__.py`. Nothing under `backend/`/`contracts/` changed.
+
+**The helper move (§3.1), chunk 11 tests unedited.** `_require_columns`/`_save_frame`/`_load_fitted`
+and `_as_str` moved from `cleaning.py` to `_frame.py` as public `require_columns`/`save_frame`/
+`load_fitted`/`as_str`; `load_fitted` is now generic over an unconstrained PEP 695 `[T]`, so
+chunks 12–15 add fitted-state classes without touching a constraint tuple. `cleaning.py` changed
+only its imports and one local variable renamed (`as_str = [...]` → `mapped = [...]`) to stop it
+shadowing the newly-public `as_str`; **no chunk 11 test was edited** (65 cleaning tests green).
+
+**Only target encoding uses sklearn, and it is imported lazily.** Scaling and ordinal encoding are
+pure pandas (readable dict fitted state); target encoding cross-fits a `TargetEncoder` out-of-fold
+(D34c). sklearn pulls scipy (unpinned transitive), and `tools/__init__.py` imports every tool
+module at init, so a module-level sklearn import broke chunk 09's `test_s11_spearman_does_not_
+import_scipy` — the fix is a lazy import *inside* the two target-encoder bodies, recorded as a new
+`00_index.md` fact. First module in the project to do this; chunk 13 (sklearn estimators) will too.
+
+**Gates:** 1669 passed, 1 skipped (1670 total); **100 % line and branch** (3061 stmts, 812
+branches, 0 missed); mypy `--strict` clean on **79 files**; ruff `check` + `format --check` clean.
+`encoding.py` adds **no** `# type: ignore` (the 2 production suppressions are still only `tool.py`'s
+`__signature__` gap), **no** `Any`, **no** `pragma: no cover`, **no** `reset_index`, **no** bare
+`value_counts()`.
+
+**The leak tests are real, not passing-by-construction.** The core target-encoder test compares the
+returned train against BOTH `TargetEncoder.fit_transform` (must **equal** — out-of-fold) and
+`fit(...).transform(train)` (must **differ** — in-sample); equality alone would pass an in-sample
+implementation. The replay tests build a valid whose own statistics differ from train's (scaler
+mean 10 std 2 → valid 14 scales to exactly 2.0 using the *train* scale). The train-label guard test
+shows a frame sharing **one** label is refused, not just the whole-train frame.
+
+**Mutation evidence** (each applied, `test_tools_encoding.py` run, restored; `encoding.py` has no
+residual diff — `diff` against a backup is clean):
+
+| Mutation | Tests that failed (count) |
+|---|---|
+| `apply_onehot_encoder` relearns levels from the frame | `..._levels_learned_on_train_replayed_on_valid`, `..._unseen_and_null_counted` (2) |
+| `fit_target_encoder` uses `fit().transform()` instead of `fit_transform()` | `..._oof_equals_fit_transform_and_differs_from_insample`, `..._same_seed_same_output_different_seed_differs` (2) |
+| remove the train-label overlap check in `apply_target_encoder` | `..._on_train_frame_is_tool_param`, `..._frame_sharing_one_label_is_refused` (2) |
+| `apply_scaler` recomputes the parameters from the frame | `..._standard_learned_on_train_replayed_turns_14_into_2`, `..._int64_input_works` (2) |
+| remove the zero-spread skip in `fit_scaler` | `..._zero_spread_column_skipped_with_warning` (1) |
+| an unseen ordinal level maps to 0 instead of NaN | `..._unseen_becomes_nan_and_counted` (1) |
+
+**Report answers.**
+
+3. **Integration (`cast → split → impute → one-hot → scale` on `churn_frame`), final train columns
+and dtypes:** `customer_id: float64`, `age: float64`, `plan__basic: bool`, `plan__premium: bool`,
+`plan__standard: bool`, `signup_date: str`, `satisfaction__high: bool`, `satisfaction__low: bool`,
+`satisfaction__medium: bool`, `notes_free_text: str`, `churned: int64` (the target). Identical
+columns on train and valid; the engineered columns (`age`, the six dummies) have no nulls. The
+`signup_date`/`notes_free_text` columns remain `str` because the integration pipeline does not
+encode them (they would be dropped or feature-engineered by other node-8 tools, not these four).
+
+4. **What surprised me about `TargetEncoder`.** Two things beyond P1–P3. (a) The `<5-rows` class
+guard: `StratifiedKFold` raises a *`UserWarning`* ("least populated class has N members") **before**
+the `ValueError`, so under `-W error` the warning is what crashes first — the proactive count check
+has to fire ahead of the fit, which the spec called for and the probe confirmed. (b) `classes_`
+holds `np.str_`, not builtin `str`, so the multiclass output names need an explicit `str(c)` or the
+column labels carry numpy scalars. Also, `fit_transform` genuinely differs row-by-row from
+`fit().transform()` even for a 2-level feature — the OOF values are *not* a reordering of the
+in-sample ones, so the equal/differ pair of assertions is a strong, non-vacuous test.
+
+5. **For chunk 13 — dtypes the encoders output that sklearn might reject or misread.** The outputs
+are deliberately sklearn-safe: one-hot dummies are **plain `bool`** (not nullable `boolean`), the
+scaler and ordinal/target encoders emit **`float64`** — all three go straight into a numpy array an
+estimator accepts. The two risks chunk 13 should watch are *inputs that reach an estimator unencoded*,
+not these outputs: (i) a **nullable `Int64`** feature left unscaled/unencoded — sklearn's estimators
+reject pandas NA and need it cast to `float64` first (chunk 11's P1 is the same hazard on the clip
+path); (ii) an **ordered `Categorical`** (from `cast_dtypes`) passed to an estimator directly —
+sklearn treats category codes positionally and would misread the order unless it is ordinal-encoded
+to `float64` first. The ordinal encoder's `float64` NaN for an unseen level also means chunk 13 must
+impute after encoding if a model cannot take NaN. None of the chunk-12 outputs themselves are
+`boolean`/`Categorical`/`Int64`, so no encoder output needs guarding — only un-encoded passthrough
+columns do.
+
+
+
 
 Ten cleaning tools in `cleaning.py`: pre-split (`drop_duplicate_rows`, `drop_high_missing_rows`,
 `cast_dtypes`), decide-on-train (`drop_constant_columns`, `drop_high_missing_columns`, `fit_imputer`,

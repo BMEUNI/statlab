@@ -1,8 +1,29 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 12]
-completion_date:
+completion_date: 2026-10-01
 implementation_notes: |
+  `registry.ESTIMATORS` (the six D25 estimators as frozen `EstimatorEntry` rows with a
+  `(seed, class_weight)` factory) and six tools in `tools/training.py`. sklearn is imported
+  lazily inside the bodies, as in chunk 12, so `tools/__init__` stays scipy-free. The contract
+  snapshot supplies `cv_folds` and `max_fit_seconds`; `tune_estimator` is a manual
+  `ParameterGrid` loop over `cross_val_score` that stops at the budget and returns params, not a
+  model. 58 tests in `test_tools_training.py` and `test_registry.py`.
+
+  The implementation stage stalled for an hour and was cancelled by the idle deadline. Root
+  cause: `cross_val_score(..., n_jobs=-1)` in the tuning loop started loky worker processes from
+  a tool-body thread, and the test run deadlocked, leaving orphaned resource-tracker processes.
+  This also breaks D17 (`n_jobs=1` everywhere). The reviewer fixed it to `n_jobs=1` and added
+  `test_tuning_cv_is_single_threaded`, which spies on every `cross_val_score` call; `n_jobs=2`
+  fails it. Two more review tests:
+  - `test_predict_is_independent_of_frame_column_order`: the DoD mutation "predict uses frame
+    column order" survived the original suite, because every test frame had its columns in fitted
+    order;
+  - `test_tune_best_params_is_the_argmax_of_results`, for a greater- and a lower-is-better
+    metric.
+  All seven DoD mutations now fail at least one test. Housekeeping was done by the reviewer.
+  Gates: 1729 tests (1728 passed, 1 skipped), 100 % line and branch (3405 stmts, 886 branches),
+  mypy clean on 83 files, ruff clean, suite 27 s.
 ---
 
 # Chunk 13 — Training tools

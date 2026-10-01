@@ -34,15 +34,23 @@ from typing import Annotated, Final, Literal, cast
 
 import pandas as pd
 from pydantic import Field, JsonValue
-from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
+from statlab_contracts.artifacts import ArtifactRef, new_artifact_ref
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import ColumnRole, ImputationStrategy
 
-from statlab_tools.artifacts import load_dataframe, load_model, save_dataframe, save_model
+from statlab_tools.artifacts import load_dataframe, save_model
 from statlab_tools.tool import ToolParamError, tool
-from statlab_tools.tools._frame import is_numeric_column, json_list, json_scalar
+from statlab_tools.tools._frame import (
+    as_str,
+    is_numeric_column,
+    json_list,
+    json_scalar,
+    load_fitted,
+    require_columns,
+    save_frame,
+)
 
 IQR_FENCE: Final = 1.5
 """Tukey's fence multiplier for `clip_iqr`/`flag_only` bounds: Q1 - 1.5*IQR, Q3 + 1.5*IQR.
@@ -112,22 +120,6 @@ class FittedClipper:
 # --- shared helpers ------------------------------------------------------------------------------
 
 
-def _require_columns(frame: pd.DataFrame, names: tuple[str, ...], field: str) -> None:
-    """A column name not in `frame` is `tool_param`, naming the missing ones under `field`."""
-    missing = [name for name in names if name not in frame.columns]
-    if missing:
-        raise ToolParamError(
-            f"columns {missing!r} are not in the frame",
-            field_errors={field: f"not columns in the frame: {missing!r}"},
-        )
-
-
-def _save_frame(paths: RunPaths, frame: pd.DataFrame, label: str) -> ArtifactMeta:
-    """Mint a ref and save `frame` as kind `dataframe` with `label`."""
-    ref = new_artifact_ref()
-    return save_dataframe(paths.artifact(ref, "dataframe"), frame, ref=ref, label=label)
-
-
 def _is_datetime_column(series: pd.Series) -> bool:
     return bool(pd.api.types.is_datetime64_any_dtype(series))
 
@@ -166,7 +158,7 @@ def drop_duplicate_rows(
     """
     data = load_dataframe(paths.artifact(frame, "dataframe"))
     if subset is not None:
-        _require_columns(data, subset, "subset")
+        require_columns(data, subset, "subset")
     rows_before = len(data)
     reduced = data.drop_duplicates(
         subset=list(subset) if subset is not None else None, keep="first"
@@ -176,7 +168,7 @@ def drop_duplicate_rows(
         "rows_dropped": json_scalar(rows_before - len(reduced)),
         "subset": json_list(subset) if subset is not None else None,
     }
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, reduced, "deduplicated"),))
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, reduced, "deduplicated"),))
 
 
 @tool(phase="cleaning", allow_in=["data_splitting"])
@@ -201,7 +193,7 @@ def drop_high_missing_rows(
         "threshold": json_scalar(threshold),
     }
     return ToolSuccess(
-        summary=summary, artifacts=(_save_frame(paths, reduced, "sparse_rows_dropped"),)
+        summary=summary, artifacts=(save_frame(paths, reduced, "sparse_rows_dropped"),)
     )
 
 
@@ -211,25 +203,12 @@ def _cast_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
-def _as_str(series: pd.Series) -> pd.Series:
-    """Stringify, routing an all-integral numeric column through `Int64` first (P3), so `2.0`
-    becomes `"2"`, not `"2.0"`; NaN stays NaN. Shared by every cast that compares string forms
-    (categorical/text, ordinal levels, boolean tokens): integer-coded columns with a null load as
-    `float64`, so without the Int64 route every such value stringifies as `"1.0"` and silently
-    falls outside the levels/token map."""
-    if is_numeric_column(series):
-        non_null = series.dropna()
-        if len(non_null) > 0 and bool((non_null == non_null.round()).all()):
-            return series.astype("Int64").astype("str")
-    return series.astype("str")
-
-
 def _cast_string(series: pd.Series) -> pd.Series:
     """To `str` dtype. A numeric column whose non-null values are all integral routes through
     `Int64` first (P3), so `2.0` becomes `"2"`, not `"2.0"`, and NaN stays NaN."""
     if _is_str_column(series):
         return series
-    return _as_str(series)
+    return as_str(series)
 
 
 def _cast_ordinal(
@@ -242,7 +221,7 @@ def _cast_ordinal(
             f"{column!r} has role ordinal but no ordinal_levels declared; unchanged"
         )
         return series
-    # _as_str(series) gives the string form each value compares as (integral floats via Int64,
+    # as_str(series) gives the string form each value compares as (integral floats via Int64,
     # P3, so a float64-coded 1.0 reads as "1", matching a declared level "1" instead of "1.0").
     # A present value whose string form is a declared level is kept; a null or an out-of-level
     # value becomes None. pandas 3.0 raises a Pandas4Warning (-> error under -W error) when a
@@ -250,10 +229,10 @@ def _cast_ordinal(
     # old silent out-of-category -> NaN coercion is deprecated -- so the mapping to None must
     # happen here, before construction, not be left to the constructor. Not in P1-P7.
     allowed = set(levels)
-    stringified = _as_str(series)
-    as_str = [s if (not pd.isna(s) and s in allowed) else None for s in stringified]
+    stringified = as_str(series)
+    mapped = [s if (not pd.isna(s) and s in allowed) else None for s in stringified]
     return pd.Series(
-        pd.Categorical(as_str, categories=list(levels), ordered=True), index=series.index
+        pd.Categorical(mapped, categories=list(levels), ordered=True), index=series.index
     )
 
 
@@ -270,7 +249,7 @@ def _cast_datetime(series: pd.Series, warnings_out: list[str], column: str) -> p
 def _cast_boolean(series: pd.Series) -> pd.Series:
     if pd.api.types.is_bool_dtype(series):
         return series
-    lowered = _as_str(series).str.strip().str.lower()
+    lowered = as_str(series).str.strip().str.lower()
     mapped = pd.Series(pd.NA, index=series.index, dtype="boolean")
     mapped[lowered.isin(_BOOLEAN_TRUE)] = True
     mapped[lowered.isin(_BOOLEAN_FALSE)] = False
@@ -381,7 +360,7 @@ def cast_dtypes(
     summary: dict[str, JsonValue] = {"columns": columns_summary}
     return ToolSuccess(
         summary=summary,
-        artifacts=(_save_frame(paths, data, "typed"),),
+        artifacts=(save_frame(paths, data, "typed"),),
         warnings=tuple(warnings_out),
     )
 
@@ -407,7 +386,7 @@ def drop_constant_columns(paths: RunPaths, train: _Train, target: _Target) -> To
     dropped = [col for col in _feature_columns(data, target) if data[col].nunique(dropna=True) <= 1]
     reduced = data.drop(columns=dropped)
     summary: dict[str, JsonValue] = {"dropped_columns": json_list(dropped)}
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, reduced, "columns_dropped"),))
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, reduced, "columns_dropped"),))
 
 
 @tool(phase="cleaning", allow_in=["preprocessing"])
@@ -432,7 +411,7 @@ def drop_high_missing_columns(
         "dropped_columns": json_list(dropped),
         "null_share": {str(col): json_scalar(null_shares[col]) for col in dropped},
     }
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, reduced, "columns_dropped"),))
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, reduced, "columns_dropped"),))
 
 
 def _imputable_by_statistic(series: pd.Series) -> bool:
@@ -574,7 +553,7 @@ def fit_outlier_clipper(
     """
     data = load_dataframe(paths.artifact(train, "dataframe"))
     if columns is not None:
-        _require_columns(data, columns, "columns")
+        require_columns(data, columns, "columns")
         bad = [col for col in columns if col == target or not is_numeric_column(data[col])]
         if bad:
             raise ToolParamError(
@@ -639,24 +618,10 @@ def drop_columns(
     `dropped_columns` here on valid and test. An unknown column is an error.
     """
     data = load_dataframe(paths.artifact(frame, "dataframe"))
-    _require_columns(data, columns, "columns")
+    require_columns(data, columns, "columns")
     reduced = data.drop(columns=list(columns))
     summary: dict[str, JsonValue] = {"dropped_columns": json_list(columns)}
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, reduced, "columns_dropped"),))
-
-
-def _load_fitted[F: (FittedImputer, FittedClipper)](
-    paths: RunPaths, ref: ArtifactRef, expected: type[F], field: str
-) -> F:
-    """Load a fitted transformer and check its type. A wrong ref fails as `tool_param`, not an
-    `AttributeError` deep in apply (D-d)."""
-    obj = load_model(paths.artifact(ref, "transformer"))
-    if not isinstance(obj, expected):
-        raise ToolParamError(
-            f"{field} is a {type(obj).__name__}, not a {expected.__name__}",
-            field_errors={field: f"expected a {expected.__name__}"},
-        )
-    return obj
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, reduced, "columns_dropped"),))
 
 
 def _check_fitted_columns(
@@ -685,7 +650,7 @@ def apply_imputer(
     fills come only from the imputer (learned on train) -- nothing is recomputed from this frame,
     which is what keeps the fit leak-free. Works whether the target is present or absent (D-e).
     """
-    fitted = _load_fitted(paths, imputer, FittedImputer, "imputer")
+    fitted = load_fitted(paths, imputer, FittedImputer, "imputer")
     data = load_dataframe(paths.artifact(frame, "dataframe"))
     _check_fitted_columns(data, fitted.columns, fitted.target)
 
@@ -704,7 +669,7 @@ def apply_imputer(
         data = data.drop(columns=[col for col in fitted.dropped if col in data.columns])
 
     summary: dict[str, JsonValue] = {"filled": filled}
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, data, "imputed"),))
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, data, "imputed"),))
 
 
 @tool(phase="cleaning", allow_in=_APPLY_PHASES)
@@ -722,9 +687,9 @@ def apply_outlier_clipper(
     adds a plain-`bool` `{col}__outlier` column (a null is flagged False) and leaves values
     unchanged. Works whether the target is present or absent (D-e).
     """
-    fitted = _load_fitted(paths, clipper, FittedClipper, "clipper")
+    fitted = load_fitted(paths, clipper, FittedClipper, "clipper")
     data = load_dataframe(paths.artifact(frame, "dataframe"))
-    _require_columns(data, tuple(fitted.bounds), "frame")
+    require_columns(data, tuple(fitted.bounds), "frame")
 
     if fitted.method == "flag_only":
         collisions = [
@@ -756,4 +721,4 @@ def apply_outlier_clipper(
 
     label = "outliers_flagged" if fitted.method == "flag_only" else "clipped"
     summary: dict[str, JsonValue] = {"affected": affected}
-    return ToolSuccess(summary=summary, artifacts=(_save_frame(paths, data, label),))
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, data, label),))
