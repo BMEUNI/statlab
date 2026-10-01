@@ -6,8 +6,8 @@ datetimes default to `datetime64[us]`. Neither matters for this module's own cod
 does no dtype inspection or comparison — parquet round-trips all seven tested dtypes (`str`,
 `category`, `int64`, `float64`, `bool`, `datetime64[us]`, `Int64`) unchanged, measured before
 writing this module. Exception found in chunk 10's review: an integer-valued `category` reads
-back as `int64`; string-valued categories survive (`00_index.md`, pandas 3.0 block). No dtype preservation or restoration logic is added because none is
-needed; see test A1.
+back as `int64`; string-valued categories survive (`00_index.md`, pandas 3.0 block). No dtype
+preservation or restoration logic is added because none is needed; see test A1.
 
 No atomic temp-file-then-`os.replace` write. Every tool call mints a fresh artifact id, so a
 truncated file from a crashed tool call is never registered and never read — its id never
