@@ -313,17 +313,50 @@ def test_list_artifacts_mixed_kinds_in_one_run(run_paths: RunPaths) -> None:
     assert kinds == {"dataframe", expected_joblib_guess}
 
 
-def test_describe_artifact_table_kind_raises_not_yet_supported(run_paths: RunPaths) -> None:
-    """`table` is JSON, not a frame -- `describe_artifact` only supports frame-shaped kinds
-    today (`dataframe`/`predictions`); anything else is `ToolDataError`, not a crash."""
+def test_describe_artifact_table_kind_reports_top_level_structure(run_paths: RunPaths) -> None:
+    """`table`/`curve` are JSON. The walking-skeleton gate (chunk 16) describes the comparison
+    *table* at node 13, so `describe_artifact` summarises a JSON payload's top-level structure:
+    its keys and the length of any list-valued entry. Values are not reconstructed -- only shape
+    is reported (PLAN.md §3.1)."""
     from statlab_contracts.artifacts import ArtifactRef
     from statlab_tools.artifacts import save_json
 
     ref = ArtifactRef("a_0000000000000022")
     path = run_paths.artifact(ref, "table")
-    save_json(path, {"coef": 1.0}, ref=ref, kind="table")
-    with pytest.raises(ToolDataError, match="table"):
-        describe_artifact(run_paths, ref, "table")
+    save_json(
+        path, {"metric": "roc_auc", "ranking": [{"rank": 1}, {"rank": 2}]}, ref=ref, kind="table"
+    )
+    result = describe_artifact(run_paths, ref, "table")
+    assert result.summary["shape"] == "object"
+    assert result.summary["keys"] == ["metric", "ranking"]
+    assert result.summary["list_lengths"] == {"ranking": 2}
+
+
+def test_describe_artifact_curve_kind_bare_list_reports_length(run_paths: RunPaths) -> None:
+    """A `curve` whose JSON payload is a bare array reports `shape="array"` and its length."""
+    from statlab_contracts.artifacts import ArtifactRef
+    from statlab_tools.artifacts import save_json
+
+    ref = ArtifactRef("a_000000000000002a")
+    path = run_paths.artifact(ref, "curve")
+    save_json(path, [0.1, 0.2, 0.3], ref=ref, kind="curve")
+    result = describe_artifact(run_paths, ref, "curve")
+    assert result.summary["shape"] == "array"
+    assert result.summary["length"] == 3
+
+
+def test_describe_artifact_table_scalar_payload_reports_value(run_paths: RunPaths) -> None:
+    """A JSON payload that is a bare scalar reports `shape="scalar"` and the value -- the third
+    branch of the JSON describer."""
+    from statlab_contracts.artifacts import ArtifactRef
+    from statlab_tools.artifacts import save_json
+
+    ref = ArtifactRef("a_000000000000002b")
+    path = run_paths.artifact(ref, "table")
+    save_json(path, 42, ref=ref, kind="table")
+    result = describe_artifact(run_paths, ref, "table")
+    assert result.summary["shape"] == "scalar"
+    assert result.summary["value"] == 42
 
 
 def test_describe_artifact_plot_kind_raises_not_yet_supported(run_paths: RunPaths) -> None:

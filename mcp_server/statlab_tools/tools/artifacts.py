@@ -13,9 +13,9 @@ from statlab_contracts.artifacts import ArtifactKind, ArtifactRef
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import EXTENSION_FOR_KIND, RunPaths
 
-from statlab_tools.artifacts import load_dataframe
+from statlab_tools.artifacts import load_dataframe, load_json
 from statlab_tools.tool import ToolDataError, tool
-from statlab_tools.tools._frame import json_scalar
+from statlab_tools.tools._frame import json_list, json_scalar
 
 _KIND_FOR_EXTENSION: dict[str, str] = {}
 for _kind, _ext in EXTENSION_FOR_KIND.items():
@@ -65,11 +65,21 @@ def describe_artifact(
         int, Field(description="Number of leading rows to include for a frame.", ge=1, le=100)
     ] = 10,
 ) -> ToolSuccess:
-    """Describe an artifact: shape, dtypes, and the first rows for a frame.
+    """Describe an artifact: shape, dtypes and the first rows for a frame; top-level structure
+    for a JSON `table`/`curve`.
 
-    Reads the filesystem, not the artifact registry -- the MCP server has no database access.
+    Reads the filesystem, not the artifact registry -- the MCP server has no database access. A
+    `table`/`curve` is JSON: the walking-skeleton gate (chunk 16) drives `describe_artifact` over
+    the comparison *table* at node 13, so a JSON kind reports its top-level keys and, for a dict
+    whose value is a list (a `ranking` or `terms` block), that list's length -- enough to reason
+    about shape without reconstructing the payload (PLAN.md §3.1). The binary kinds
+    (`transformer`/`model`/`inferential_fit`/`plot`/`report`) have no frame or JSON shape to
+    summarise and stay unsupported.
     """
     path = paths.artifact(artifact, kind)
+    if kind in ("table", "curve"):
+        payload = load_json(path)
+        return _describe_json(payload)
     if kind not in ("dataframe", "predictions"):
         raise ToolDataError(f"describe_artifact does not yet support kind {kind!r}")
     frame = load_dataframe(path)
@@ -92,3 +102,21 @@ def describe_artifact(
             "head": head,
         }
     )
+
+
+def _describe_json(payload: JsonValue) -> ToolSuccess:
+    """Summarise a JSON `table`/`curve` by its top-level structure: for a dict, its keys and the
+    length of any list-valued entry (a `ranking`/`terms` block); for a bare list, its length.
+    Values themselves are not reconstructed -- only shape is reported (PLAN.md §3.1)."""
+    if isinstance(payload, dict):
+        lengths: dict[str, JsonValue] = {
+            key: json_scalar(len(value))
+            for key, value in payload.items()
+            if isinstance(value, list)
+        }
+        return ToolSuccess(
+            summary={"shape": "object", "keys": json_list(sorted(payload)), "list_lengths": lengths}
+        )
+    if isinstance(payload, list):
+        return ToolSuccess(summary={"shape": "array", "length": json_scalar(len(payload))})
+    return ToolSuccess(summary={"shape": "scalar", "value": json_scalar(payload)})

@@ -212,7 +212,7 @@ far had 2–4 defects caught in review, so the review is not reduced, only share
 |---|---|---|
 | B1 | 12 encoding + 13 training | M4 |
 | B2 | 14 evaluation + 15 inference | M5 ✅ |
-| B3 | 16 walking-skeleton gate (alone: it is the gate) | M6 |
+| B3 | 16 walking-skeleton gate (alone: it is the gate) | M6 ✅ |
 | B4 | 17 features + 18 interpretation | M7a |
 | B5 | 19 champion/reporting + 20 reproducibility | M7b |
 | B6 | 21 mcp_client + 25 llm_client (independent) | |
@@ -254,7 +254,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 13 | [`13_tools_training.md`](./13_tools_training.md) — `ESTIMATORS` registry (6 estimators, D25), `train_estimator` (calibration by CV on train, D34b), `tune_estimator` (CV within train, `max_fit_seconds` enforced in the body, D34a/D36c), `predict`, `predict_proba`; explicit `seed`, `n_jobs=1` (D34e) | completed | 07, 12 |
 | 14 | [`14_tools_evaluation.md`](./14_tools_evaluation.md) — 11 tools **plus `rank_models` and `compare_models`** (pulled forward so the chunk 16 gate is self-contained). Every `score_*` reports a bootstrap 95 % CI (D33b) | completed | 07, 13 |
 | 15 | [`15_tools_inference.md`](./15_tools_inference.md) — `SPECS` registry, `build_dummy_matrix`, `assemble_inference_matrix`, statsmodels fits incl. Poisson GLM for count targets, coefficient table with confirmatory/exploratory labels and Holm adjustment (D35), VIF, residual/influence tests + known-answer test. **Moved before the skeleton gate** (review 2026-10-01): the skeleton fits an inferential model | completed | 07, 12 |
-| 16 | `16_skeleton_integration.md` — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | untouched | 08–15 |
+| 16 | [`16_skeleton_integration.md`](./16_skeleton_integration.md) — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | completed | 08–15 |
 | 17 | `17_tools_features.md` — 6 feature-construction and selection tools | untouched | 07, 12 |
 | 18 | `18_tools_interpretation.md` — permutation importance, PDP compute + render, coefficient importance, error analysis | untouched | 07, 13, 14 |
 | 19 | `19_tools_champion_reporting.md` — `select_champion`, `render_metrics_table`, `assemble_report` | untouched | 14, 15, 18 |
@@ -264,7 +264,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, injection of `project`/`run`/`dataset`/`seed` (split tools' `seed` comes from `split.seed`, every other tool's from `constraints.random_seed`), recording the split tool's `test_fingerprint` via `set_test_fingerprint`, **a parameter named `train` never receives a test-derived artifact** (covers every `fit_*` and the train-only deciders of chunk 11), **test-set lineage lock** (D32a–b: `derived_from_test` propagation, rooted at a split tool's output with `meta.split == "test"`; `verify_split` is the one pre-node-12 tool allowed a test input, `fit_*` never on test-derived, transform-only flow in node 12, one `score_*` via `test_scored_at`), error mapping. | untouched | 02, 05, 06, 07 |
+| 21 | `21_mcp_client.md` — tool discovery + schema cache, allow-list enforcement (D12), `ArtifactRef` resolution, injection of `project`/`run`/`dataset`/`seed` (split tools' `seed` comes from `split.seed`, every other tool's from `constraints.random_seed`), recording the split tool's `test_fingerprint` via `set_test_fingerprint`, **a parameter named `train` never receives a test-derived artifact** (covers every `fit_*` and the train-only deciders of chunk 11), **test-set lineage lock** (D32a–b: `derived_from_test` propagation, rooted at a split tool's output with `meta.split == "test"`; `verify_split` is the one pre-node-12 tool allowed a test input, `fit_*` never on test-derived, transform-only flow in node 12, one `score_*` via `test_scored_at`; the `fit_*`/`train` clause and the one-score count hold in **every** node, and after node 12 read-only tools such as `describe_artifact` may receive test-derived refs (chunk 16 review)), error mapping. **Acceptance:** `tests/test_skeleton.py` re-driven through `mcp_client`, with the driver's injection and rule checks deleted in favour of the client's. | untouched | 02, 05, 06, 07 |
 | 22 | `22_graph_engine_core.md` — `RunState`, checkpointer, event bus with monotonic `seq` → `events.jsonl`, declared `NodeSpec` spine traversal, shared-node sequential execution. If the spec exceeds ~200 tests, split checkpointer/event bus from traversal | untouched | 02, 04, 05, 06, 21 |
 | 23 | `23_restart_reconciliation.md` — boot-time status scan, node-boundary resume, interrupted-run marking (§5.1) | untouched | 22 |
 | 24 | `24_candidate_fanout.md` — parallel candidate execution, shared-split guarantee, test-lock integration, budget caps, search waves, pause/cancel at tool-call boundaries (D36c) | untouched | 06, 21, 22 |

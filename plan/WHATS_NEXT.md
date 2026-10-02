@@ -11,18 +11,19 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**15 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Batch B2 (chunks 14 + 15) complete; batch B3 (chunk 16, the walking-skeleton gate) next.
+**16 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Batch B3 (chunk 16, the walking-skeleton gate) complete — **M6 passed**; batch B4 (chunks
+17 + 18) next.
 
-| Verified 2026-10-01, after batch B2 (chunks 14 + 15, incl. review corrections) | |
+| Verified 2026-10-02, after batch B3 (chunk 16, the walking-skeleton gate) | |
 |---|---|
-| Tests | 1898 (1897 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 44 s |
-| Coverage | 100 % line **and** branch (4444 stmts, 1122 branches, 0 missed) |
-| mypy | `--strict` clean on 90 source files, `init_typed = true` |
+| Tests | 1919 (1918 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 44 s |
+| Coverage | 100 % line **and** branch (4454 stmts, 1128 branches, 0 missed) |
+| mypy | `--strict` clean on 91 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B2 added **zero** |
-| Git | local `master`, batch B2 committed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B3 added **zero** |
+| Git | local `master`, batch B3 committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -37,6 +38,10 @@ frame with different statistics; the target encoder is out-of-fold and refuses t
 **M5** (chunks 14 + 15) — every `score_*` carries a seeded bootstrap CI and `rank_models` applies
 the contract's constraints; the inferential track fits OLS/Logit/GLM, reproduces the NIST Longley
 certified coefficients, and labels confirmatory vs exploratory with Holm correction (D35).
+**M6** (chunk 16) — the 33-tool walking skeleton runs end to end over a real MCP session, zero
+LLM, on a classification *and* a regression fixture, reproducing the probe's numbers to the
+printed precision; the test enforces chunk 21's allow-list and D32 lineage rules on itself and
+scores the champion on test exactly once.
 
 ---
 
@@ -315,10 +320,11 @@ Things discovered while implementing that no spec would think to state:
 
 ## Corrections so far, and the patterns in them
 
-Twenty-two defects, plus one methodology review (17). Rows 14–17 came from the full review of
+Twenty-three defects, plus one methodology review (17). Rows 14–17 came from the full review of
 2026-10-01; their fixes are in `PLAN.md` D32–D36 and `REVISIONS_IMPLEMENTED.md`. Rows 18–19 are two
 defects in my *own* 09r revision text and its first implementation, caught in review before 09r was
-accepted. Rows 20–21 came from batch B1's review. Row 22 came from batch B2's review. Defects caught in chunk 10/11 reviews
+accepted. Rows 20–21 came from batch B1's review. Row 22 came from batch B2's review. Row 23 was
+found by the batch B3 walking-skeleton gate itself. Defects caught in chunk 10/11 reviews
 are recorded in those chunks' addenda (§6), not here. Of rows 1–13, seven were mine (chunks 01–07); four more were caught during
 chunk 08/09's own implementation and belong to those chunks (the `\Z`/`\z` regex-engine mismatch,
 the `LookupError` gap, the vacuous-empty-comparison bug, chunk 07's T23 regex false-positiving on
@@ -352,6 +358,7 @@ loop working.
 | 20 | Chunk 13's tuning CV used `n_jobs=-1`: it broke D17 and deadlocked the test run (loky workers started from a tool-body thread), stalling the implementation stage for an hour | Pin resource rules with a spy test, not a comment. Nothing in a tool body may spawn workers (`00_index.md`, sklearn block) |
 | 21 | Chunk 13's "predict uses frame column order" mutation survived: every test frame had its columns in fitted order | A mutation that survives means the tests share an accidental property. Vary it (here, reorder the columns) |
 | 22 | Class labels and levels were stringified two ways (`str()` vs `as_str`), breaking scoring of float-coded targets, one-hot of float-coded columns, and silently replacing an unmatched contract positive_class | One scalar helper, `as_str_scalar` (agrees with `as_str` element-for-element); never a silent default — an unmatched contract positive_class is a `ToolDataError` |
+| 23 | `describe_artifact` could not describe the comparison **table** the §3.3 skeleton drives it over at node 13: it supported only frame kinds (`dataframe`/`predictions`) and returned a `ToolDataError` for a `table`, pinned by a test whose own docstring called the gap temporary ("today", "does not yet support"). Found by the chunk-16 gate, not a review | `_describe_json` added in `tools/artifacts.py` (no `backend/`/`contracts/`, no D-decision): a JSON `table`/`curve` is summarised by top-level keys and list lengths. The pinned test was rewritten to assert the new behaviour, proven revert → fail → restore |
 | — | *My* §8.1 instruction to use the "public" `create_mcp_http_client` path | Reverted by the agent: `mypy --strict`'s `no_implicit_reexport` rejects it, and the underscore module's `__all__` is the one that exports the symbol |
 
 **1–3 share a shape:** adding a mechanism that *reads* as rigour — an extra flag, field, or rule —
@@ -388,19 +395,78 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B3 (chunk 16 alone — the walking-skeleton gate)
+## Next: batch B4 (chunks 17 features + 18 interpretation)
 
-Chunk 16 is a batch of one because it **is** the integration gate (`00_index.md`, "Execution
-batches"): the ~33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a
-classification **and** a regression fixture. Every tool it needs now exists — intake, profiling,
-splitting, cleaning, encoding, training, evaluation, champion, and (as of B2) inference.
+Batch B3 (the walking-skeleton gate) is green, so the architecture is proven end to end. B4 adds
+the remaining node-7/8 feature and interpretation tools:
 
-- The skeleton's inference leg is now unblocked: node 6 runs
-  `assemble_inference_matrix(train, valid)` → one of `fit_ols`/`fit_logit`/`fit_glm` (chosen by
-  `target.type` via `SPECS`) → `coefficient_table` → the diagnostics. The exact node-6 sequence
-  for the regression fixture is in the chunk 15 report.
-- Treat 16 as the moment the architecture is proven or found wrong, not an ordinary chunk. If a
-  tool's contract is subtly off, the end-to-end run is where it surfaces.
+- **Chunk 17** — 6 feature-construction and selection tools.
+- **Chunk 18** — permutation importance, PDP compute + render, coefficient importance, error
+  analysis.
+
+Both are ordinary tool chunks against the chunk-07 decorator; neither is a gate. The skeleton now
+exercises the full predictive + inferential spine, so a new tool that misbehaves will show up in
+its own tests, not only at an integration gate.
+
+## Batch B3 — completed (summary)
+
+One chunk, one review cycle: chunk 16, the walking-skeleton gate. **M6 passed.** The 33 `[v1]`
+tools (PLAN.md §6.4) are driven end to end over a real MCP session, zero LLM, on a classification
+fixture (`subscribers`, 400 rows) and a regression fixture (`houses`, 300 rows), three estimators
+each. The gate is one test module (`tests/test_skeleton.py`) that plays the orchestrator and
+enforces chunk 21's two rules — the allow-list and the D32 lineage lock — on itself before every
+call, exactly where chunk 21 will. No production module was added for the gate itself.
+
+Gates after B3: **1913 passed, 1 skipped** (1914 total); **100 % line and branch** (4454 stmts,
+1128 branches, 0 missed); mypy `--strict` clean on **91 source files**; ruff `check` +
+`format --check` clean; suite ≈ 44 s; `test_skeleton.py` ≈ 8 s (classification 4.29 s, regression
+1.06 s). B3 added **zero** `Any`, **zero** `pragma: no cover`, **zero** new `# type: ignore`.
+
+**The wire run reproduces the §1 probe numbers to the printed precision.** Classification: valid
+`roc_auc` logistic 0.8125 [0.720, 0.888], RF 0.722, HGB 0.716; `top_two_distinguishable` false;
+champion logistic, test `roc_auc` 0.730; inference `n_obs` 320 (train 240 + valid 80); planted
+`tenure_months` −0.0547, `plan__premium` −1.96, `plan__standard` −0.705, each inside §1's CI; the
+`plan` goal is a joint Wald test df 2, p ≈ 0, rejected; the `region` goal df 3, p 0.510, not
+rejected. Regression: valid `rmse` linear 15.42 [13.01, 17.88], HGB 17.08, RF 17.52; champion
+linear, test `rmse` 13.64 (`r2` 0.949); `n_obs` 240 (train 180 + valid 60); planted
+`neighbourhood__centre` +37.7 ∈ [33.32, 42.09], `neighbourhood__rural` −25.9, `rooms` +8.24, each
+inside §1's CI; `neighbourhood` goal df 2 p ≈ 0 rejected, `condition` goal df 2 p 0.975 not
+rejected. `area_m2`'s CI [1.120, 1.200] is on the edge of its true 1.2, so §1 does not assert it
+and neither does the gate.
+
+**All six §5 DoD mutations were caught** (each replaced exactly one string, the affected
+`test_skeleton.py` tests run, originals restored; `git diff --stat` afterwards showed only the
+intended files): apply the imputer to test in `preprocessing` → the lineage guard fires; score the
+champion on test twice → the exactly-once check fires; call `fit_scaler` in `preprocessing` → the
+allow-list fires; `predict_proba` reversed class order → the real-metrics floor (valid roc_auc ≥
+0.65) fails; `assemble_inference_matrix` ignores `valid` → `n_obs` ≠ train + valid; `compare_models`
+sorts `roc_auc` ascending → the ranking-direction assertion fails.
+
+**The gate found exactly one defect, fixed at root cause.** §3.3's `artifact_persistence` node
+calls `describe_artifact` on the comparison *table*, but `describe_artifact` only supported frame
+kinds (`dataframe`/`predictions`) and returned a `ToolDataError` for a `table`, pinned by
+`test_describe_artifact_table_kind_raises_not_yet_supported`. Its docstring and that test both
+framed the limitation as temporary ("today", "does not yet support"), so this is a defect the gate
+found rather than a design decision: it was fixed in `mcp_server/statlab_tools/tools/artifacts.py`
+(no `backend/`/`contracts/` change, no D-decision) by adding a minimal `_describe_json` that
+summarises a JSON `table`/`curve` by its top-level keys and the length of any list-valued entry.
+The pinned regression test was rewritten to assert the new behaviour and proven by revert → fail →
+restore (the three new JSON-describe tests fail on the pre-fix production code). No `allow_in` was
+widened, no `check_lineage` relaxed, no tool body called directly, and no spine step skipped — the
+single conflict surfaced and was fixed where it lived, which is the gate working as designed. See
+the corrections table, row 23.
+
+**For chunk 21 — argument shapes that were awkward over the wire.** (1) `coefficient_table`'s term
+coefficients and CIs are only in the `table` artifact's JSON payload, not in the tool's `summary`
+(which carries the goal rows and counts), so the gate reads them off disk; the client will need the
+same read, or `describe_artifact` could be extended to surface a table's rows. (2) `list_estimators`
+is the one spine tool with `needs_run=False`, so it has no `project`/`run`/`seed` in its schema —
+the driver keys injection strictly on each tool's served `inputSchema` properties, never on a
+hardcoded list, which is the shape chunk 21 must copy. (3) Split outputs must be told apart by
+`ArtifactMeta.split` and the inference matrix/manifest by `label`, never by artifact position; the
+wire preserves both. (4) `goals` crosses the wire as a list of `InferenceGoal` objects (dicts), and
+`candidates`/`estimators` as `{label: ...}` dicts — the lineage walk recurses into dict values so a
+test-derived ref hidden in such a dict is still caught.
 ## Batch B2 — completed (summary)
 
 Two chunks, one review cycle: chunk 14 (evaluation + champion) and chunk 15 (inference). Together

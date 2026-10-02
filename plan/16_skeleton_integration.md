@@ -1,6 +1,29 @@
 ---
-status: untouched
+status: completed
 dependencies: [08, 09, 10, 11, 12, 13, 14, 15]
+completion_date: 2026-10-02
+implementation_notes: >
+  M6 passed. The 33-tool walking skeleton runs end to end over a real MCP session, zero LLM, on
+  both fixtures, and reproduces every §1 number to the printed precision (classification: valid
+  roc_auc logistic 0.8125 [0.720, 0.888], RF 0.722, HGB 0.716; champion logistic test 0.730;
+  n_obs 320; planted tenure -0.0547, plan premium -1.96, plan standard -0.705, all inside §1's
+  CIs; plan goal df 2 reject, region goal df 3 p 0.510 not rejected. Regression: valid rmse
+  linear 15.42 [13.01, 17.88], HGB 17.08, RF 17.52; champion linear test 13.64, r2 0.949;
+  n_obs 240; planted centre +37.7 ∈ [33.32, 42.09], rural -25.9, rooms +8.24, all inside §1's
+  CIs; neighbourhood goal df 2 reject, condition goal df 2 p 0.975 not rejected).
+  Gates: 1913 passed, 1 skipped; 100% line and branch (4454 stmts, 1128 branches, 0 missed);
+  mypy --strict clean on 91 files; ruff check + format clean; filterwarnings=error, zero new
+  suppressions, zero Any, zero pragma: no cover. test_skeleton.py runs in ~8s (classification
+  4.29s, regression 1.06s); suite ≈ 44 s. All six §5 DoD mutations caught.
+  ONE DEFECT FOUND BY THE GATE, fixed at root cause: §3.3's `describe_artifact` on the comparison
+  *table* was blocked -- describe_artifact only supported frame kinds (dataframe/predictions) and
+  raised ToolDataError on `table`, pinned by `test_describe_artifact_table_kind_raises_not_yet_
+  supported`. The tool's own docstring/test framed this as a temporary gap ("today", "does not
+  yet support"), so it was fixed in mcp_server/ (not a D-decision, not backend/contracts): a
+  minimal `_describe_json` summarises a JSON table/curve by top-level keys and list lengths. The
+  pinned test was rewritten to assert the new behaviour (revert -> fail -> restore proven: the
+  three new JSON tests fail on pre-fix production). No allow_in widened, no check_lineage relaxed,
+  no tool body called directly, no step skipped.
 ---
 
 # Chunk 16 — Walking-skeleton gate (M6)
@@ -306,3 +329,23 @@ of use.
 4. The mutation table.
 5. Every defect the gate found: symptom, root cause, fix, and the regression test.
 6. For chunk 21: any argument shape or injection that was awkward over the wire.
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+The independent review re-ran the gates and all six §5 mutations, then mutated each
+`check_lineage` clause. It found the driver weaker than this spec in five places. None changed a
+result: the contract values happened to equal the hard-coded ones.
+
+| Gap | Correction |
+|---|---|
+| `SPINE_NODES` omitted `model_interpretation`, so a test-derived input in node 11 would raise `ValueError` instead of a lineage violation | All 13 node tokens; a guard case for `predict` in `model_interpretation` |
+| The one-score count was checked only inside `champion_selection`, so a second `score_*` in a later node passed | The count, like the `fit_*`/`train` clause, holds in every node (it is `runs.test_scored_at` in production); a guard case in `artifact_persistence`. Recorded in `00_index.md` row 21 |
+| The `train` and `fit_*` clauses survived their own deletion, because every guard case was also caught by another clause | One case only each can reject: `apply_imputer` with a test-derived `train` in node 12, and `fit_ols` in `artifact_persistence` |
+| One `seed` was injected into every tool ("both are 42") | `split.seed` for `split_*` and `constraints.random_seed` otherwise, both read from the contract. The gate still cannot observe the difference, since both are 42; chunk 21 tests the rule |
+| The split tool was picked by task, and the imputer, encoder and scaler arguments were hard-coded | Taken from `split.strategy`, `preprocessing.missing.default`, `preprocessing.max_cardinality` and `preprocessing.scaling` |
+
+`describe_artifact` on a JSON table reports its shape (keys and list lengths), not its values.
+That is enough for the gate. If an LLM node later needs to read coefficient terms, extending it
+to a bounded head of each list is the natural step; it is not done now.
