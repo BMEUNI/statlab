@@ -913,8 +913,8 @@ select_by_mutual_info(train, target, k)                            H
 
 **inference_matrix** — 2 — the D7 second track
 ```
-build_dummy_matrix(df, columns, reference_levels)   no scaling, explicit reference  [v1]
-assemble_inference_matrix(train, valid, target, predictors, reference_levels)    fit on train+valid
+build_dummy_matrix(df, columns, reference_levels)   no scaling, explicit reference
+assemble_inference_matrix(train, valid, target, predictors, reference_levels)    fit on train+valid  [v1]  (replaces build_dummy_matrix in the 33, chunk 16 D-g)
 ```
 
 **training** — 6
