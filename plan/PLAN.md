@@ -70,7 +70,7 @@ Three things make it more than a chat wrapper:
 | **D13** | **The MCP server is a standalone HTTP service** — its own process, its own port, implementing the MCP **Streamable HTTP** transport (the current spec transport; plain HTTP+SSE is deprecated). Any MCP client can connect to it, not just this backend. The backend reaches it via `MCP_SERVER_URL`. **Bound to `127.0.0.1` by default and gated by a bearer token**, because this service reads and writes the filesystem and executes model fitting — it must not be openly reachable. Artifact paths are config-driven (`STATLAB_DATA_DIR`), shared with the backend, never relative to CWD. | Resolves **Q12 = b**. A genuinely independent, network-addressable MCP server is an explicit project goal, and it means the tool layer is reusable and demonstrable outside this app. Accepted cost: a third process to run and a health check. |
 | **D14** | **Single-user, loopback-only, no login.** The web app binds to `127.0.0.1` with no auth; the MCP server binds to `127.0.0.1` behind a bearer token from `.env`. No `user_id` / `owner_id` columns are added — a nullable column is a one-line migration if multi-user ever becomes real, and adding it now would be speculative. Remote demos go through an SSH tunnel, never by binding `0.0.0.0`. | Resolves **Q5 = a + i**. Multi-user is not a login screen, it is an authorization model threaded through every project and run query — a different project. Loopback-only makes the absence of auth a deliberate, defensible choice instead of an oversight, and the MCP token removes the one genuinely sharp edge: a service that writes files and burns CPU on request should not be callable by any local process that stumbles onto the port. |
 | **D15** | **Small-data only, and honest about it.** Everything is in-memory pandas; **nothing is ever sampled.** Guards instead of sampling: upload rejected above **200 MB** with a clear message, node 1 warns above **200k rows** that fitting will be slow, `max_fit_seconds` defaults to **300**, and distribution plots cap at **50 categories** per chart. | Resolves **Q6 = a**. Sampling is a correctness footgun: the moment some numbers come from a sample and others do not, every downstream statistic needs provenance tracking to stay honest, and the D7 inference track cannot report p-values from a silently sampled frame. Refusing a file we cannot handle properly is less code *and* more honest than half-handling it. Upgrade path stays narrow — v2 adds a chunked reader plus a `sampled: true` flag in every tool summary — precisely because v1 never pretends. |
-| **D16** | **Hybrid routing, cost displayed but never enforced.** `deepseek-v4-flash` is the default; `deepseek-v4-pro` for the genuinely reasoning-shaped nodes (problem definition, **experiment design**, inferential analysis, interpretation & diagnostics, champion selection — the D28/D31 nodes postdate this decision and were added in review). All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain, so changing any node's model is a one-line edit or an env var — no code restructuring. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**. The nodes differ qualitatively: "propose an imputation strategy from this missingness table" is extraction-shaped work Flash does well, while "given five models' metrics, calibration and diagnostics, which ships and what are the caveats" is what Pro exists for — and it is the output a human reads most closely. A full run is cents either way, so a token cap protects nothing while adding a failure mode that aborts a nearly-finished run; the real runaway risk is *compute*, already bounded by `max_retune_loops` and `max_fit_seconds`. |
+| **D16** | **Hybrid routing, cost displayed but never enforced.** `deepseek-flash` is the default; `deepseek-v4-pro` for the genuinely reasoning-shaped nodes (problem definition, **experiment design**, inferential analysis, interpretation & diagnostics, champion selection — the D28/D31 nodes postdate this decision and were added in review). All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain, so changing any node's model is a one-line edit or an env var — no code restructuring. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**. The nodes differ qualitatively: "propose an imputation strategy from this missingness table" is extraction-shaped work Flash does well, while "given five models' metrics, calibration and diagnostics, which ships and what are the caveats" is what Pro exists for — and it is the output a human reads most closely. A full run is cents either way, so a token cap protects nothing while adding a failure mode that aborts a nearly-finished run; the real runaway risk is *compute*, already bounded by `max_retune_loops` and `max_fit_seconds`. |
 | **D17** | **Unbounded parallel runs.** Each run is its own asyncio task; any number may execute at once, across or within projects. Three guards make that safe: (1) a **global fit semaphore** in the MCP server sized to `os.cpu_count()` (default) — runs proceed in parallel through LLM, IO and profiling work and serialise *only* at CPU-bound fits, with `n_jobs=1` per estimator so nothing oversubscribes; (2) **SQLite in WAL mode** with `busy_timeout=5000`, so concurrent readers never block and writers queue instead of erroring; (3) every `node_executions` row records **`concurrency_at_start`**, so a slow timing can be attributed to contention rather than misread as a regression. **Rewind still halts its parent** (marks it `superseded`) — parallelism is for runs the user deliberately starts, not for branches they just abandoned. | Resolves **Q13 = c**. Parallel runs are genuinely useful (kick off an auto run, explore a guided one). The naive risk is not parallelism itself but N simultaneous `GridSearchCV` calls thrashing the cores and making every logged `duration_ms` meaningless; the semaphore removes that while preserving the concurrency the user asked for. WAL is one line and is the difference between "concurrent" and "intermittent `database is locked`". |
 | **D18** | **Provider-agnostic LLM layer: LiteLLM + Pydantic. No agent framework.** Supersedes D1's DSPy wiring and resolves **Q15**'s library question. Every LLM interaction is a Pydantic output model whose `model_json_schema()` is handed to the provider's structured-output facility; LiteLLM normalises the call, the schema support, the retries and the cost maths across providers. **DeepSeek is the default, not a dependency** — swapping to Claude or GPT is a model-string change plus an API key, with no code edit. DSPy is dropped: its payoff is prompt *optimisers*, which are out of scope, and it provides no memory (memory is §7's SQLite tables — a misconception worth naming). LangChain stays dropped. | Resolves **Q15 = no mandate**. Without optimisers, DSPy is a verbose way to do what Pydantic + a JSON schema already does, and it obscures the actual prompt — bad for a project that must be explained. LiteLLM is the one dependency that pays for itself here: multi-provider routing, `supports_response_schema()` capability detection, and `completion_cost()` per-provider pricing are all things we would otherwise hand-roll and maintain. |
 | **D19** | **Report is markdown + PNG files.** `report/report.md` referencing `report/plots/*.png`, rendered in the UI. No PDF toolchain, no embedded base64. HTML export from the same markdown is a later two-line addition if a single shareable file is ever wanted. | Resolves **Q10 = a**. Keeps the report a *source artifact* rather than a rendered output: `report.md`, `pipeline.py` and `manifest.json` are all text, all diffable, all inspectable with a text editor, and the plots are files the tools already produce. A PDF renderer (weasyprint/pandoc/LaTeX) is exactly the dependency that breaks on a new Python release and blocks a build for reasons unrelated to this project. |
@@ -1137,15 +1137,15 @@ takes a provider-prefixed model string, so switching provider is configuration:
 
 ```bash
 # .env — swap any of these, no code change
-STATLAB_MODEL_DEFAULT=deepseek/deepseek-v4-flash
+STATLAB_MODEL_DEFAULT=deepseek/deepseek-flash
 STATLAB_MODEL_REASONING=deepseek/deepseek-v4-pro
 # STATLAB_MODEL_DEFAULT=anthropic/claude-sonnet-4-5
 # STATLAB_MODEL_DEFAULT=openai/gpt-5.4
 DEEPSEEK_API_KEY=...        # LiteLLM reads the key each provider expects
 ```
 
-**Structured output, three tiers, capability-detected** — LiteLLM's
-`supports_response_schema(model)` decides which applies, so a provider that cannot do strict
+**Structured output, three tiers, capability-detected** — local prefix overrides inside `llm/`
+are consulted before LiteLLM's `supports_response_schema(model)`, so a provider that cannot do strict
 schemas still returns valid typed objects:
 
 1. **Native JSON schema** — pass the Pydantic schema, provider guarantees conformance.
@@ -1155,31 +1155,41 @@ schemas still returns valid typed objects:
    `response_format: {"type":"json_object"}`); we validate with Pydantic.
 3. **Neither** — schema injected into the prompt, response parsed and validated.
 
-Tiers 2 and 3 get **one repair retry**: on `ValidationError`, the errors are fed back and the
+All three tiers get **one repair retry**: on `ValidationError`, the errors are fed back and the
 call is reissued once, then it escalates to the recovery handler as a `tool_param`-class error.
-This is why the output models are the contract rather than the prompt text.
+Native schemas cannot enforce every custom Pydantic validator; empty answers are validation
+failures too. This is why the output models are the contract rather than the prompt text.
 
 **Cost accounting** uses LiteLLM's `completion_cost()`, so per-provider rates are its problem,
 not a table we maintain. A local override map exists only for providers it prices wrongly.
 Every call logs `model`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cost_usd` to
 `llm_calls`; the run total streams to the UI. **No hard cap** (D16).
 
-#### DeepSeek specifics (default provider, verified 2026-09-09)
+#### DeepSeek specifics (default provider, verified 2026-10-02)
 
 The legacy `deepseek-chat` / `deepseek-reasoner` names were **retired 24 July 2026** and are no
 longer routed.
 
-| Model | Input (cache miss) | Input (cache hit) | Output | Context | Concurrency |
+| Model | Cache miss (off-peak / peak), $/1M | Cache hit | Output | Context | Concurrency |
 |---|---|---|---|---|---|
-| `deepseek-v4-flash` | $0.14 / 1M | $0.0028 / 1M | $0.28 / 1M | 1M | 2,500 |
-| `deepseek-v4-pro` | $0.435 / 1M | $0.003625 / 1M | $0.87 / 1M | 1M | 500 |
+| `deepseek-flash` (V4.1-Flash) | 0.15 / 0.30 | 0.003 / 0.006 | 0.60 / 1.20 | 1M | 2,500 |
+| `deepseek-v4-pro` | 0.66 / 1.32 | 0.022 / 0.044 | 1.98 / 3.96 | 1M | 500 |
 
-V4-Pro additionally exposes three thinking-effort levels (low/high/max), usable as a cheaper
-alternative to escalating a node to a different model. Rates are from independent trackers
-cross-checked across sources — **the coding agent must confirm current model names, pricing and
-the structured-output contract against DeepSeek's official docs at build time**, since this
-lineup changed twice in 2026. A peak-hour surcharge (2×, two daily windows) is announced but not
-active as of 2026-09-09.
+Peak hours are 01:00–04:00 and 06:00–10:00 UTC Monday–Friday. Legacy
+`deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are accepted and routed/billed as Flash;
+V4-Pro remains available. Sources: [official pricing](https://api-docs.deepseek.com/quick_start/pricing/)
+and [current model names](https://api-docs.deepseek.com/updates/).
+
+Chat Completions supports [JSON mode](https://api-docs.deepseek.com/guides/json_mode/), not
+strict JSON Schema: pass `response_format={"type":"json_object"}`, include the word `json`
+and an example, and repair an empty answer. The local capability override therefore selects
+tier 2. Strict schemas on the Responses API are outside v1's transport scope.
+
+[Thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/) defaults to enabled;
+the client disables it for ordinary structured extraction, and enables it with effort `high`
+when routing requests reasoning. Only `content` is parsed; `reasoning_content` is not persisted.
+The local Flash cost override uses peak rates as an informational upper estimate because the
+installed LiteLLM map is stale; exact time-dependent billing is not a gate (D16).
 
 DeepSeek publishes concurrency ceilings only, no RPM/TPM. A `429` is a `transient` error for the
 recovery handler — cap in-flight requests, exponential back-off, queue rather than fan out.
@@ -1216,9 +1226,9 @@ class Role(StrEnum):
     CLASSIFY  = "classify"    # cheapest capable model: interrupt routing, status text
 
 MODELS: dict[Role, str] = {                    # overridden by STATLAB_MODEL_<ROLE>
-    Role.DEFAULT:   "deepseek/deepseek-v4-flash",
+    Role.DEFAULT:   "deepseek/deepseek-flash",
     Role.REASONING: "deepseek/deepseek-v4-pro",
-    Role.CLASSIFY:  "deepseek/deepseek-v4-flash",
+    Role.CLASSIFY:  "deepseek/deepseek-flash",
 }
 
 NODE_ROLES: dict[str, Role] = {
