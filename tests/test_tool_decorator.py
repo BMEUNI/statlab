@@ -14,11 +14,15 @@ from typing import Annotated, Any, Literal
 
 import anyio
 import pytest
+import statlab_tools.tools as _real_tools_pkg
 from pydantic import Field
 from statlab_contracts.envelope import ToolFailure, ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import ToolArtifactError
 from statlab_tools.tool import ToolDataError, ToolParamError, tool
+from statlab_tools.tool import server as _production_server
+
+_ = _real_tools_pkg  # keep the import (it registers every real tool onto _production_server)
 
 
 @pytest.fixture(autouse=True)
@@ -124,6 +128,7 @@ def test_t2_meta_carries_phase_allow_in_heavy() -> None:
     assert meta["phase"] == "t2"
     assert meta["allow_in"] == ["node_a", "node_b"]
     assert meta["heavy"] is True
+    assert meta["transform_only"] is False
 
 
 # --- T3-T4: decoration-time enforcement (D23) --------------------------------------------------
@@ -1100,3 +1105,104 @@ def test_tool_param_error_rejects_none_field_errors_via_type_system() -> None:
 
     signature = inspect.signature(ToolParamError.__init__)
     assert signature.parameters["field_errors"].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+# --- chunk 17 D-a: transform_only is declared, not inferred from names ---------------------------
+
+_TRANSFORM_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "apply_imputer",
+        "apply_outlier_clipper",
+        "apply_onehot_encoder",
+        "apply_ordinal_encoder",
+        "apply_target_encoder",
+        "apply_scaler",
+        "apply_binner",
+        "drop_columns",
+        "predict",
+        "predict_proba",
+        "add_datetime_parts",
+        "add_interaction_terms",
+        "add_ratio_feature",
+    }
+)
+"""The exact 13 transform-only tools (chunk 17 D-a). Node 12 replays each on a test-derived frame,
+so chunk 21's lineage lock and the skeleton's `check_lineage` read `meta.transform_only` for this
+set rather than matching name prefixes -- which already missed `drop_columns` and the row-wise
+constructors."""
+
+
+def _real_registry() -> object:
+    """The production `MCPServer` carrying the real tool registry, captured at this module's
+    import time before the autouse `_isolated_server` fixture rebinds `tool_module.server` to an
+    empty per-test server. `importlib.import_module("statlab_tools.tools")` has already run at
+    import (registering every real tool onto that original object), so reading it here needs no
+    reload and leaves `sys.modules` untouched."""
+    return _production_server
+
+
+def _served_meta() -> dict[str, dict[str, object]]:
+    import asyncio
+
+    server = _real_registry()
+
+    async def listing() -> dict[str, dict[str, object]]:
+        tools = await server.list_tools()  # type: ignore[attr-defined]  # _real_registry returns the real MCPServer
+        out: dict[str, dict[str, object]] = {}
+        for t in tools:
+            assert t.meta is not None
+            out[t.name] = t.meta
+        return out
+
+    return asyncio.run(listing())
+
+
+def _served_schema_props(name: str) -> set[str]:
+    import asyncio
+
+    server = _real_registry()
+
+    async def props() -> set[str]:
+        tools = await server.list_tools()  # type: ignore[attr-defined]  # same as _served_meta
+        t = next(t for t in tools if t.name == name)
+        return set(t.input_schema.get("properties", {}))
+
+    return asyncio.run(props())
+
+
+def test_transform_only_set_is_exactly_the_thirteen() -> None:
+    """D-a: the served `transform_only` flag is True for exactly the 13 named tools and False for
+    every other tool. Pins the set so a 14th slipping in (or one dropping out) fails here."""
+    meta = _served_meta()
+    served_true = {name for name, m in meta.items() if m["transform_only"] is True}
+    assert served_true == set(_TRANSFORM_ONLY_TOOLS), (
+        f"unexpected={sorted(served_true - _TRANSFORM_ONLY_TOOLS)!r}, "
+        f"missing={sorted(_TRANSFORM_ONLY_TOOLS - served_true)!r}"
+    )
+
+
+def test_every_apply_tool_is_transform_only() -> None:
+    """D-a: every `apply_*` tool declares `transform_only=True`. (The converse does not hold --
+    `drop_columns`, `predict`, and the constructors are transform-only without the prefix.)"""
+    meta = _served_meta()
+    for name, m in meta.items():
+        if name.startswith("apply_"):
+            assert m["transform_only"] is True, f"{name} is apply_* but not transform_only"
+
+
+def test_no_transform_only_tool_is_fit_or_takes_train() -> None:
+    """D-a: none of the 13 is a `fit_*` tool, and none has a `train` parameter. A transform-only
+    tool replays on test, so it must neither learn state nor take the train split."""
+    for name in _TRANSFORM_ONLY_TOOLS:
+        assert not name.startswith("fit_"), f"{name} is transform_only but is fit_*"
+        assert "train" not in _served_schema_props(name), f"{name} has a train parameter"
+
+
+def test_every_transform_only_tool_allows_champion_selection() -> None:
+    """D-a: each transform-only tool lists `champion_selection` in `allow_in`, so node 12 may
+    replay it on test."""
+    meta = _served_meta()
+    for name in _TRANSFORM_ONLY_TOOLS:
+        allow_in = meta[name]["allow_in"]
+        assert isinstance(allow_in, list)
+        assert "champion_selection" in allow_in, f"{name} does not allow champion_selection"

@@ -276,7 +276,7 @@ def _is_onehot_candidate(series: pd.Series) -> bool:
     return not bool(pd.api.types.is_datetime64_any_dtype(series))
 
 
-@tool(phase="encoding", allow_in=_APPLY_PHASES)
+@tool(phase="encoding", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_onehot_encoder(
     paths: RunPaths,
     encoder: Annotated[ArtifactRef, Field(description="A fitted encoder from fit_onehot_encoder.")],
@@ -380,7 +380,7 @@ def fit_ordinal_encoder(
     return ToolSuccess(summary=summary, artifacts=(meta,))
 
 
-@tool(phase="encoding", allow_in=_APPLY_PHASES)
+@tool(phase="encoding", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_ordinal_encoder(
     paths: RunPaths,
     encoder: Annotated[
@@ -507,7 +507,7 @@ def fit_target_encoder(
     )
 
 
-@tool(phase="encoding", allow_in=_APPLY_PHASES)
+@tool(phase="encoding", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_target_encoder(
     paths: RunPaths,
     encoder: Annotated[ArtifactRef, Field(description="A fitted encoder from fit_target_encoder.")],
@@ -624,7 +624,7 @@ def fit_scaler(
     return ToolSuccess(summary=summary, artifacts=(meta,), warnings=tuple(warnings_out))
 
 
-@tool(phase="encoding", allow_in=_APPLY_PHASES)
+@tool(phase="encoding", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_scaler(
     paths: RunPaths,
     scaler: Annotated[ArtifactRef, Field(description="A fitted scaler from fit_scaler.")],

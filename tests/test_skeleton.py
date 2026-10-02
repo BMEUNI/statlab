@@ -237,16 +237,25 @@ _CHAMPION_INDEX: int = SPINE_NODES.index("champion_selection")
 
 
 def check_lineage(
-    node: str, tool: str, tainted_params: Mapping[str, str], test_scores: int
+    node: str,
+    tool: str,
+    tainted_params: Mapping[str, str],
+    test_scores: int,
+    *,
+    transform_only: bool,
 ) -> None:
     """D32 as written in PLAN.md (spec §3.3 D-c). `tainted_params` maps each argument name that
     carries a test-derived ref to that ref. A call that receives one:
 
     - a `fit_*` tool, or a parameter named `train`, is a violation in any node;
     - before `champion_selection`, only `verify_split` may receive one;
-    - in `champion_selection`, only `apply_*`, `predict`, `predict_proba`, `score_*` may; and a
-      `score_*` with a test-derived input is the exactly-once-scored call -- `test_scores` is the
+    - in `champion_selection`, only a `transform_only` tool (chunk 17 D-a) or a `score_*` may; and
+      a `score_*` with a test-derived input is the exactly-once-scored call -- `test_scores` is the
       count *before* this call, which must still be 0 when this one is the scoring call.
+
+    `transform_only` is the tool's `meta.transform_only` flag, read from `tools/list` (chunk 17
+    D-a). It replaces the former `apply_*`/`predict`/`predict_proba` name-prefix matching, which
+    missed `drop_columns` and the row-wise feature constructors -- all legitimate node-12 replays.
 
     The `fit_*`/`train` clause and the exactly-once count hold in every node (the count is
     `runs.test_scored_at` in production, a run-wide guard). Nodes *after* `champion_selection`
@@ -271,7 +280,7 @@ def check_lineage(
         return
     if index > _CHAMPION_INDEX:
         return
-    allowed = tool.startswith(("apply_", "score_")) or tool in ("predict", "predict_proba")
+    allowed = transform_only or tool.startswith("score_")
     if not allowed:
         raise AssertionError(f"{tool} may not receive a test-derived input in champion_selection")
 
@@ -286,6 +295,7 @@ class Driver:
     run: str
     schemas: dict[str, set[str]]
     allow_in: dict[str, list[str]]
+    transform_only: dict[str, bool]
     split_seed: int
     random_seed: int
     dataset: str
@@ -326,7 +336,9 @@ class Driver:
         check_allowed(node, self.allow_in[tool])
         injected = self._inject(tool, arguments)
         tainted = self._tainted(injected)
-        check_lineage(node, tool, tainted, self.test_scores)
+        check_lineage(
+            node, tool, tainted, self.test_scores, transform_only=self.transform_only[tool]
+        )
 
         result = await _raw_call(self.session, tool, injected)
         assert result.structured_content is not None, f"{tool} returned no structured_content"
@@ -370,18 +382,21 @@ async def _raw_call(
 
 async def _read_schemas(
     session: ClientSession,
-) -> tuple[dict[str, set[str]], dict[str, list[str]], set[str]]:
+) -> tuple[dict[str, set[str]], dict[str, list[str]], dict[str, bool], set[str]]:
     """Read `tools/list` once: per-tool served input-schema property names, per-tool
-    `meta.allow_in`, and the full set of served tool names."""
+    `meta.allow_in`, per-tool `meta.transform_only` (chunk 17 D-a), and the full set of served
+    tool names."""
     listing = await session.list_tools()
     tools: list[Tool] = list(listing.tools)
     schemas = {t.name: set(t.input_schema.get("properties", {})) for t in tools}
     allow_in: dict[str, list[str]] = {}
+    transform_only: dict[str, bool] = {}
     for t in tools:
         assert t.meta is not None
         allow_in[t.name] = [str(a) for a in cast("list[object]", t.meta["allow_in"])]
+        transform_only[t.name] = bool(t.meta["transform_only"])
     names = {t.name for t in tools}
-    return schemas, allow_in, names
+    return schemas, allow_in, transform_only, names
 
 
 # --- Orchestrator setup: write the CSV and the contract snapshot (spec D-b) -----------------------
@@ -886,7 +901,7 @@ async def _open_driver(
     contract: DataContract,
 ) -> tuple[Driver, TaskConfig]:
     digest = _write_run(settings, run, frame, contract)
-    schemas, allow_in, served = await _read_schemas(session)
+    schemas, allow_in, transform_only, served = await _read_schemas(session)
     assert served >= SKELETON_TOOLS, f"missing tools: {sorted(SKELETON_TOOLS - served)!r}"
     cfg = _config(frame, contract)
     driver = Driver(
@@ -894,6 +909,7 @@ async def _open_driver(
         run=run,
         schemas=schemas,
         allow_in=allow_in,
+        transform_only=transform_only,
         split_seed=contract.split.seed,
         random_seed=contract.constraints.random_seed,
         dataset=digest,
@@ -1010,39 +1026,39 @@ def test_check_allowed_accepts_wildcard_in_any_node() -> None:
 
 
 @pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores"),
+    ("node", "tool", "tainted", "test_scores", "transform_only"),
     [
-        ("preprocessing", "apply_imputer", {"frame": "a_test"}, 0),
-        ("champion_selection", "fit_scaler", {"train": "a_test"}, 0),
-        ("preprocessing", "train_estimator", {"train": "a_test"}, 0),
-        ("champion_selection", "train_estimator", {"frame": "a_test"}, 0),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 1),
-        # only the universal clauses can reject these two: node 12 allows apply_*, and nodes
-        # after node 12 are otherwise unconstrained
-        ("champion_selection", "apply_imputer", {"train": "a_test"}, 0),
-        ("artifact_persistence", "fit_ols", {"matrix": "a_test"}, 0),
-        ("model_interpretation", "predict", {"frame": "a_test"}, 0),
-        ("artifact_persistence", "score_regression", {"truth": "a_test"}, 1),
+        ("preprocessing", "apply_imputer", {"frame": "a_test"}, 0, True),
+        ("champion_selection", "fit_scaler", {"train": "a_test"}, 0, False),
+        ("preprocessing", "train_estimator", {"train": "a_test"}, 0, False),
+        ("champion_selection", "train_estimator", {"frame": "a_test"}, 0, False),
+        ("champion_selection", "score_classification", {"truth": "a_test"}, 1, False),
+        # only the universal clauses can reject these two: node 12 allows transform-only tools,
+        # and nodes after node 12 are otherwise unconstrained
+        ("champion_selection", "apply_imputer", {"train": "a_test"}, 0, True),
+        ("artifact_persistence", "fit_ols", {"matrix": "a_test"}, 0, False),
+        ("model_interpretation", "predict", {"frame": "a_test"}, 0, True),
+        ("artifact_persistence", "score_regression", {"truth": "a_test"}, 1, False),
     ],
 )
 def test_check_lineage_rejects(
-    node: str, tool: str, tainted: dict[str, str], test_scores: int
+    node: str, tool: str, tainted: dict[str, str], test_scores: int, transform_only: bool
 ) -> None:
     with pytest.raises(AssertionError):
-        check_lineage(node, tool, tainted, test_scores)
+        check_lineage(node, tool, tainted, test_scores, transform_only=transform_only)
 
 
 @pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores"),
+    ("node", "tool", "tainted", "test_scores", "transform_only"),
     [
-        ("data_splitting", "verify_split", {"test": "a_test"}, 0),
-        ("champion_selection", "apply_scaler", {"frame": "a_test"}, 0),
-        ("champion_selection", "predict_proba", {"frame": "a_test"}, 0),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 0),
-        ("artifact_persistence", "describe_artifact", {"artifact": "a_test"}, 1),
+        ("data_splitting", "verify_split", {"test": "a_test"}, 0, False),
+        ("champion_selection", "apply_scaler", {"frame": "a_test"}, 0, True),
+        ("champion_selection", "predict_proba", {"frame": "a_test"}, 0, True),
+        ("champion_selection", "score_classification", {"truth": "a_test"}, 0, False),
+        ("artifact_persistence", "describe_artifact", {"artifact": "a_test"}, 1, False),
     ],
 )
 def test_check_lineage_accepts(
-    node: str, tool: str, tainted: dict[str, str], test_scores: int
+    node: str, tool: str, tainted: dict[str, str], test_scores: int, transform_only: bool
 ) -> None:
-    check_lineage(node, tool, tainted, test_scores)
+    check_lineage(node, tool, tainted, test_scores, transform_only=transform_only)

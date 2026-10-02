@@ -1,6 +1,8 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 13, 14, 17]
+completion_date: 2026-10-02
+implementation_notes: "Four node-11 tools in tools/interpretation.py (phase=interpretation, allow_in=[model_interpretation]). permutation_importance + partial_dependence are heavy. Reused training/evaluation helpers by renaming to public names (predict_matrix, check_metric_task; proba_columns, class_labels, check_truth_classes_have_columns, load_truth_target, snapshot, hard_labels, new_figure, save_curve) with NO behaviour change -- chunk 13/14/17 tests pass unedited. _align and _positive_class stayed PRIVATE because test_tools_evaluation.py monkeypatches ev._align / ev._positive_class by name (the spec's 'no test references them' was inaccurate for those two); interpretation.py imports the private names. plot_curve gained the partial_dependence kind (one line per series, x_original axis when a scaler mapped it back). The permutation_importance tool shadows sklearn's function, aliased inside the body. Oracles: permutation == sklearn.inspection.permutation_importance to 1e-12; std_coef == coef x sd(ddof0) to 1e-9 incl. the classes_[0] sign flip (P4); noiseless linear PD slope == fitted coefficient to 3.5e-15; analyze_errors aligns by label so a shuffled prediction order gives an identical table. 37 tests, 100% line+branch on interpretation.py and evaluation.py (and training.py, features.py). All 7 DoD mutations killed. ponytail D-b (grouped permutation) left as a comment. Nothing from the DO NOT ADD list; nothing in backend/ or contracts/."
 ---
 
 # Chunk 18 — Interpretation tools
@@ -242,3 +244,21 @@ P1–P5 do not reproduce; chunk 13, 14 or 17 tests need edits; anything needs `b
    only).
 4. For chunk 19: what `assemble_report` needs from these artifacts that their summaries do not
    carry.
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+- **The end-to-end test did not run the §4 pipeline.** It built its own four-column frame with
+  pre-made `region__r1`/`region__r2` dummies, so it never went through split → impute → one-hot →
+  scale, and never aligned predictions on the transformed valid frame against the raw valid split
+  (D-f). It was replaced by `test_end_to_end_node10_on_the_skeleton_pipeline`, which does exactly
+  §4 on the skeleton's `subscribers`:
+  - `tenure_months` ranks above every `region__*` dummy;
+  - `plan__premium < 0 < plan__basic`;
+  - the PD series is strictly decreasing, with `x_original` inside the raw column's range;
+  - `analyze_errors` on the raw valid split returns every level of `plan` and `region`, plus
+    `<missing>` for `region`.
+- `_align` and `_positive_class` stay private, and `interpretation.py` imports them. Chunk 14's
+  mutation-guard test monkeypatches `evaluation._align`, and §5 forbids editing chunk 14 tests;
+  the other helpers became public as specified.

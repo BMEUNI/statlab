@@ -606,7 +606,7 @@ def fit_outlier_clipper(
 # --- 3.3 apply -----------------------------------------------------------------------------------
 
 
-@tool(phase="cleaning", allow_in=_DROP_COLUMNS_PHASES)
+@tool(phase="cleaning", allow_in=_DROP_COLUMNS_PHASES, transform_only=True)
 def drop_columns(
     paths: RunPaths,
     frame: _Frame,
@@ -640,7 +640,7 @@ def _check_fitted_columns(
         )
 
 
-@tool(phase="cleaning", allow_in=_APPLY_PHASES)
+@tool(phase="cleaning", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_imputer(
     paths: RunPaths,
     imputer: Annotated[ArtifactRef, Field(description="A fitted imputer from fit_imputer.")],
@@ -672,7 +672,7 @@ def apply_imputer(
     return ToolSuccess(summary=summary, artifacts=(save_frame(paths, data, "imputed"),))
 
 
-@tool(phase="cleaning", allow_in=_APPLY_PHASES)
+@tool(phase="cleaning", allow_in=_APPLY_PHASES, transform_only=True)
 def apply_outlier_clipper(
     paths: RunPaths,
     clipper: Annotated[

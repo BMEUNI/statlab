@@ -1,6 +1,31 @@
 ---
-status: untouched
+status: completed
 dependencies: [07, 11, 12, 16]
+completion_date: 2026-10-02
+implementation_notes: |
+  Implemented the 7 feature tools in mcp_server/statlab_tools/tools/features.py (phase="features")
+  plus the cross-cutting transform_only flag (D-a). Measured outcomes:
+  - Full suite 1964 passed, 1 skipped in ~46s (< 70s DoD). Coverage 100% line+branch on both
+    features.py (196 stmts, 50 branches) and tool.py (149 stmts); TOTAL 100%.
+  - mypy clean on 93 files; ruff check + format clean. No Any, no pragma, no new type: ignore.
+  - All 7 DoD mutations killed (each failed >=1 test; the "outer edges finite" mutant failed 4).
+  - transform_only is served on exactly 13 tools: the 7 apply_* (imputer, outlier clipper, onehot,
+    ordinal, target, scaler, binner), drop_columns, predict, predict_proba, and the 3 row-wise
+    constructors (add_datetime_parts, add_interaction_terms, add_ratio_feature). A consistency test
+    in test_tool_decorator.py pins the exact set and the three properties (not fit_*, no `train`
+    param, lists champion_selection) over the real tools/list.
+  - check_lineage now reads meta.transform_only from tools/list (Driver carries a transform_only
+    dict); its champion_selection clause is `transform_only or score_*`, replacing the former
+    apply_*/predict name-prefix match. All five lineage clauses re-verified by deletion: each has a
+    guard case only it rejects. Skeleton G1-G7 unchanged, gate green.
+  Hazards confirmed and handled: P1 (NaT mask on is_weekend + Int64 parts), P3 (edge dedup + warn),
+  P4 (±inf outer edges), P5 (divide by b.where(b!=0)), P6 (to_numpy float64), P7 (NaN refused, bool
+  discrete, sklearn lazy, n_jobs=1), P8 (ddof=0). Row-wise constructors add/replace per D-b; the
+  binner replaces source with f"{col}__bin" string labels picked up by fit_onehot_encoder; both
+  selectors decide on train and replay via drop_columns.
+  For chunk 18: the transform_only set as served by tools/list is the 13 above; node 12 replays
+  these (plus score_* once) on test. Chunk 21 enforces the flag; chunk 29 replays the champion's
+  node 7-8 transform_only calls in order with the same non-frame args.
 ---
 
 # Chunk 17 — Feature construction and selection tools
@@ -240,3 +265,24 @@ P1–P8 do not reproduce; the skeleton changes beyond D-a; anything needs `backe
 2. The mutation table.
 3. The end-to-end column list after node 8.
 4. For chunk 18: the transform-only set as served by `tools/list`.
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+The review re-ran the gates and all seven §5 mutations. One mutation survived: **`apply_binner`
+recomputing the quantile edges from `frame`** passed every test. The train-only test checked only
+the two extreme values, which land in the outer bins whichever data the edges come from. The test
+now uses apply values in the middle, where train's edge (20) and the frame's own median (5)
+disagree, and asserts the whole label list. It fails under the mutation and passes on the code.
+No production change was needed.
+
+An independent probe on the skeleton's `subscribers` covered the full node-4–12 path:
+- add datetime parts, ratio and interaction; fit and apply the binner; one-hot; select by
+  variance and by mutual information; scale;
+- logistic regression;
+- the champion's 8 transform-only calls replayed on test in order (`apply_imputer`,
+  `add_datetime_parts`, `add_ratio_feature`, `add_interaction_terms`, `apply_binner`,
+  `apply_onehot_encoder`, `apply_scaler`, `drop_columns`).
+
+The replay gave test the same columns as train, and test ROC AUC 0.75. D-a holds in practice.

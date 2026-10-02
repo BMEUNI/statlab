@@ -497,7 +497,7 @@ def tune_estimator(
 
     entry = _entry(name)
     _reject_class_weight(entry, class_weight)
-    _check_metric_task(metric, entry.task)
+    check_metric_task(metric, entry.task)
 
     grid = entry.default_grid if param_grid is None else param_grid
     _validate_grid(entry, grid)
@@ -584,7 +584,7 @@ def tune_estimator(
     return ToolSuccess(summary=summary, warnings=tuple(warnings_out))
 
 
-def _check_metric_task(metric: Metric, task: Task) -> None:
+def check_metric_task(metric: Metric, task: Task) -> None:
     """Metric and estimator task must agree (D-f)."""
     from statlab_contracts.vocabulary import METRICS_FOR_TASK
 
@@ -624,7 +624,7 @@ def _validate_grid(entry: EstimatorEntry, grid: dict[str, tuple[ParamValue, ...]
 # --- 3.2 predict / predict_proba ([v1]) ----------------------------------------------------------
 
 
-@tool(phase="training", allow_in=_PREDICT_PHASES)
+@tool(phase="training", allow_in=_PREDICT_PHASES, transform_only=True)
 def predict(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
     """Predict on `frame`, selecting exactly the fitted feature columns (D-d), ignoring extras such
     as the target. A missing fitted column is `tool_param`; NaN with an estimator that cannot
@@ -632,7 +632,7 @@ def predict(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
     labels (chunk 14 aligns to truth by label), with one column `prediction`."""
     fitted = load_fitted(paths, model, FittedModel, "model")
     data = load_dataframe(paths.artifact(frame, "dataframe"))
-    x = _predict_matrix(data, fitted)
+    x = predict_matrix(data, fitted)
     from sklearn.base import BaseEstimator
 
     est = cast(BaseEstimator, fitted.estimator)
@@ -643,7 +643,7 @@ def predict(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
     return ToolSuccess(summary=summary, artifacts=(meta,))
 
 
-@tool(phase="training", allow_in=_PREDICT_PHASES)
+@tool(phase="training", allow_in=_PREDICT_PHASES, transform_only=True)
 def predict_proba(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
     """Class probabilities on `frame`, selecting the fitted features (D-d). A regressor is
     `tool_param`. The output is kind `predictions`, indexed by the frame's labels, one column
@@ -655,7 +655,7 @@ def predict_proba(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
             field_errors={"model": "a regressor has no class probabilities"},
         )
     data = load_dataframe(paths.artifact(frame, "dataframe"))
-    x = _predict_matrix(data, fitted)
+    x = predict_matrix(data, fitted)
     from sklearn.base import BaseEstimator
 
     est = cast(BaseEstimator, fitted.estimator)
@@ -670,7 +670,7 @@ def predict_proba(paths: RunPaths, model: _Model, frame: _Frame) -> ToolSuccess:
     return ToolSuccess(summary=summary, artifacts=(meta,))
 
 
-def _predict_matrix(frame: pd.DataFrame, fitted: FittedModel) -> np.ndarray:
+def predict_matrix(frame: pd.DataFrame, fitted: FittedModel) -> np.ndarray:
     """The `float64` matrix for a fitted model's features, in the fitted order (D-d). A missing
     fitted column is `tool_param`; NaN with a non-`handles_missing` estimator is `tool_param`."""
     missing = [col for col in fitted.features if col not in frame.columns]

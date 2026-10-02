@@ -97,6 +97,7 @@ async def test_m5_every_tool_meta_has_phase_allow_in_heavy(mcp_session: SessionF
             assert "phase" in tool_obj.meta
             assert "allow_in" in tool_obj.meta
             assert "heavy" in tool_obj.meta
+            assert "transform_only" in tool_obj.meta
 
 
 # --- M6-M7: the envelope round-trip ---------------------------------------------------------------

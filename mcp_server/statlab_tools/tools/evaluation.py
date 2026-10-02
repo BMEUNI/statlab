@@ -109,7 +109,7 @@ class _Aligned:
     frame: pd.DataFrame
 
 
-def _load_truth_target(paths: RunPaths, truth: ArtifactRef, target: str) -> pd.Series:
+def load_truth_target(paths: RunPaths, truth: ArtifactRef, target: str) -> pd.Series:
     """The `target` column of the truth frame, or `tool_param` naming it."""
     data = load_dataframe(paths.artifact(truth, "dataframe"))
     if target not in data.columns:
@@ -141,7 +141,7 @@ def _align(truth: pd.Series, preds: pd.DataFrame) -> _Aligned:
     return _Aligned(truth=truth.reindex(preds.index), frame=preds)
 
 
-def _snapshot(paths: RunPaths) -> DataContract | None:
+def snapshot(paths: RunPaths) -> DataContract | None:
     """The contract snapshot, or `None` when none is present (tests calling tool bodies without
     writing one). The same read `training.tuning_from_snapshot` does."""
     if paths.contract_snapshot_json.exists():
@@ -149,7 +149,7 @@ def _snapshot(paths: RunPaths) -> DataContract | None:
     return None
 
 
-def _proba_columns(frame: pd.DataFrame) -> list[str]:
+def proba_columns(frame: pd.DataFrame) -> list[str]:
     """The `proba__{class}` columns of a predict_proba artifact, in stored order. A predictions
     artifact without any is `tool_param` (D-a: classification tools take probabilities)."""
     cols = [c for c in frame.columns if str(c).startswith("proba__")]
@@ -162,12 +162,12 @@ def _proba_columns(frame: pd.DataFrame) -> list[str]:
     return [str(c) for c in cols]
 
 
-def _class_labels(proba_columns: list[str]) -> list[str]:
+def class_labels(proba_columns: list[str]) -> list[str]:
     """The class suffixes of `proba__{class}` columns (the classes, by string form, D-b)."""
     return [c[len("proba__") :] for c in proba_columns]
 
 
-def _check_truth_classes_have_columns(truth: pd.Series, classes: list[str]) -> None:
+def check_truth_classes_have_columns(truth: pd.Series, classes: list[str]) -> None:
     """Every truth class (by string form) must have a probability column, else `tool_param`
     naming it (D-b)."""
     truth_classes = set(as_str(truth).dropna().unique())
@@ -269,7 +269,7 @@ def _save_table(paths: RunPaths, payload: dict[str, JsonValue], label: str) -> A
     return save_json(paths.artifact(ref, "table"), payload, ref=ref, kind="table", label=label)
 
 
-def _save_curve(paths: RunPaths, payload: dict[str, JsonValue], label: str) -> ArtifactMeta:
+def save_curve(paths: RunPaths, payload: dict[str, JsonValue], label: str) -> ArtifactMeta:
     ref = new_artifact_ref()
     return save_json(paths.artifact(ref, "curve"), payload, ref=ref, kind="curve", label=label)
 
@@ -277,7 +277,7 @@ def _save_curve(paths: RunPaths, payload: dict[str, JsonValue], label: str) -> A
 # --- 3.1 score_classification ----------------------------------------------------------------
 
 
-def _hard_labels(
+def hard_labels(
     proba: np.ndarray, classes: list[str], positive: str, threshold: float | None
 ) -> np.ndarray:
     """Hard predicted labels from probabilities: argmax over classes, or for binary a
@@ -373,28 +373,28 @@ def score_classification(
     (D-d) carrying the metrics, `n_rows`, `task`, `positive_class` and a `truth_fingerprint`.
     """
     preds = load_dataframe(paths.artifact(probabilities, "predictions"))
-    proba_cols = _proba_columns(preds)
-    classes = _class_labels(proba_cols)
-    truth_series = _load_truth_target(paths, truth, target)
+    proba_cols = proba_columns(preds)
+    classes = class_labels(proba_cols)
+    truth_series = load_truth_target(paths, truth, target)
     aligned = _align(truth_series, preds)
-    _check_truth_classes_have_columns(aligned.truth, classes)
+    check_truth_classes_have_columns(aligned.truth, classes)
     if threshold is not None and len(classes) != 2:
         raise ToolParamError(
             "threshold is binary only; this target has more than two classes",
             field_errors={"threshold": "not applicable to a multiclass target"},
         )
 
-    positive, source = _positive_class(_snapshot(paths), classes)
+    positive, source = _positive_class(snapshot(paths), classes)
     y_true = as_str(aligned.truth).to_numpy()
     proba = aligned.frame[proba_cols].to_numpy(dtype="float64")
-    y_pred = _hard_labels(proba, classes, positive, threshold)
+    y_pred = hard_labels(proba, classes, positive, threshold)
 
     full = _classification_metrics(y_true, proba, y_pred, classes, positive, average)
 
     def compute(idx: np.ndarray) -> dict[str, object]:
         yt = y_true[idx]
         pr = proba[idx]
-        yp = _hard_labels(pr, classes, positive, threshold)
+        yp = hard_labels(pr, classes, positive, threshold)
         return _classification_metrics(yt, pr, yp, classes, positive, average)
 
     resamples = BOOTSTRAP_RESAMPLES
@@ -466,7 +466,7 @@ def score_regression(
             "predict output",
             field_errors={"predictions": "no `prediction` column"},
         )
-    truth_series = _load_truth_target(paths, truth, target)
+    truth_series = load_truth_target(paths, truth, target)
     if not is_numeric_column(truth_series):
         raise ToolParamError(
             f"target {target!r} is not numeric; score_regression needs a numeric target",
@@ -522,20 +522,20 @@ def compute_confusion_matrix(
     `matrix` and `support`.
     """
     preds = load_dataframe(paths.artifact(probabilities, "predictions"))
-    proba_cols = _proba_columns(preds)
-    classes = _class_labels(proba_cols)
-    truth_series = _load_truth_target(paths, truth, target)
+    proba_cols = proba_columns(preds)
+    classes = class_labels(proba_cols)
+    truth_series = load_truth_target(paths, truth, target)
     aligned = _align(truth_series, preds)
-    _check_truth_classes_have_columns(aligned.truth, classes)
+    check_truth_classes_have_columns(aligned.truth, classes)
     if threshold is not None and len(classes) != 2:
         raise ToolParamError(
             "threshold is binary only; this target has more than two classes",
             field_errors={"threshold": "not applicable to a multiclass target"},
         )
-    positive, _ = _positive_class(_snapshot(paths), classes)
+    positive, _ = _positive_class(snapshot(paths), classes)
     y_true = as_str(aligned.truth).to_numpy()
     proba = aligned.frame[proba_cols].to_numpy(dtype="float64")
-    y_pred = _hard_labels(proba, classes, positive, threshold)
+    y_pred = hard_labels(proba, classes, positive, threshold)
 
     from sklearn.metrics import confusion_matrix
 
@@ -562,17 +562,17 @@ def _binary_setup(
     """Shared binary-only loading for the curves: `(y_binary, p_positive, positive, n_pos,
     n_neg)`. A multiclass target is `tool_param` (the three curves are binary only)."""
     preds = load_dataframe(paths.artifact(probabilities, "predictions"))
-    proba_cols = _proba_columns(preds)
-    classes = _class_labels(proba_cols)
-    truth_series = _load_truth_target(paths, truth, target)
+    proba_cols = proba_columns(preds)
+    classes = class_labels(proba_cols)
+    truth_series = load_truth_target(paths, truth, target)
     aligned = _align(truth_series, preds)
-    _check_truth_classes_have_columns(aligned.truth, classes)
+    check_truth_classes_have_columns(aligned.truth, classes)
     if len(classes) != 2:
         raise ToolParamError(
             "this curve is binary only; the target has more than two classes",
             field_errors={"probabilities": "multiclass target not supported"},
         )
-    positive, _ = _positive_class(_snapshot(paths), classes)
+    positive, _ = _positive_class(snapshot(paths), classes)
     pos_idx = classes.index(positive)
     y_str = as_str(aligned.truth).to_numpy()
     y_bin = (y_str == positive).astype(int)
@@ -611,7 +611,7 @@ def compute_roc_curve(
         "n_neg": json_scalar(n_neg),
         "positive_class": positive,
     }
-    meta = _save_curve(paths, payload, "roc")
+    meta = save_curve(paths, payload, "roc")
     return ToolSuccess(
         summary={"kind": "roc", "auc": json_scalar(auc), "points": json_scalar(len(fpr_a))},
         artifacts=(meta,),
@@ -651,7 +651,7 @@ def compute_pr_curve(
         "n_neg": json_scalar(n_neg),
         "positive_class": positive,
     }
-    meta = _save_curve(paths, payload, "pr")
+    meta = save_curve(paths, payload, "pr")
     return ToolSuccess(
         summary={"kind": "pr", "auc": json_scalar(auc), "points": json_scalar(len(rec_a))},
         artifacts=(meta,),
@@ -690,7 +690,7 @@ def compute_calibration_curve(
         "n_neg": json_scalar(n_neg),
         "positive_class": positive,
     }
-    meta = _save_curve(paths, payload, "calibration")
+    meta = save_curve(paths, payload, "calibration")
     return ToolSuccess(
         summary={
             "kind": "calibration",
@@ -799,7 +799,7 @@ def select_threshold(
 # --- 3.2 plot_curve --------------------------------------------------------------------------
 
 
-def _new_figure() -> tuple[Figure, Axes]:
+def new_figure() -> tuple[Figure, Axes]:
     """A fresh `Figure` without `pyplot` (chunk 09 P5): pyplot's registry is process-global and
     not thread-safe, and tool bodies run concurrently in worker threads."""
     fig = Figure(figsize=(8, 5), dpi=100)
@@ -815,32 +815,61 @@ _CURVE_LABELS: Final[dict[str, tuple[str, str]]] = {
 }
 
 
+def _plot_partial_dependence(ax: Axes, loaded: dict[str, JsonValue]) -> tuple[str, str]:
+    """Draw a `partial_dependence` curve: one line per series over `x_original` (else `x`), and
+    return `(xlabel, ylabel)`. The x axis is the column name, with "(scaled)" when the grid is
+    scaled but no scaler mapped it back; the y axis is "average prediction" for regression or
+    "average P(class)" for classification (chunk 18 §3.3)."""
+    column = str(loaded["column"])
+    x = np.asarray(cast("list[float]", loaded["x"]), dtype="float64")
+    x_original_raw = loaded["x_original"]
+    if x_original_raw is None:
+        x_axis = x
+    else:
+        x_axis = np.asarray(cast("list[float]", x_original_raw), dtype="float64")
+    series = cast("dict[str, JsonValue]", loaded["series"])
+    for name, values in series.items():
+        y = np.asarray(cast("list[float]", values), dtype="float64")
+        ax.plot(x_axis, y, marker="o", label=str(name))
+    if len(series) > 1:
+        ax.legend()
+    # x_original is null only when no scaler was supplied, so the grid is still in model units,
+    # which for a scaled feature are standardised -- flag that uncertainty with "(scaled)".
+    xlabel = column if x_original_raw is not None else f"{column} (scaled)"
+    ylabel = "average prediction" if str(loaded["task"]) == "regression" else "average P(class)"
+    return xlabel, ylabel
+
+
 @tool(phase="evaluation", allow_in=_CURVE_PHASES)
 def plot_curve(
     paths: RunPaths,
     curve: _Curve,
     title: Annotated[str, Field(default="", max_length=120, description="Plot title.")] = "",
 ) -> ToolSuccess:
-    """Render a curve artifact as a PNG. Handles `roc`, `pr`, `calibration` and `learning`.
+    """Render a curve artifact as a PNG. Handles `roc`, `pr`, `calibration`, `learning` and
+    `partial_dependence`.
 
     An unknown curve kind is `tool_param`. A learning curve plots train and validation means
-    against size; the other three plot `y` against `x`. Every text call passes `parse_math=False`
-    (chunk 09): a user-supplied `title` with paired `$` would otherwise be read as mathtext and
-    render mangled or raise mid-render.
+    against size; a partial-dependence curve plots one line per series over the column's grid
+    (its original units when a scaler mapped them back, chunk 18 §3.3); the other three plot `y`
+    against `x`. Every text call passes `parse_math=False` (chunk 09): a user-supplied `title`
+    with paired `$` would otherwise be read as mathtext and render mangled or raise mid-render.
     """
     loaded = load_json(paths.artifact(curve, "curve"))
     if not isinstance(loaded, dict):
         raise ToolParamError("curve is not a curve object", field_errors={"curve": "not a curve"})
     kind = loaded.get("kind")
-    if kind not in _CURVE_LABELS:
+    if kind != "partial_dependence" and kind not in _CURVE_LABELS:
         raise ToolParamError(
             f"unknown curve kind {kind!r}",
             field_errors={"curve": f"unknown kind: {kind!r}"},
         )
     kind_str = str(kind)
-    xlabel, ylabel = _CURVE_LABELS[kind_str]
-    fig, ax = _new_figure()
-    if kind_str == "learning":
+    fig, ax = new_figure()
+    if kind_str == "partial_dependence":
+        xlabel, ylabel = _plot_partial_dependence(ax, loaded)
+    elif kind_str == "learning":
+        xlabel, ylabel = _CURVE_LABELS[kind_str]
         sizes = np.asarray(cast("list[float]", loaded["sizes"]), dtype="float64")
         train_mean = np.asarray(cast("list[float]", loaded["train_mean"]), dtype="float64")
         valid_mean = np.asarray(cast("list[float]", loaded["valid_mean"]), dtype="float64")
@@ -848,6 +877,7 @@ def plot_curve(
         ax.plot(sizes, valid_mean, marker="o", label="valid")
         ax.legend()
     else:
+        xlabel, ylabel = _CURVE_LABELS[kind_str]
         x = np.asarray(cast("list[float]", loaded["x"]), dtype="float64")
         y = np.asarray(cast("list[float]", loaded["y"]), dtype="float64")
         ax.plot(x, y, marker="o")
@@ -1010,7 +1040,7 @@ def compute_learning_curve(
         "valid_mean": [json_scalar(float(v)) for v in valid_mean],
         "valid_std": [json_scalar(float(v)) for v in valid_a.std(axis=1)],
     }
-    meta = _save_curve(paths, payload, "learning")
+    meta = save_curve(paths, payload, "learning")
     return ToolSuccess(
         summary={"metric": metric, "sizes": json_scalar(len(sizes_a))}, artifacts=(meta,)
     )

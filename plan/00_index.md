@@ -213,7 +213,7 @@ far had 2–4 defects caught in review, so the review is not reduced, only share
 | B1 | 12 encoding + 13 training | M4 |
 | B2 | 14 evaluation + 15 inference | M5 ✅ |
 | B3 | 16 walking-skeleton gate (alone: it is the gate) | M6 ✅ |
-| B4 | 17 features + 18 interpretation | M7a |
+| B4 | 17 features + 18 interpretation | M7a ✅ |
 | B5 | 19 champion/reporting + 20 reproducibility | M7b |
 | B6 | 21 mcp_client + 25 llm_client (independent) | |
 | B7 | 22 engine core + 23 restart reconciliation | M8a |
@@ -255,8 +255,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 14 | [`14_tools_evaluation.md`](./14_tools_evaluation.md) — 11 tools **plus `rank_models` and `compare_models`** (pulled forward so the chunk 16 gate is self-contained). Every `score_*` reports a bootstrap 95 % CI (D33b) | completed | 07, 13 |
 | 15 | [`15_tools_inference.md`](./15_tools_inference.md) — `SPECS` registry, `build_dummy_matrix`, `assemble_inference_matrix`, statsmodels fits incl. Poisson GLM for count targets, coefficient table with confirmatory/exploratory labels and Holm adjustment (D35), VIF, residual/influence tests + known-answer test. **Moved before the skeleton gate** (review 2026-10-01): the skeleton fits an inferential model | completed | 07, 12 |
 | 16 | [`16_skeleton_integration.md`](./16_skeleton_integration.md) — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | completed | 08–15 |
-| 17 | [`17_tools_features.md`](./17_tools_features.md) — 7 feature-construction and selection tools (`bin_numeric` split into `fit_binner`/`apply_binner`) and the `transform_only` tool flag | untouched | 07, 12 |
-| 18 | [`18_tools_interpretation.md`](./18_tools_interpretation.md) — permutation importance, PDP compute (rendered by `plot_curve`), coefficient importance, error analysis | untouched | 07, 13, 14 |
+| 17 | [`17_tools_features.md`](./17_tools_features.md) — 7 feature-construction and selection tools (`bin_numeric` split into `fit_binner`/`apply_binner`) and the `transform_only` tool flag | completed | 07, 12 |
+| 18 | [`18_tools_interpretation.md`](./18_tools_interpretation.md) — permutation importance, PDP compute (rendered by `plot_curve`), coefficient importance, error analysis | completed | 07, 13, 14 |
 | 19 | `19_tools_champion_reporting.md` — `select_champion`, `render_metrics_table`, `assemble_report` | untouched | 14, 15, 18 |
 | 20 | `20_tools_reproducibility.md` — `export_pipeline_script` (champion path only), `snapshot_run`, `compute_run_hash`, `prune_intermediate_artifacts` | untouched | 06, 19 |
 

@@ -293,12 +293,18 @@ def tool(
     allow_in: Sequence[str],
     heavy: bool = False,
     needs_run: bool = True,
+    transform_only: bool = False,
 ) -> Callable[[ToolFn], ToolFn]:
     """Register a tool with the MCP server, wrapping it in the uniform envelope (§6.1.1).
 
     The decorated function contains only its own logic. This wrapper owns: registration,
-    `phase`/`allow_in`/`heavy` metadata, run-path resolution, the result envelope, exception
-    classification, timing, and the D17 semaphore for `heavy=True`.
+    `phase`/`allow_in`/`heavy`/`transform_only` metadata, run-path resolution, the result
+    envelope, exception classification, timing, and the D17 semaphore for `heavy=True`.
+
+    `transform_only=True` declares that node 12 may replay the tool on a test-derived frame
+    (chunk 17 D-a): every `apply_*`, `drop_columns`, `predict`/`predict_proba`, and the row-wise
+    feature constructors. The lineage lock (chunk 21) and the skeleton's `check_lineage` read this
+    flag off `meta` rather than matching tool-name prefixes.
 
     A tool body takes `paths: RunPaths` (when `needs_run=True`) plus its own declared
     parameters, and returns `ToolSuccess`. It never returns `ToolFailure` -- raising is the
@@ -381,7 +387,12 @@ def tool(
 
         server.tool(
             description=description,
-            meta={"phase": phase, "allow_in": list(allow_in), "heavy": heavy},
+            meta={
+                "phase": phase,
+                "allow_in": list(allow_in),
+                "heavy": heavy,
+                "transform_only": transform_only,
+            },
         )(wrapper)
 
         return func

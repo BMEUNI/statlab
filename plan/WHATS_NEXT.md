@@ -11,19 +11,19 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**16 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Batch B3 (chunk 16, the walking-skeleton gate) complete — **M6 passed**; batch B4 (chunks
-17 + 18) next.
+**18 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+underway. Batch B4 (chunks 17 features + 18 interpretation) complete — **M7a passed**; batch B5
+(chunks 19 + 20) next.
 
-| Verified 2026-10-02, after batch B3 (chunk 16, the walking-skeleton gate) | |
+| Verified 2026-10-02, after batch B4 (chunks 17 features + 18 interpretation) | |
 |---|---|
-| Tests | 1919 (1918 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 44 s |
-| Coverage | 100 % line **and** branch (4454 stmts, 1128 branches, 0 missed) |
-| mypy | `--strict` clean on 91 source files, `init_typed = true` |
+| Tests | 2002 (2001 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 46 s |
+| Coverage | 100 % line **and** branch (4924 stmts, 1246 branches, 0 missed) |
+| mypy | `--strict` clean on 95 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 23 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B3 added **zero** |
-| Git | local `master`, batch B3 committed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. 31 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B4 added **zero** |
+| Git | local `master`, batch B4 committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -42,6 +42,13 @@ certified coefficients, and labels confirmatory vs exploratory with Holm correct
 LLM, on a classification *and* a regression fixture, reproducing the probe's numbers to the
 printed precision; the test enforces chunk 21's allow-list and D32 lineage rules on itself and
 scores the champion on test exactly once.
+**M7a** (chunks 17 + 18) — the node-7/8 feature tools (three row-wise constructors, the fitted
+binner, two train-side selectors) and the node-11 interpretation tools (permutation importance,
+coefficient importance, partial dependence rendered as a `plot_curve` kind, error analysis by
+segment), each oracle-checked: permutation importance equals `sklearn.inspection.permutation_
+importance` to 1e-12, standardised coefficients equal `coef × population sd` by hand (incl. the
+`classes_[0]` sign flip), a noiseless linear PD slope equals the fitted coefficient to 3.5e-15,
+and error analysis aligns by label so a shuffled prediction order gives an identical table.
 
 ---
 
@@ -395,20 +402,111 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B4 (chunks 17 features + 18 interpretation)
+## Next: batch B5 (chunks 19 champion/reporting + 20 reproducibility)
 
-Batch B3 (the walking-skeleton gate) is green, so the architecture is proven end to end. B4 adds
-the remaining node-7/8 feature and interpretation tools:
+Batch B4 is green, so every node-7/8/11 tool exists and is oracle-checked. B5 adds the node-12/13
+champion and persistence tooling:
 
-- **Chunk 17** — 6 feature-construction and selection tools.
-- **Chunk 18** — permutation importance, PDP compute + render, coefficient importance, error
-  analysis.
+- **Chunk 19** — `select_champion`, `render_metrics_table`, `assemble_report`. It consumes the
+  interpretation artifacts B4 produced (see the handoff note at the end of the B4 summary for what
+  each tool's summary does *not* carry).
+- **Chunk 20** — `export_pipeline_script` (champion path only), `snapshot_run`,
+  `compute_run_hash`, `prune_intermediate_artifacts`.
 
-Both are ordinary tool chunks against the chunk-07 decorator; neither is a gate. The skeleton now
-exercises the full predictive + inferential spine, so a new tool that misbehaves will show up in
-its own tests, not only at an integration gate.
+Both are ordinary tool chunks against the chunk-07 decorator; neither is a gate.
 
-## Batch B3 — completed (summary)
+## Batch B4 — completed (summary)
+
+Two chunks, one review cycle: chunk 17 (node-8 feature tools + the cross-cutting `transform_only`
+flag) and chunk 18 (node-11 interpretation tools). Together they close **M7a**. Gates after B4:
+**2000 passed, 1 skipped** (2001 total), **100 % line and branch** (4924 stmts, 1246 branches, 0
+missed), mypy `--strict` clean on **95 source files**, ruff `check` + `format --check` clean, suite
+≈ 48 s. B4 added **zero** `Any`, **zero** `pragma: no cover`, **zero** new production `# type:
+ignore` (still only `tool.py`'s 2 `__signature__` gaps).
+
+### Chunk 17 (features)
+
+Node-8 feature tools plus the cross-cutting `transform_only` flag (D-a). Seven tools in
+`tools/features.py` (`phase="features"`): three stateless row-wise constructors
+(`add_datetime_parts` replaces its source; `add_interaction_terms`/`add_ratio_feature` add
+columns), the fitted `fit_binner`/`apply_binner` pair (binned column replaces its source as a
+`b{i}` string, picked up by `fit_onehot_encoder`), and two train-side selectors
+(`select_by_variance`, `select_by_mutual_info`) that write a reduced train frame plus
+`dropped_columns` for `drop_columns` to replay.
+
+`@tool` gained `transform_only: bool = False`, served in `meta`. It is `True` on exactly 13 tools:
+the 7 `apply_*`, `drop_columns`, `predict`, `predict_proba`, and the 3 constructors. A consistency
+test over the real `tools/list` pins the set and its three properties (not `fit_*`, no `train`
+parameter, lists `champion_selection`). `tests/test_skeleton.py`'s `check_lineage` now reads the
+flag off `tools/list` instead of matching `apply_*`/`predict` name prefixes — which already missed
+`drop_columns` and the constructors; the skeleton G1–G7 and its gate are unchanged, and all five
+lineage clauses were re-verified by deletion. All 7 chunk-17 DoD mutations killed. Hazards P1–P8 all
+handled (NaT mask, edge dedup+warn, ±inf outer edges, zero-denominator → NaN, `to_numpy(float64)`,
+NaN refused / bool discrete / sklearn lazy / `n_jobs=1`, `ddof=0`).
+
+### Chunk 18 (interpretation)
+
+Four node-11 tools in `tools/interpretation.py` (`phase="interpretation"`,
+`allow_in=["model_interpretation"]`): `permutation_importance` and `partial_dependence` (both
+`heavy=True`), `coefficient_importance`, `analyze_errors`. The model knows its own `target` and
+`features` (D-a), so the tools take a frame with no separate target parameter.
+
+**Reuse, not duplication (§1).** The evaluation/training helpers this chunk calls were made public
+by dropping the leading underscore, with no behaviour change: `predict_matrix`/`check_metric_task`
+in `training.py`; `proba_columns`/`class_labels`/`check_truth_classes_have_columns`/
+`load_truth_target`/`snapshot`/`hard_labels`/`new_figure`/`save_curve` in `evaluation.py`. **No
+chunk 13/14/17 test was edited.** Two helpers stayed **private** — `_align` and `_positive_class` —
+because `test_tools_evaluation.py` monkeypatches `ev._align` / `ev._positive_class` *by name* in two
+mutation tests, so renaming them would silently defeat those tests; the spec's "no test references
+them today" was inaccurate for exactly these two, and `interpretation.py` imports the private names
+(a legal cross-module import that keeps the existing tests green). `plot_curve` gained the
+`partial_dependence` kind (one line per series over `x_original` when a scaler mapped the grid back,
+else `x` with a "(scaled)" axis hint).
+
+**The numbers are oracle-checked, not eyeballed.** The tool `permutation_importance` shadows
+sklearn's function, so sklearn's is aliased inside the body; a test calls sklearn's directly as the
+oracle and asserts equality to **1e-12**. `std_coef` equals `coef × population sd (ddof=0)` computed
+by hand to **1e-9**, including the P4 sign flip: binary `LogisticRegression.coef_` refers to
+`classes_[1]`, so when the contract's positive class is `classes_[0]` every coefficient is negated
+(a dedicated test flips the snapshot's `positive_class` to `classes_[0]` and asserts each sign
+inverts). A **noiseless** linear-regression PD has the known answer — consecutive PD slopes equal the
+fitted coefficient (3.0) to **3.5e-15**. `analyze_errors` aligns predictions to truth **by label**
+(the shared `_align`), so a shuffled prediction order yields a byte-identical table; a planted
+all-wrong segment ranks first in `worst`, and a 5-row segment is `small` and excluded.
+
+**Mutation evidence** (all 7 §5 mutations KILLED; each replaced via a harness that asserted ≥1
+failing test and restored `interpretation.py` byte-for-byte in a `finally`, confirmed by
+`git diff --stat` afterward):
+
+| Mutation | Test that failed |
+|---|---|
+| `random_state` not passed to permutation importance | `test_permutation_different_seed_differs` |
+| `std_coef` without the sd factor | `test_coef_std_coef_equals_coef_times_sd` |
+| no sign flip for a `classes_[0]` positive class | `test_coef_sign_flips_for_classes0_positive` |
+| PD overwrites the column on the first row only | `test_pd_linear_regression_known_answer` |
+| `x_original` computed as `(x − center) / scale` | `test_pd_scaler_maps_x_original` |
+| `analyze_errors` aligns by position | `test_errors_shuffled_prediction_order_identical_table` |
+| `worst` includes `small` segments | `test_errors_small_segment_excluded_from_worst` |
+
+**Deliberately not added** (DO NOT ADD list): grouped permutation (left as the `ponytail:` comment
+D-b asks for — a `groups` parameter fed from the encoder's levels is the upgrade), ICE curves, 2-D
+PDP, SHAP, a separate `plot_partial_dependence` tool (PDP renders through `plot_curve`'s new kind,
+D-d). Nothing in `backend/` or `contracts/` changed.
+
+**For chunk 19 — what `assemble_report` needs that these summaries do not carry.** (1)
+`permutation_importance`'s summary carries only the **top 10** rows (`top`) plus `baseline`; the full
+per-feature table is in the `table` artifact's `features` list, so a report wanting every feature
+reads the artifact, not the summary. (2) `coefficient_importance`'s summary likewise carries only the
+top 10 by `|std_coef|` and the intercept(s); the full per-(class,)feature rows are in the artifact.
+(3) `partial_dependence` puts **all** the curve data (`x`, `x_original`, per-series `y`) only in the
+`curve` artifact — the summary carries `column`, `task`, `grid_points` and the series names, so a
+report rendering the curve reads the artifact. (4) `analyze_errors`'s summary carries `overall_error`,
+`n_segments` and the top-5 non-`small` `worst` rows; every `(column, segment)` row (and each
+segment's `n`/`bias`/`small`) is only in the `table` artifact. In short: each tool's summary is a
+headline; `assemble_report` must open the `table`/`curve` artifact for the full rows, exactly as the
+chunk-16 gate reads `coefficient_table`'s rows off disk.
+
+
 
 One chunk, one review cycle: chunk 16, the walking-skeleton gate. **M6 passed.** The 33 `[v1]`
 tools (PLAN.md §6.4) are driven end to end over a real MCP session, zero LLM, on a classification
