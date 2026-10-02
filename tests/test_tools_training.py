@@ -102,7 +102,7 @@ _FAST_RF = {"n_estimators": 10}
 
 def test_list_estimators_all_and_filtered() -> None:
     allo = _dict(list_estimators().summary["estimators"])
-    assert len(allo) == 6
+    assert len(allo) == 7
     clf = _dict(list_estimators(task="classification").summary["estimators"])
     assert set(clf) == {"logistic_regression", "random_forest_classifier", "hist_gb_classifier"}
     entry = _dict(clf["logistic_regression"])

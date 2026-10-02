@@ -700,9 +700,10 @@ def test_fit_summary_glm_fields(run_paths: RunPaths) -> None:
 
 
 def test_specs_names_and_target_types() -> None:
-    assert set(SPECS) == {"ols", "logit", "glm_poisson", "glm_gamma"}
+    assert set(SPECS) == {"ols", "logit", "mnlogit", "glm_poisson", "glm_gamma"}
     assert SPECS["ols"].target_types == ("continuous",)
     assert SPECS["logit"].target_types == ("binary",)
+    assert SPECS["mnlogit"].target_types == ("multiclass",)
     assert SPECS["glm_poisson"].target_types == ("count",)
     assert SPECS["glm_gamma"].target_types == ("continuous",)
     assert SPECS["glm_poisson"].family == "poisson"
@@ -719,7 +720,7 @@ def test_list_estimators_reports_inferential_models(run_paths: RunPaths) -> None
 
     res = list_estimators()
     inferential = _d(res.summary["inferential_models"])
-    assert set(inferential) == {"ols", "logit", "glm_poisson", "glm_gamma"}
+    assert set(inferential) == {"ols", "logit", "mnlogit", "glm_poisson", "glm_gamma"}
     assert _d(inferential["ols"])["tool"] == "fit_ols"
 
 

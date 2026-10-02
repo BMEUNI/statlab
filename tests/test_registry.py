@@ -25,6 +25,7 @@ def test_exactly_the_six_d25_names_with_tasks() -> None:
         "random_forest_classifier",
         "hist_gb_classifier",
         "linear_regression",
+        "ridge",
         "random_forest_regressor",
         "hist_gb_regressor",
     }
@@ -33,6 +34,7 @@ def test_exactly_the_six_d25_names_with_tasks() -> None:
     assert tasks["random_forest_classifier"] == "classification"
     assert tasks["hist_gb_classifier"] == "classification"
     assert tasks["linear_regression"] == "regression"
+    assert tasks["ridge"] == "regression"
     assert tasks["random_forest_regressor"] == "regression"
     assert tasks["hist_gb_regressor"] == "regression"
 

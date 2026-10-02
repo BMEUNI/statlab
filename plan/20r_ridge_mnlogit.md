@@ -1,6 +1,23 @@
 ---
-status: untouched
+status: completed
 dependencies: [13, 15, 20]
+completion_date: 2026-10-02
+implementation_notes: |
+  Shipped ridge (regression estimator registry line, alpha grid 0.1/1/10/100, interpretable,
+  no class_weight) and mnlogit (SPECS line + fit_mnlogit + multinomial coefficient_table).
+  Deferred split_temporal/split_grouped (D-c). Served tool count 83 (82 + fit_mnlogit).
+  Index order confirmed and oracle-tested: params/bse/pvalues (p, K-1); conf_int() (K-1, p, 2)
+  read as [j, t, :]; cov_params() equation-major (F-order), goal restriction built on t + j*p so
+  df = terms x (K-1); goal chi2 equals a hand-built b' V^-1 b from cov_params() to 1e-9.
+  Separation surfaces as a numpy exp overflow, caught by np.errstate(over/invalid/divide=raise)
+  (thread-local; proven to fire in a worker thread) mapped to ToolDataError; no
+  warnings.catch_warnings. FittedInference gained classes: tuple[str, ...] = () (default keeps old
+  pickles loading). compute_influence/plot_residuals/test_residuals refuse mnlogit (tool_param)
+  with a ponytail comment naming per-equation response residuals as the upgrade. All five DoD
+  mutations caught by a named test. Pinned assertions changed: test_registry.py six->seven
+  estimators (+ridge); test_tools_training.py list_estimators len 6->7; test_tools_inference.py
+  SPECS set and inferential_models set (+mnlogit). Gates: 2095 passed/1 skipped, 64s; 100% line
+  and branch on inference.py and registry.py; mypy clean 103 files; ruff clean. Not committed.
 ---
 
 # Chunk 20r — Close the M7 scope gap: `ridge`, `mnlogit`; defer two splits
@@ -171,3 +188,17 @@ P1–P4 do not reproduce; a chunk 15 test needs edits beyond §2; anything needs
 2. The mutation table.
 3. The planted-vs-fitted mnlogit coefficients and both goal rows.
 4. The served tool count and the names (it must be 83).
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+**The errstate guard was only tested under pytest's warning rules.** Both separation tests
+expected `ToolDataError`. With the guard removed, they still failed, but only because
+`filterwarnings=error` turns numpy's overflow `RuntimeWarning` into an exception. In production
+that warning is not fatal, and without the guard MNLogit silently returns `converged=True` with
+diverged coefficients, which is P3's whole point.
+
+Added `test_separated_target_is_tool_data_error_in_production`. It ignores `RuntimeWarning`, as
+production does, so only the guard can raise. It passes on the code and fails with the guard
+removed.

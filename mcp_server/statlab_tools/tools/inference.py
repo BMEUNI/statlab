@@ -139,6 +139,9 @@ class FittedInference:
     n_obs: int
     positive_class: str | None
     result: object
+    classes: tuple[str, ...] = ()
+    """For `mnlogit` only: the class labels, base first then the equation order (D-a, chunk 20r).
+    Empty for every other model. The default keeps pre-20r pickles loading."""
 
 
 # --- manifest ------------------------------------------------------------------------------------
@@ -607,6 +610,96 @@ def _binary_target(
 
 
 @tool(phase="inference", allow_in=_INFERENCE_PHASES, heavy=True)
+def fit_mnlogit(
+    paths: RunPaths, matrix: _Matrix, target: _Target, predictors: _FitPredictors = None
+) -> ToolSuccess:
+    """Fit a multinomial logistic regression (`sm.MNLogit`) on `matrix` (§3.3, chunk 20r). No
+    formulas (D-a). The target must have at least three observed levels; exactly two is
+    `tool_param` ("use fit_logit").
+
+    The base (reference) class is chosen, not left to statsmodels' alphabetical default (D-a):
+    the first observed label of the snapshot's `target.class_order` when set, else the most
+    frequent observed class (ties by string order), matching chunk 15's reference-level rule.
+    `y` is encoded as integer codes with the base coded 0 so statsmodels keeps that base; the
+    equations are then the remaining classes in observed-count order (ties by string order).
+
+    Separation does **not** warn as `PerfectSeparationWarning` here -- `exp` overflows, a
+    `RuntimeWarning` fatal under `-W error`, and silent otherwise (P3). The fit runs inside
+    `np.errstate(over="raise", invalid="raise", divide="raise")` (thread-local, unlike
+    `warnings.catch_warnings`, so it is allowed), and a `FloatingPointError`, a
+    `ConvergenceWarning`/`PerfectSeparationWarning` raised as an exception, or `converged == False`
+    each become the same `ToolDataError`. Saves a `FittedInference` with `classes` (base first).
+    """
+    frame, x, y, terms = _design(paths, matrix, target, predictors)
+    base, classes, codes = _mnlogit_codes(y, _snapshot(paths))
+    import statsmodels.api as sm
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning, PerfectSeparationWarning
+
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            result = sm.MNLogit(codes, x).fit(disp=0)
+    except (FloatingPointError, PerfectSeparationWarning, ConvergenceWarning) as exc:
+        raise ToolDataError(
+            "perfect separation or non-convergence: coefficients not identified"
+        ) from exc
+    if not _converged(result):
+        raise ToolDataError("perfect separation or non-convergence: coefficients not identified")
+    fitted = FittedInference(
+        model="mnlogit",
+        target=target,
+        terms=tuple(terms),
+        n_obs=len(frame),
+        positive_class=None,
+        result=result,
+        classes=classes,
+    )
+    meta = _save_fit(paths, fitted)
+    summary = _fit_summary(fitted, result)
+    summary["base_class"] = base
+    summary["classes"] = list(classes)
+    return ToolSuccess(summary=summary, artifacts=(meta,))
+
+
+def _mnlogit_codes(
+    y: pd.Series, snapshot: DataContract | None
+) -> tuple[str, tuple[str, ...], np.ndarray]:
+    """The base class, the class tuple (base first then equation order), and the integer codes for
+    MNLogit (D-a). The target must have >= 3 observed levels (`tool_param`; exactly 2 says use
+    `fit_logit`). Levels are compared by `as_str`/`as_str_scalar` (B2). The base is the first
+    observed label of the snapshot's `target.class_order` when set and observed, else the most
+    frequent observed class (ties by first string order). The equations are the remaining classes
+    in descending observed-count order (ties by string order). The base is coded 0 so statsmodels
+    keeps it as the reference, and each equation class is coded 1..K-1 in that order."""
+    counts = _str_level_counts(y)
+    observed = sorted(str(level) for level in counts.index)
+    if len(observed) < 3:
+        raise ToolParamError(
+            f"mnlogit needs a target with at least three levels, got {len(observed)}: "
+            f"{observed!r}; use fit_logit for two",
+            field_errors={"target": f"{len(observed)} levels, expected >= 3"},
+        )
+
+    def freq_order(labels: list[str]) -> list[str]:
+        return sorted(labels, key=lambda lbl: (-int(counts[lbl]), lbl))
+
+    base = freq_order(observed)[0]
+    if snapshot is not None and snapshot.target.class_order is not None:
+        wanted = as_str_scalar(snapshot.target.class_order[0])
+        if wanted not in observed:
+            raise ToolDataError(
+                f"contract class_order[0] {snapshot.target.class_order[0]!r} is not one of the "
+                f"observed target levels {observed!r}"
+            )
+        base = wanted
+    equations = freq_order([lbl for lbl in observed if lbl != base])
+    classes = (base, *equations)
+    index = {label: code for code, label in enumerate(classes)}
+    coded = as_str(y).map(index)
+    codes = coded.to_numpy(dtype="int64")
+    return base, classes, codes
+
+
+@tool(phase="inference", allow_in=_INFERENCE_PHASES, heavy=True)
 def fit_glm(
     paths: RunPaths,
     matrix: _Matrix,
@@ -683,6 +776,20 @@ def _load_fit(paths: RunPaths, fit: ArtifactRef) -> FittedInference:
     return obj
 
 
+def _refuse_mnlogit_residuals(fitted: FittedInference, tool_name: str) -> None:
+    """Residual-based diagnostics refuse an mnlogit fit (D-b): residuals have no single scale
+    across K-1 equations, so Cook's distance, leverage and a residuals-vs-fitted plot are not
+    well-defined on one axis.
+    ponytail: the upgrade is per-equation (one-vs-base) response residuals -- one diagnostic set
+    per non-base class -- which no caller needs in v1; deferred until a node asks for it."""
+    if fitted.model == "mnlogit":
+        raise ToolParamError(
+            f"{tool_name} does not support mnlogit: residuals have no single scale across "
+            f"equations",
+            field_errors={"fit": "mnlogit residual diagnostics are not supported"},
+        )
+
+
 def _snapshot(paths: RunPaths) -> DataContract | None:
     """The contract snapshot, or `None` (tests calling bodies without one). Same read as
     `training.tuning_from_snapshot` / `evaluation._snapshot`."""
@@ -714,6 +821,39 @@ def coefficient_table(
     term_to_source = cast("dict[str, JsonValue]", manifest_data["terms"])
     goal_columns = {col for goal in goals for col in goal.predictors}
 
+    if fitted.model == "mnlogit":
+        rows, n_confirmatory = _mnlogit_term_rows(fitted, term_to_source, goal_columns)
+    else:
+        rows, n_confirmatory = _single_equation_term_rows(fitted, term_to_source, goal_columns)
+
+    goal_rows = _goal_rows(goals, fitted, term_to_source)
+    payload: dict[str, JsonValue] = {
+        "model": fitted.model,
+        "terms": rows,
+        "goals": goal_rows,
+        "n_terms": json_scalar(len(fitted.terms)),
+        "n_confirmatory": json_scalar(n_confirmatory),
+    }
+    if fitted.model == "mnlogit":
+        payload["base_class"] = fitted.classes[0] if fitted.classes else None
+        payload["classes"] = list(fitted.classes)
+    meta = _save_table(paths, payload, "coefficient_table")
+    summary: dict[str, JsonValue] = {
+        "model": fitted.model,
+        "goals": goal_rows,
+        "n_terms": json_scalar(len(fitted.terms)),
+        "n_confirmatory": json_scalar(n_confirmatory),
+    }
+    if fitted.model == "mnlogit":
+        summary["base_class"] = fitted.classes[0] if fitted.classes else None
+    return ToolSuccess(summary=summary, artifacts=(meta,))
+
+
+def _single_equation_term_rows(
+    fitted: FittedInference, term_to_source: dict[str, JsonValue], goal_columns: set[str]
+) -> tuple[list[JsonValue], int]:
+    """Per-term rows for OLS/Logit/GLM: `params`/`bse`/`tvalues`/`pvalues` are 1-d over `terms`,
+    `conf_int()` is `(p, 2)`."""
     from statsmodels.base.model import Results
 
     res = cast(Results, fitted.result)
@@ -743,23 +883,51 @@ def coefficient_table(
                 "p_note": p_note,
             }
         )
+    return rows, n_confirmatory
 
-    goal_rows = _goal_rows(goals, fitted, term_to_source)
-    payload: dict[str, JsonValue] = {
-        "model": fitted.model,
-        "terms": rows,
-        "goals": goal_rows,
-        "n_terms": json_scalar(len(fitted.terms)),
-        "n_confirmatory": json_scalar(n_confirmatory),
-    }
-    meta = _save_table(paths, payload, "coefficient_table")
-    summary: dict[str, JsonValue] = {
-        "model": fitted.model,
-        "goals": goal_rows,
-        "n_terms": json_scalar(len(fitted.terms)),
-        "n_confirmatory": json_scalar(n_confirmatory),
-    }
-    return ToolSuccess(summary=summary, artifacts=(meta,))
+
+def _mnlogit_term_rows(
+    fitted: FittedInference, term_to_source: dict[str, JsonValue], goal_columns: set[str]
+) -> tuple[list[JsonValue], int]:
+    """Per-(equation, term) rows for MNLogit (P1). `params`/`bse`/`tvalues`/`pvalues` are
+    `(p, K-1)`; `conf_int()` is `(K-1, p, 2)`, so a term's CI in equation `j` is
+    `conf_int()[j, t, :]` (NOT `[t, j]`). Each row carries its `equation` (the non-base class).
+    `n_terms` counts distinct terms, so a term is `confirmatory` once per equation it appears in,
+    counted once per row here only to keep parity with the single-equation branch; the caller's
+    `n_terms` is `len(fitted.terms)` regardless."""
+    from statsmodels.base.model import Results
+
+    res = cast(Results, fitted.result)
+    params = np.asarray(res.params, dtype="float64")  # (p, K-1)
+    bse = np.asarray(res.bse, dtype="float64")
+    stats = np.asarray(res.tvalues, dtype="float64")
+    pvals = np.asarray(res.pvalues, dtype="float64")
+    conf = np.asarray(res.conf_int(alpha=_CI_ALPHA), dtype="float64")  # (K-1, p, 2)
+    equations = fitted.classes[1:]  # base is classes[0]
+
+    rows: list[JsonValue] = []
+    n_confirmatory = 0
+    for j, equation in enumerate(equations):
+        for t, term in enumerate(fitted.terms):
+            role, p_note = _term_role(term, term_to_source, goal_columns)
+            if role == "confirmatory":
+                n_confirmatory += 1
+            rows.append(
+                {
+                    "equation": equation,
+                    "term": term,
+                    "source_column": _source_of(term, term_to_source),
+                    "role": role,
+                    "coef": json_scalar(float(params[t, j])),
+                    "se": json_scalar(float(bse[t, j])),
+                    "stat": json_scalar(float(stats[t, j])),
+                    "p": json_scalar(float(pvals[t, j])),
+                    "ci_low": json_scalar(float(conf[j, t, 0])),
+                    "ci_high": json_scalar(float(conf[j, t, 1])),
+                    "p_note": p_note,
+                }
+            )
+    return rows, n_confirmatory
 
 
 def _source_of(term: str, term_to_source: dict[str, JsonValue]) -> str | None:
@@ -797,6 +965,27 @@ def _terms_for_goal(
     return out
 
 
+def _goal_restriction(idx: list[int], n_terms: int, model: str, n_equations: int) -> np.ndarray:
+    """The joint-Wald restriction matrix `R` for a goal's term indices.
+
+    For a single-equation model (OLS/Logit/GLM) `R` is `(len(idx), n_terms)`, one row per term.
+
+    For `mnlogit` the parameter vector `wald_test` sees is `params.ravel(order="F")` -- equation
+    major, so the flat index of (term `t`, equation `j`) is `t + j*n_terms` (P2). A goal covers
+    its terms in **every** equation, so `R` is `(len(idx) * n_equations, n_terms * n_equations)`
+    with df = terms x (K-1). Building `R` on C-order (`j + t*n_equations`) or on the first equation
+    only is wrong -- both are mutation targets in the DoD."""
+    width = n_terms * n_equations
+    rows: list[int] = []
+    for j in range(n_equations):
+        offset = j * n_terms if model == "mnlogit" else 0
+        rows.extend(t + offset for t in idx)
+    restriction = np.zeros((len(rows), width), dtype="float64")
+    for row, col in enumerate(rows):
+        restriction[row, col] = 1.0
+    return restriction
+
+
 def _goal_rows(
     goals: tuple[InferenceGoal, ...],
     fitted: FittedInference,
@@ -810,6 +999,7 @@ def _goal_rows(
 
     res = cast(Results, fitted.result)
     n_terms = len(fitted.terms)
+    n_equations = max(len(fitted.classes) - 1, 1) if fitted.model == "mnlogit" else 1
 
     prepared: list[tuple[InferenceGoal, list[int]]] = [
         (goal, _terms_for_goal(goal, fitted, term_to_source)) for goal in goals
@@ -819,13 +1009,11 @@ def _goal_rows(
     stats: list[float] = []
     dfs: list[int] = []
     for _goal, idx in testable:
-        restriction = np.zeros((len(idx), n_terms), dtype="float64")
-        for row, col in enumerate(idx):
-            restriction[row, col] = 1.0
+        restriction = _goal_restriction(idx, n_terms, fitted.model, n_equations)
         wald = res.wald_test(restriction, scalar=True)
         stats.append(float(wald.statistic))
         raw_p.append(float(wald.pvalue))
-        dfs.append(len(idx))
+        dfs.append(restriction.shape[0])
 
     holm: list[float | None] = [None] * len(testable)
     if len(testable) > 1:
@@ -903,10 +1091,12 @@ def inferential_fit_summary(paths: RunPaths, fit: _Fit) -> ToolSuccess:
         summary["rsquared_adj"] = json_scalar(float(res.rsquared_adj))
         summary["f_statistic"] = json_scalar(float(res.fvalue))
         summary["f_pvalue"] = json_scalar(float(res.f_pvalue))
-    elif fitted.model == "logit":
+    elif fitted.model in ("logit", "mnlogit"):
         summary["pseudo_rsquared"] = json_scalar(float(res.prsquared))
         summary["llr"] = json_scalar(float(res.llr))
         summary["llr_pvalue"] = json_scalar(float(res.llr_pvalue))
+        if fitted.model == "mnlogit":
+            summary["base_class"] = fitted.classes[0] if fitted.classes else None
     else:
         summary["pseudo_rsquared"] = json_scalar(float(res.pseudo_rsquared()))
         summary["deviance"] = json_scalar(float(res.deviance))
@@ -1018,6 +1208,7 @@ def compute_influence(paths: RunPaths, fit: _Fit) -> ToolSuccess:
     each `{label, cooks, leverage}`.
     """
     fitted = _load_fit(paths, fit)
+    _refuse_mnlogit_residuals(fitted, "compute_influence")
     from statsmodels.base.model import Results
 
     res = cast(Results, fitted.result)
@@ -1081,6 +1272,7 @@ def plot_residuals(paths: RunPaths, fit: _Fit) -> ToolSuccess:
     `parse_math=False` (chunk 09).
     """
     fitted = _load_fit(paths, fit)
+    _refuse_mnlogit_residuals(fitted, "plot_residuals")
     from statsmodels.base.model import Results
 
     res = cast(Results, fitted.result)

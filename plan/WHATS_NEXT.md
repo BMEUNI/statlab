@@ -11,18 +11,19 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**20 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-complete — **M7b passed**; batch B6 (chunks 21 mcp_client + 25 llm_client) next.
+**20 of 41 chunks complete, plus revision batches 09r and 20r.** Phase A (foundation) done; Phase B (MCP server)
+complete — **M7b passed**, scope gap closed by 20r; batch B6 (chunks 21 mcp_client + 25 llm_client) next.
 
-| Verified 2026-10-02, after batch B5 (chunks 19 champion/reporting + 20 reproducibility) | |
+| Verified 2026-10-02, after chunk 20r (ridge, mnlogit; two splits deferred) | |
 |---|---|
-| Tests | 2077 (2076 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 64 s |
-| Coverage | 100 % line **and** branch (5331 stmts, 1380 branches, 0 missed) |
-| mypy | `--strict` clean on 101 source files, `init_typed = true` |
+| Tests | 2097 (2096 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 63 s |
+| Coverage | 100 % line **and** branch (5417 stmts, 1406 branches, 0 missed) |
+| mypy | `--strict` clean on 103 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. **2 in production**, both the `__signature__` stub gap, justified inline — B5 added **zero** |
-| Git | local `master`, batch B5 committed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. **2 in production**, both the `__signature__` stub gap, justified inline — 20r added **zero** |
+| Served tools | **83** (v1): 84 − `split_temporal` − `split_grouped` + `fit_mnlogit` |
+| Git | local `master`, chunk 20r committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -411,10 +412,10 @@ Not oversights. Each waits on something that does not exist yet.
 
 ## Next: batch B6 (chunks 21 mcp_client + 25 llm_client)
 
-**Open scope gap (B5 review).** `PLAN.md` §6.4 says `ridge`, `mnlogit`, `glm_poisson`, `glm_gamma`, target encoding and `split_temporal`/`split_grouped` "follow at M7". No chunk row ever scheduled four of them: `split_temporal` and `split_grouped` (catalogue tools, so 82 of the 84 are served) and the registry lines `ridge` and `mnlogit`. Node 4 (chunk 27a) already escalates a temporal/grouped request rather than falling back to random, so nothing is silently wrong today, but M7b's "full catalogue" criterion is not met for those two tools. Awaiting a decision: schedule them as a small chunk, or defer them out of v1.
+**Scope gap resolved (chunk 20r).** The M7 §6.4 follow-ups are closed: `ridge` and `mnlogit` (`fit_mnlogit` + multinomial `coefficient_table`) shipped, and `split_temporal`/`split_grouped` were deferred out of v1 (D-c; node 4 escalates a temporal/grouped request as `data` rather than falling back to a leaky random split). The v1 catalogue is **83 served tools**.
 
 
-Phase B (the MCP server and its tool catalogue) is complete — **M7b passed**, 84 tools served. The
+Phase B (the MCP server and its tool catalogue) is complete — **M7b passed**, 83 tools served. The
 engine and its clients come next. B6 is two independent chunks:
 
 - **Chunk 21** — the MCP client the orchestrator uses: `tools/list` + `call_tool` over real HTTP

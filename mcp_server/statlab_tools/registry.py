@@ -64,7 +64,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         RandomForestClassifier,
         RandomForestRegressor,
     )
-    from sklearn.linear_model import LinearRegression, LogisticRegression
+    from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 
     _grid_rf: Grid = {"max_depth": (None, 5, 10), "min_samples_leaf": (1, 5)}
     _grid_hgb: Grid = {"learning_rate": (0.05, 0.1), "max_leaf_nodes": (15, 31)}
@@ -91,6 +91,12 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         # LinearRegression has no random_state (P5): the seed is accepted and ignored, so the
         # build signature stays uniform across the registry.
         return LinearRegression()
+
+    def ridge(seed: int, class_weight: ClassWeight) -> object:
+        # A second linear, interpretable regressor (D-d, chunk 20r). Ridge takes random_state
+        # (used only by the "sag"/"saga" solvers; harmless and seeded for uniformity) and
+        # supports no class_weight. coefficient_importance reads its coef_ unchanged.
+        return Ridge(alpha=1.0, random_state=seed)
 
     def random_forest_regressor(seed: int, class_weight: ClassWeight) -> object:
         return RandomForestRegressor(n_estimators=200, n_jobs=1, random_state=seed)
@@ -127,6 +133,14 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             task="regression",
             build=linear_regression,
             default_grid={},
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=True,
+        ),
+        "ridge": EstimatorEntry(
+            task="regression",
+            build=ridge,
+            default_grid={"alpha": (0.1, 1.0, 10.0, 100.0)},
             handles_missing=False,
             supports_class_weight=False,
             interpretable=True,
@@ -271,9 +285,11 @@ class InferentialEntry:
 SPECS: dict[str, InferentialEntry] = {
     "ols": InferentialEntry("fit_ols", ("continuous",)),
     "logit": InferentialEntry("fit_logit", ("binary",)),
+    "mnlogit": InferentialEntry("fit_mnlogit", ("multiclass",)),
     "glm_poisson": InferentialEntry("fit_glm", ("count",), "poisson"),
     "glm_gamma": InferentialEntry("fit_glm", ("continuous",), "gamma"),
 }
-"""The four inferential models (§3.1). Reported by `list_estimators` as `inferential_models` so
-node 1 can validate `modelling.inferential_model` against it without importing server code. Every
-`.tool` is a registered `inference`-phase tool name (checked by a chunk 15 registry test)."""
+"""The five inferential models (§3.1, chunk 20r adds `mnlogit`). Reported by `list_estimators` as
+`inferential_models` so node 1 can validate `modelling.inferential_model` against it without
+importing server code. Every `.tool` is a registered `inference`-phase tool name (checked by a
+chunk 15 registry test)."""
