@@ -1,7 +1,7 @@
 # What's next
 
-Handoff note, finalized 2026-09-11 after chunk 07. Read this first, then `00_index.md`, then
-`PLAN.md`.
+Live continuation state. Read this first, then relevant `00_index.md` blocks and the active spec.
+Read only the `PLAN.md` sections the task needs. Validation policy lives in root `AGENTS.md`.
 
 This file holds what is **not** written down elsewhere: live state, how the working loop actually
 operates, and the lessons that cost something to learn. Architecture lives in `PLAN.md`; the chunk
@@ -14,7 +14,7 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 **20 of 41 chunks complete, plus revision batches 09r and 20r.** Phase A (foundation) done; Phase B (MCP server)
 complete — **M7b passed**, scope gap closed by 20r; batch B6 (chunks 21 mcp_client + 25 llm_client) next.
 
-| Verified 2026-10-02, after chunk 20r (ridge, mnlogit; two splits deferred) | |
+| Historical verified baseline: `5447651`, 2026-10-02 after chunk 20r | |
 |---|---|
 | Tests | 2097 (2096 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 63 s |
 | Coverage | 100 % line **and** branch (5417 stmts, 1406 branches, 0 missed) |
@@ -23,9 +23,17 @@ complete — **M7b passed**, scope gap closed by 20r; batch B6 (chunks 21 mcp_cl
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
 | Suppressions | zero `pragma: no cover`; zero `Any`. **2 in production**, both the `__signature__` stub gap, justified inline — 20r added **zero** |
 | Served tools | **83** (v1): 84 − `split_temporal` − `split_grouped` + `fit_mnlogit` |
-| Git | local `master`, chunk 20r committed, tree clean |
+| Git | Baseline commit `5447651`; this row is historical, not current HEAD |
 
-Re-verify with `make test && make typecheck && make lint` before trusting this table.
+At session startup inspect git status/HEAD and compare relevant changes with recorded evidence,
+following [AGENTS.md](../AGENTS.md#validation-policy). Do not re-run full gates simply to start.
+Unfinished commit `02f1739` was rewound at the user's request; its chunk-21 changes remain in the
+working tree. The table above is the older baseline, not acceptance of that work. Chunk 21 still
+records a pending cancellation-audit review
+correction; this workflow-only task does not resolve or accept it. Newer temporary logs show 2137
+passed/1 skipped, 100% coverage (5788 statements, 1514 branches), and clean mypy on 106 files, but
+lack a durable candidate/exit-code receipt. Preserve that distinction; reconcile source/evidence
+when B6 resumes rather than treating stale counts or missing receipts as automatic startup gates.
 
 Milestones passed: **M1** (chunk 07) — an external MCP client completes `tools/list` and a
 round-trip `call_tool` over real HTTP; a tokenless request is rejected. **M2** (chunk 08) — the
@@ -90,158 +98,90 @@ memory were wrong before that block existed.
 
 ## The working loop
 
-Five steps per chunk. Steps 1, 2, 4 and 5 are mine; step 3 is a separate implementation agent with
-no shared context.
+Root [AGENTS.md](../AGENTS.md#validation-policy) is the single validation authority. One cycle per
+execution batch; dependency-ready stages run sequentially. Main plans/reviews/accepts; a fresh Luna
+implementer edits/debugs. No product source, test, or mutation edits by the main agent.
 
-### Step 1 — I draft `plan/NN_name.md`
+### Step 1 — Main drafts a bounded spec
 
-Before writing, I read the `PLAN.md` sections the chunk touches and **probe anything version- or
-environment-specific against the installed packages**. Probing is not optional: it caught that
-`disallow_any_explicit` breaks on every `BaseModel`, that all seven pandas dtypes survive parquet
-untouched, that `os.link` + `unlink` makes refcounting unnecessary, that a `TEXT PRIMARY KEY` accepts
-`NULL`, and that four MCP SDK assumptions were stale. A spec asserting unverified behaviour is a spec
-that spends the agent's time discovering my mistakes.
+Use existing environment facts from `00_index.md`; probe only a new task-relevant assumption, not
+facts already verified. Keep the house format:
 
-**Exact anatomy — six parts, same order every time:**
-
-```
+```text
 ---
 status: untouched | in_progress | completed
-dependencies: [01, 02, 05]        # chunk numbers, always < N
+dependencies: [available prerequisite chunks]
 completion_date: null
-implementation_notes: ""          # agent appends on finish
+implementation_notes: ""       # main updates after review/acceptance
 ---
-
-# Chunk NN — <title>
-
-**Goal.** One paragraph. Names the PLAN.md sections and decision IDs it implements.
-
-## 1. Prerequisites & Context
-   - State after chunk N-1: test count, coverage, mypy file count, the commit hash
-   - Table of existing symbols this chunk reuses, with file paths and why each is relevant
-   - Environment facts that bite here, pointing at 00_index.md rather than restating
-   - Any decision this chunk forces that PLAN.md does not answer, with alternatives + reasons
-   - "What this chunk does NOT do" table: item → which chunk owns it → what it waits on
-
-## 2. Files to Create / Modify
-   Explicit table. create vs modify marked. No file appears that the spec does not describe.
-
-## 3. Implementation Spec
-   Signatures with full type annotations, docstrings carrying the *reasoning* (not restating the
-   name), validation rules numbered so tests can cite them (V1..Vn, S1..Sn), error mapping,
-   schema/DDL verbatim where applicable. Prose explains why, never what the code plainly says.
-
-## 4. Test Suite Spec
-   A numbered table per test file: id, what it tests, what it must assert. Includes a target count
-   and the new total. Every rule from §3 gets a passing AND a failing case. Tests that must derive
-   their expectations (get_args, model_fields, PRAGMA introspection) say so explicitly.
-
-## 5. Definition of Done
-   Checkbox groups: Tests / Static analysis / Boundary / Behaviour / Housekeeping. Then:
-   - "Explicitly out of scope"
-   - "Stop and ask if" — conditions where guessing costs more than a round trip
-   - "Report back with" — 5-7 numbered questions, the last one feeding the NEXT chunk
-
-## 6+ Addendum (only when the first pass needs correction — see below)
+# Chunk NN — title
+Goal: relevant PLAN sections/decisions.
+1. Prerequisites & Context: recorded candidate evidence, reused symbols/paths, relevant facts.
+2. Files to Create / Modify: exact ownership.
+3. Implementation Spec: frozen signatures, validation, error mapping, decisions.
+4. Test Suite Spec: meaningful passing/failing cases and focused selectors.
+5. Definition of Done: behavior criteria, one final batch gate by main, only required probes,
+   out of scope, architectural stop conditions, report fields.
+6+. Addendum: review correction, affected evidence, focused commands, next-stage hazards.
 ```
 
-Where §3's content comes from: `PLAN.md` for the *what* (schema, tool signatures, decisions),
-`00_index.md` for the *environment*, the previous chunk's report for *corrections*, and my probes for
-anything neither covers.
+Specs/plan-only commits require document review, not product regression. Test counts are estimates,
+not quotas. Preserve architecture/security/lineage/typing/coverage requirements.
 
-### Step 2 — I write the handoff prompt
+### Step 2 — Main hands off one stage
 
-Not a file; pasted directly to the agent. Ranked by likelihood of going wrong, because an agent
-reading a flat list of thirty requirements weights them equally and the spec has already stated them
-all once.
+Give a fresh implementer the task/spec, exact owned files, relevant architecture excerpts, likely
+reuse points, the previous stage's concise report, acceptance criteria, focused commands, and stop
+conditions. Root AGENTS applies; select only needed index/convention blocks. Do not send the entire
+repository or historical reports, or ask it to read all of PLAN/WHATS_NEXT before starting.
 
-**Exact anatomy:**
-
-```
-Implement chunk NN. Work only on chunk NN. Stop when its DoD is met — chunk NN+1 is not specced
-and you must not invent it.
-
-READ FIRST, IN THIS ORDER
-  1. plan/NN_name.md              the spec
-  2. plan/00_index.md             hard rules + verified environment (name the relevant block)
-  3. plan/WHATS_NEXT.md           conventions + the corrections and their pattern
-  4. plan/PLAN.md §x.y, Dnn       the authoritative sections. "PLAN.md wins on any conflict."
-
-CONTEXT: chunks 01..N-1 are committed and green at <hash>
-  The exact numbers. "Do not regress any of it."
-
-THE ONE THING MOST LIKELY TO GO WRONG
-  A single hazard, with the reason it is tempting and the consequence of getting it wrong.
-  Examples used: "do not use ':memory:' — WAL is unsupported there so every assertion passes
-  vacuously"; "your training data is mcp 1.x, do not write MCP code from memory"; "do not add
-  safety machinery for the fork/prune interaction."
-
-THREE OR FOUR MORE THAT ARE EASY TO GET SUBTLY WRONG
-  Numbered, each with the mechanism and the failure mode. Not a checklist — an explanation.
-
-REUSE, DO NOT REDEFINE
-  Named existing symbols, and "stop and ask" if reuse turns out not to fit.
-
-<domain non-negotiables>
-  Security details, derivation requirements ("derive from get_args, never hand-list"), boundary
-  rules. Whatever this chunk can silently get wrong.
-
-CONVENTIONS
-  Pointer to WHATS_NEXT.md, plus the two or three that specifically bite here.
-
-TEST SUITE — section 4, roughly N new tests, total ≥ M
-  Distribution across files, and any fixture the chunk needs.
-
-DEFINITION OF DONE — section 5. Every checkbox verified by a command you ran, output pasted.
-
-WHEN DONE — update the frontmatter, 00_index.md's row, WHATS_NEXT.md's state table.
-
-REPORT BACK WITH
-  5-7 numbered questions. Always: the four gate numbers. Usually: how a specific claim was
-  proven, not just that it passed. Always: one question feeding the next chunk.
-
-STOP AND ASK IF
-  The named conditions from §5, restated.
+```text
+Implement only <bounded task> in <owned files>. You are not alone; preserve others' edits.
+Read <spec sections> and <relevant PLAN/index blocks>; reuse <symbols>.
+Implement -> make test-fast TESTS='<affected modules/node IDs>' -> fix -> focused tests.
+Use targeted ruff and scoped mypy when useful. No full suite/coverage/global gates.
+Report files, commands, exit codes, concise results, log paths, unresolved risks, next-stage API.
+Do not update plan status, commit, expand scope, or decide architectural ambiguities.
+Stop at focused green handoff. Main owns final review/acceptance.
 ```
 
-**Two prompt techniques that have earned their place.** Asking *how* something was proven rather than
-whether it passed — "did T3 fire at decoration time or call time, and how did you prove it" —
-surfaces tests that assert the weaker property. And asking where the agent *felt* an urge to deviate
-tells me whether my reasoning convinced them or merely instructed them; when the answer names a spot
-I had not considered, my justification has a hole.
+### Step 3 — Luna implements and reports focused evidence
 
-### Step 3 — The agent implements and reports
+No startup full tests. Broaden focused regressions only for affected dependencies. Reports include
+candidate HEAD/relevant diff or hashes, command scope, genuine exit status, summary, and log path.
+Keep long logs in temporary files. Intermediate stages may hand off after main reviews this focused
+evidence; final batch acceptance comes after all stages are stable.
 
-A separate agent, no shared context, reading only the four files. It reports against the numbered
-questions. Reports have been consistently high quality and have caught four of my spec defects.
+### Step 4 — Main reviews, then accepts once
 
-### Step 4 — I verify independently, never on the report alone
+Inspect the diff, actual focused evidence, behavior/invariants, and risks. Independence comes from
+review and owning final acceptance, not repeating every worker command. Delegate focused corrections;
+repeat only affected focused checks. Run spec-required mutations/probes once for the affected property,
+with the implementer doing source mutation/restoration. Do not inherit historical probe lists.
 
-This is the step that has caught everything. Two parts:
+At stable complete-batch acceptance main runs `make check`: ONE full pytest WITH coverage, full mypy,
+ruff check/format. `make test` alone is the same expensive coverage gate, never an iteration command.
+If final execution is explicitly delegated, main reviews its receipt and does not repeat it. Capture
+real exit codes and inspect summaries/failures, not progress streams or giant coverage tables.
 
-1. **Re-run the gates myself:** `pytest -q`, `pytest --cov`, `mypy`, `ruff check`, `ruff format
-   --check`. Numbers must match the report.
-2. **Probe the specific claims empirically.** Not "is there a test for the constraint" but "does the
-   constraint reject the duplicate". Examples that found real defects: inserting a `NULL` primary key
-   (accepted — SQLite permits it without `NOT NULL`); inserting two shared-node rows (accepted — the
-   `UNIQUE` was decorative over `NULL`); calling `create_artifact` and comparing `row.id` to the path
-   stem (they disagreed); grepping for cross-boundary imports (found one the tests did not cover).
+Record successful gates and their candidate inputs. Source/test/fixture/runtime-config changes
+invalidate affected evidence; docs/status/AGENTS edits do not. Formatting-only Python changes use
+ruff and semantic judgment. Reuse unchanged mutation/probe/static evidence. Detailed invalidation
+and proportionality rules are in AGENTS.md; do not create a competing command checklist here.
 
-**Three of the last five chunks had a defect a green suite did not reveal.** Every one was found by
-executing something against the claim rather than reading an assertion.
+### Step 5 — Main updates state and commits when authorized
 
-### Step 5 — I commit, then draft the next chunk
-
-Commits only when the user asks. Never push. Commit messages carry the *reasoning* — what was
-decided, what was rejected, and what was measured — because they are the only record of why a
-verified fact is a fact.
+After acceptance update chunk frontmatter, index rows, measured state, and the single Next heading.
+Those document edits do not rerun product gates. Stage exact authorized files only; never push.
+Keep implemented, focused-tested, reviewed, accepted, and committed distinct.
 
 ### The addendum pattern
 
 **Four of seven chunks needed one.** When verification finds a defect, the fix goes into a new
 numbered section of the same spec (`## 6. Addendum`, `## 7. Addendum`, `## 8. Addendum`), the
-frontmatter goes back to `in_progress`, and the next chunk is explicitly blocked until it passes. The
-addendum states what was wrong, what evidence proved it, the fix, and its own DoD and report
+frontmatter goes back to `in_progress`, and dependent work waits for reviewed focused evidence. Final
+acceptance remains once per stable complete batch. The addendum states what was wrong,
+what evidence proved it, the fix, and its own DoD and report
 questions.
 
 Why in-place rather than a new chunk: the defect belongs to the chunk that introduced it, and a
@@ -317,7 +257,7 @@ read it:
 
 Things discovered while implementing that no spec would think to state:
 
-- **Run `make typecheck` project-wide before trusting a file-scoped mypy pass.** Chunk 07's third bug
+- **Full mypy at final acceptance catches gaps a scoped development pass can miss.** Chunk 07's third bug
   — `summary` values typed `dict[str, str]` where `dict[str, JsonValue]` was required — surfaced only
   once every new module was checked together.
 - **pytest-asyncio cannot hold an `anyio` task-group context manager open across an async fixture's
@@ -427,9 +367,13 @@ engine and its clients come next. B6 is two independent chunks:
   added that contract (`contracts/.../reporting.py`) and the skeleton `Driver` already records it.
 - **Chunk 25** — the LLM client (`llm/` only; no provider named outside it, D18), independent of 21.
 
-Both are ordinary chunks; neither is a gate. B5's reproducibility tools consume a
+Both are ordinary stages. Review focused evidence between them; run final global gates once for B6.
+B5's reproducibility tools consume a
 `tuple[LoggedCall, ...]` the backend will build from `tool_calls` (chunk 29) — the exact client
 record is in the B5 summary below.
+
+Historical summaries below preserve old commands, counts, and receipts. They do not add binding
+validation steps to the current workflow; see AGENTS.md.
 
 ## Batch B5 — completed (summary)
 

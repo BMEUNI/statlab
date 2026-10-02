@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 SHELL := /bin/bash
 
-.PHONY: help install check-env test lint format typecheck api mcp ui dev db-reset
+.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev db-reset
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -15,8 +15,14 @@ check-env: ## Fail fast if configuration is missing or unsafe
 	@$(PY) -c "from statlab_tools.settings import load_tool_settings; load_tool_settings(); print('mcp config OK')"
 	# chunk 26: append the LLM provider-key check here (must live inside llm/, D18)
 
-test: ## Run the suite with coverage gating
-	$(PY) -m pytest --cov --cov-report=term-missing
+test: ## Run the full suite with coverage gating
+	$(PY) -c 'import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:], timeout=900).returncode)' $(PY) -m pytest -q --cov --cov-report=term
+
+test-fast: ## Run selected tests without coverage (set TESTS=...)
+	@test -n "$(strip $(TESTS))" || { echo "set TESTS to one or more pytest selectors" >&2; exit 2; }
+	$(PY) -c 'import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:], timeout=900).returncode)' $(PY) -m pytest -q --no-cov $(TESTS)
+
+check: test typecheck lint ## Run final full tests, typecheck, and lint once each
 
 lint: ## Ruff check + format verification
 	$(PY) -m ruff check .

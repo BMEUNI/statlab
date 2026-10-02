@@ -1582,6 +1582,10 @@ cache. Charts: recharts for metrics, server-rendered matplotlib PNGs for statist
 > **Every milestone's "Done when" implicitly includes: `make test` is green — all tests from all
 > prior milestones still pass, not just the new demo.** A milestone that regresses an earlier one
 > is not done. The demo in the table is the *additional* proof, never the whole gate.
+>
+> Execution/ownership/reuse follow [AGENTS.md](../AGENTS.md#validation-policy): one coverage
+> execution at stable batch acceptance also proves full regression. This requirement does not
+> prescribe full-suite development loops or duplicate implementer/reviewer execution.
 
 | M | Deliverable | Done when |
 |---|---|---|
@@ -1611,6 +1615,10 @@ than a broken tool. Every milestone is demoable.
 ---
 
 ## 14. Testing
+
+Test properties below remain binding. For when to execute them, focused/final commands, gate
+ownership, evidence reuse, and requirement-specific probes, the single policy is
+[AGENTS.md](../AGENTS.md#validation-policy).
 
 ### 14.1 Tolerances — no test may use an unstated one
 
@@ -1754,9 +1762,9 @@ fork rather than a defect.
 
 ## 16. Hand-off prompt
 
-The prompt below is the hand-off to a coding agent. It deliberately does **not** restate this
-document — it points at it, because a 900-line paste would drift from the source the moment
-either changed.
+The prompt below is historical bootstrap context, not the continuation workflow. For current work,
+use the bounded stage handoff in `WHATS_NEXT.md` and the validation policy in `AGENTS.md`; read only
+relevant architecture sections. Its product requirements remain subject to current decisions/specs.
 
 ````text
 Build the application specified in PLAN.md in this repository. Read PLAN.md in full
@@ -1913,7 +1921,8 @@ VERIFICATION — non-negotiable
   pipeline; this one can.
 - No live LLM calls in CI. Use recorded-response fixtures; one optional live smoke test
   behind an env var.
-- Run the tests after every milestone. Fix failures before proceeding.
+- At stable batch acceptance, run one full coverage suite under AGENTS.md. During implementation,
+  run affected tests only; the main agent owns final acceptance. Fix failures before acceptance.
 - EVERY milestone's done-criterion includes `make test` fully green — all prior milestones'
   tests, not just the new demo. A milestone that regresses an earlier one is not done.
 - No test may use an unstated tolerance. §14.1 fixes every number; §14.2 fixes determinism

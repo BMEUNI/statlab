@@ -14,24 +14,26 @@ This directory decomposes it into **41 atomic, topologically ordered chunks** (4
 
 ## Hard rules for the implementing agent
 
-1. **Sequential only.** Execute chunks in ascending order. Chunk *N* may reference schemas,
-   types and utilities from chunks `< N` and **never** from chunks `> N`.
-2. **DoD gates.** Do not begin chunk *N+1* until chunk *N* satisfies its Definition of Done:
-   100 % line + branch coverage on code added by that chunk, **and** the entire prior
-   regression suite green (`make test`).
+1. **Sequential dependency-ready stages.** Follow the execution-batch table below, not numeric
+   order. Reuse only available prerequisite outputs; pass the prior stage's focused report forward.
+2. **Validation authority: [AGENTS.md](../AGENTS.md#validation-policy).** Implementers use focused
+   tests and targeted static checks. The main agent reviews stage handoffs, then runs one final
+   full suite WITH coverage plus full static checks per stable complete batch. Intermediate stages
+   do not run global gates. 100% line/branch coverage remains required at acceptance. Completed
+   chunk DoDs/review receipts are historical; their commands do not prescribe today's loop.
 3. **Minimal viable code.** No speculative abstraction, no boilerplate, no "might need later".
    If a class has one implementation and one caller, it is a function. Delete over add.
 4. **Strict typing.** `mypy --strict` clean. No `Any`, no bare `dict`/`list`, no implicit
-   `Optional`. `# type: ignore` requires an inline justification comment.
+   `Optional`. No new type ignores; preserve only the existing justified exceptions.
 5. **Errors wrap, never leak.** Every boundary (filesystem, HTTP, subprocess, LLM, SQL) maps
    foreign exceptions to a domain error defined for that package: `statlab.errors` in `backend/`,
    the local `Tool*Error` classes in `mcp_server/` (which must never import `statlab.errors` —
    D13, chunk 06 correction). No raw `Exception` escapes a module.
 6. **PLAN.md wins.** On any conflict between a chunk file and `PLAN.md`, `PLAN.md` is
    authoritative — in particular §4's normative 13-node spine table.
-7. **Update your own frontmatter.** On completion set `status: completed`, fill
-   `completion_date`, and append an implementation note recording outcomes, trade-offs, and
-   anything the next chunk must know.
+7. **Main agent owns status.** Implementers report focused results, log paths, exit codes, risks,
+   and next-stage hazards. The main agent records evidence, updates frontmatter/index/WHATS_NEXT,
+   and marks completed only after final acceptance. Docs/status edits preserve product evidence.
 
 ## Verified environment (resolved by chunk 01, 2026-09-09)
 
@@ -205,8 +207,9 @@ not re-derive any of this from memory:
 
 Chunks 01–11 ran one per cycle. The remaining 30 run in **16 batches**. One cycle per batch: both
 specs are written and committed, two implementation stages run in sequence (the second sees the
-first's code), there is one independent review, and one commit. Scope is unchanged. Every chunk so
-far had 2–4 defects caught in review, so the review is not reduced, only shared.
+first's code and focused report), there is one independent review, one final acceptance execution,
+and one authorized commit. Specs use document checks, not product gates. Scope is unchanged. Every
+chunk so far had 2–4 defects caught in review, so the review is not reduced, only shared.
 
 | Batch | Chunks | Closes |
 |---|---|---|

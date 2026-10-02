@@ -16,7 +16,9 @@ records. B6 stage 2 receives chunk 21's implementation report. Routing/skills re
 ### State
 
 Baseline `5447651`: 2096 passed, 1 skipped; 100% line/branch (5417 statements, 1406 branches),
-mypy 103 files, ruff clean. Chunk 21 is uncommitted and must be green before this stage starts.
+mypy 103 files, ruff clean (historical baseline). Chunk 21's unfinished implementation from rewound
+commit `02f1739` remains in the working tree; require main-reviewed focused stage evidence before
+this stage starts, not new full gates.
 Read its final report and public create_node_execution API; reuse it, do not redefine it.
 
 | Reuse | Location | Purpose |
@@ -161,12 +163,15 @@ no new type ignores. Untyped third-party payloads held as object and narrowed.
 
 ## 5. Definition of Done
 
-- [ ] All gates via timeout=900 pytest wrapper, every output read: regression green, 100%
-      line/branch, mypy strict, ruff check/format; zero new ignores/coverage suppressions.
+- [ ] Implementer hands off focused LLM tests and affected regressions/targeted static checks.
+      Main reviews the complete B6 candidate, then owns one final gate under AGENTS.md: full pytest
+      WITH coverage via timeout=900, strict mypy, ruff check/format; 100% line/branch and zero new
+      ignores/coverage suppressions. No separate plain full suite or duplicate worker final run.
 - [ ] No paid/live provider requests; import test blocks socket connects in a fresh process.
 - [ ] Each attempted completion has a row; repair count exactly one, cached costs independently
       calculated, concurrency proved by a barrier rather than elapsed-time guess.
-- [ ] Independently run each mutation (one replace, count==1, finally restore, timeout=300):
+- [ ] Implementer runs each mutation once for final review (one replace, count==1, finally restore,
+      timeout=300); rerun only proofs whose property changed:
   1. consult LiteLLM before override (DeepSeek wrongly schema);
   2. remove import's local-model-map env default;
   3. remove repair or allow a third completion;
@@ -176,8 +181,9 @@ no new type ignores. Untyped third-party payloads held as object and narrowed.
   7. omit the semaphore;
   8. map rate limit to bug;
   9. omit the first invalid attempt's log.
-- [ ] Frontmatter/index completed; WHATS_NEXT measured state + one Next B7 heading, batch B6
-      summary and tradeoffs. Do not commit or push. Parent independently reviews then commits.
+- [ ] Main updates frontmatter/index after final acceptance; WHATS_NEXT measured evidence + one
+      Next B7 heading, batch B6 summary and tradeoffs. Docs preserve product gate evidence.
+      Implementer does not update plans, commit, or push; main commits only when authorized.
 
 ### Explicitly out of scope
 
@@ -191,7 +197,7 @@ API; a live call/new dependency or dropping planned behavior becomes necessary.
 
 ### Report back with
 
-1. Every gate's output/count/time and changed files.
+1. Changed files, focused commands/exit codes/summaries, full-log paths, and candidate inputs.
 2. Mutation-to-failing-test table, including survivors.
 3. Public API and errors; tier override/thinking choices.
 4. Independently computed cached-token bill vs logged bill.

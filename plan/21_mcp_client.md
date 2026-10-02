@@ -18,7 +18,9 @@ Batch B6 stage 1; stage 2 is chunk 25, not chunk 22.
 
 HEAD `5447651`; 2096 passed, 1 skipped; 5417 statements / 1406 branches, 100% coverage;
 mypy clean on 103 files; ruff check/format clean. Baseline verified 2026-10-02.
-`plan/HANDOFF.md` is an existing untracked user file: preserve it, do not stage it.
+The baseline above is historical. Inspect current git/evidence at continuation; do not run full
+startup gates. `plan/HANDOFF.md` is absent as of the 2026-10-02 workflow review; if present later,
+preserve user content and read only relevant handoff notes.
 
 | Reuse | Location | Purpose |
 |---|---|---|
@@ -189,13 +191,15 @@ failure, with meaningful fixtures. Do not make assumptions true by test construc
 
 ## 5. Definition of Done
 
-- [ ] Full regression and coverage gates through timeout=900 wrapper, outputs read; 100% line
-      and branch, one designed skip. Strict mypy, ruff check/format pass.
+- [ ] Implementer hands off focused tests (`tests/test_mcp_client.py`; affected integration tests
+      only when needed) plus targeted static evidence. Main reviews stage 21 before stage 25.
+      Final B6 acceptance follows AGENTS.md: one full coverage execution, strict mypy and ruff;
+      100% line/branch, one designed skip. No separate plain full regression or per-stage global run.
 - [ ] No explicit forbidden typing token, no coverage suppression, no new type ignores;
       compute/provider boundaries remain intact. No node-name literals outside domains.
 - [ ] M6 G1-G7 and M7b prove the client path over HTTP on both real fixtures.
-- [ ] Run these mutations independently; each kills at least one targeted test; restore in
-      finally and verify diff afterwards:
+- [ ] Implementer runs these mutations once for final review; each kills at least one targeted
+      test; restore in finally and verify diff afterwards. Reuse reviewed unchanged proofs:
   1. remove ctx.allowed check while keeping meta.allow_in;
   2. keep agent seed instead of injected seed;
   3. walk dict keys instead of values;
@@ -209,7 +213,8 @@ failure, with meaningful fixtures. Do not make assumptions true by test construc
   10. record caller params rather than sent arguments.
 - [ ] Read generated report.md, pipeline.py and manifest.json in full, probe a real fixture
       through split/impute/encode/scale/train/score, preserve exact reproduction.
-- [ ] Update own frontmatter/index; WHATS_NEXT stays B6 until 25 completes. Do not commit.
+- [ ] Main records focused stage evidence/frontmatter/index; WHATS_NEXT stays B6 until 25 completes.
+      Completion requires final B6 acceptance. Implementer does not update plans or commit.
 
 ### Explicitly out of scope
 
@@ -223,7 +228,7 @@ guard; a feature must be dropped; a new dependency or cross-process import is ne
 
 ### Report back with
 
-1. All gate outputs/counts/time and changed files.
+1. Changed files, focused commands/exit codes/summaries, full-log paths, and candidate inputs.
 2. Each mutation and failing test; any survivor.
 3. Claim failure semantics and concurrent/restart evidence.
 4. M6/M7b metric values and reproduction differences; artifact paths for independent review.
