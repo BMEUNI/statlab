@@ -14,5 +14,7 @@ from statlab_tools.tools import inference as inference
 from statlab_tools.tools import intake as intake
 from statlab_tools.tools import interpretation as interpretation
 from statlab_tools.tools import profiling as profiling
+from statlab_tools.tools import reporting as reporting
+from statlab_tools.tools import reproducibility as reproducibility
 from statlab_tools.tools import splitting as splitting
 from statlab_tools.tools import training as training

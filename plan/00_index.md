@@ -214,7 +214,7 @@ far had 2–4 defects caught in review, so the review is not reduced, only share
 | B2 | 14 evaluation + 15 inference | M5 ✅ |
 | B3 | 16 walking-skeleton gate (alone: it is the gate) | M6 ✅ |
 | B4 | 17 features + 18 interpretation | M7a ✅ |
-| B5 | 19 champion/reporting + 20 reproducibility | M7b |
+| B5 | 19 champion/reporting + 20 reproducibility | M7b ✅ for the `pipeline.py` gate; 82 of 84 catalogue tools served — `split_temporal`, `split_grouped` (and registry lines `ridge`, `mnlogit`) from §6.4 never scheduled, see `WHATS_NEXT.md` |
 | B6 | 21 mcp_client + 25 llm_client (independent) | |
 | B7 | 22 engine core + 23 restart reconciliation | M8a |
 | B8 | 24 candidate fan-out + 26 routing/skills | M8b |
@@ -257,8 +257,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 16 | [`16_skeleton_integration.md`](./16_skeleton_integration.md) — **keystone gate**: the 33-tool walking skeleton (§6.4) driven end to end with zero LLM, on a classification *and* a regression fixture. Milestone **M6** | completed | 08–15 |
 | 17 | [`17_tools_features.md`](./17_tools_features.md) — 7 feature-construction and selection tools (`bin_numeric` split into `fit_binner`/`apply_binner`) and the `transform_only` tool flag | completed | 07, 12 |
 | 18 | [`18_tools_interpretation.md`](./18_tools_interpretation.md) — permutation importance, PDP compute (rendered by `plot_curve`), coefficient importance, error analysis | completed | 07, 13, 14 |
-| 19 | [`19_tools_champion_reporting.md`](./19_tools_champion_reporting.md) — `select_champion`, `render_metrics_table`, `assemble_report` | untouched | 14, 15, 18 |
-| 20 | [`20_tools_reproducibility.md`](./20_tools_reproducibility.md) — `export_pipeline_script` (dependency slice of the champion's test score), `snapshot_run` (manifest incl. `run_hash`); `compute_run_hash` and `prune_intermediate_artifacts` removed (D-a) | untouched | 06, 19 |
+| 19 | [`19_tools_champion_reporting.md`](./19_tools_champion_reporting.md) — `select_champion`, `render_metrics_table`, `assemble_report` | completed | 14, 15, 18 |
+| 20 | [`20_tools_reproducibility.md`](./20_tools_reproducibility.md) — `export_pipeline_script` (dependency slice of the champion's test score), `snapshot_run` (manifest incl. `run_hash`); `compute_run_hash` and `prune_intermediate_artifacts` removed (D-a) | completed | 06, 19 |
 
 ## Phase C — Orchestration (21–26)
 

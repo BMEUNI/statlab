@@ -1,6 +1,8 @@
 ---
-status: untouched
+status: completed
 dependencies: [06, 07, 16, 19]
+completion_date: 2026-10-02
+implementation_notes: "export_pipeline_script + snapshot_run in mcp_server/.../reproducibility.py (stdlib only, phase=reproducibility, allow_in=[artifact_persistence]). LoggedCall added to contracts/.../reporting.py (frozen, extra=forbid). Driver in tests/test_skeleton.py records a LoggedCall per call. M7b gate in test_spine_reporting.py runs pipeline.py in a fresh subprocess (minimal env PATH+HOME, fresh empty cwd) for both fixtures: both reproduce the champion test metric exactly (diff 0.0, well under +/-0.005). compute_run_hash + prune_intermediate_artifacts NOT re-added (D-a). All 7 section-5 mutations KILLED. 100% line+branch; mypy/ruff clean. Not committed."
 ---
 
 # Chunk 20 — Reproducibility tools (M7b)
@@ -218,3 +220,21 @@ P1 or P2 do not reproduce; the gate's difference exceeds 0.005; anything needs `
    values for both fixtures.
 4. The manifest's `run_hash` and `packages` for one run.
 5. For chunk 21: the exact `LoggedCall` the client must record per call.
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+- **My §4 wording was wrong:** "none of … `fit_*`" meant the inferential fits. The champion's
+  transformer fits (`fit_imputer`, `fit_onehot_encoder`, `fit_scaler`) are on the test path and
+  must be kept. The implementation keeps them and excludes `fit_logit`/`fit_ols`.
+- The generated script read the CSV with a bare `open(...).read()`; it now uses a context
+  manager.
+- The generated classification `pipeline.py` was read in full: 15 kept calls out of 43 logged,
+  one `train_estimator`, and the test branch replayed with the same fitted transformers.
+  Reproduction is exact (difference 0.0) for both fixtures, under a minimal environment and an
+  empty working directory.
+- **Catalogue count:** 82 tools are served against the documented 84. The two missing are
+  `split_temporal` and `split_grouped`, deferred by `PLAN.md` §6.4 "to M7" but never given a
+  chunk (nor were the registry lines `ridge` and `mnlogit`). Recorded as an open scope gap in
+  `WHATS_NEXT.md`; not closed here.

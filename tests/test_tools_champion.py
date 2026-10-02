@@ -283,3 +283,172 @@ def test_success_threshold_direction_aware_for_roc_auc(run_paths: RunPaths) -> N
     rows = _rows_by_candidate(res)
     assert rows["a"]["meets_success_threshold"] is True
     assert rows["b"]["meets_success_threshold"] is False
+
+
+# --- 3.1 select_champion (chunk 19) ----------------------------------------------------------
+
+
+def _ranking_table(
+    run_paths: RunPaths,
+    rows: list[tuple[int, str, float, float, float]],
+    estimators: dict[str, str],
+    *,
+    interpretability_required: bool = False,
+    metric: str = "roc_auc",
+) -> ArtifactRef:
+    """A real rank_models table artifact: build a comparison, optionally write a snapshot that
+    makes a non-interpretable estimator ineligible, then rank. Returns the ranking artifact ref."""
+    from statlab_tools.tools.champion import rank_models
+
+    comp = _comparison(run_paths, rows, metric=metric)
+    if interpretability_required:
+        _write_snapshot(
+            run_paths,
+            DataContract.model_validate(
+                {
+                    "target": {"column": "y", "type": "binary"},
+                    "constraints": {"interpretability_required": True},
+                }
+            ),
+        )
+    res = rank_models(run_paths, comp, estimators=estimators)
+    return res.artifacts[0].ref
+
+
+def test_select_champion_top_eligible_overrides_false(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "logit", 0.90, 0.85, 0.95), (2, "forest", 0.80, 0.75, 0.85)],
+        {"logit": "logistic_regression", "forest": "random_forest_classifier"},
+    )
+    res = select_champion(run_paths, ranking, candidate="logit", rationale="best score")
+    assert res.summary["candidate"] == "logit"
+    assert res.summary["overrides_top"] is False
+    assert res.summary["estimator"] == "logistic_regression"
+    assert res.summary["rank"] == 1
+    assert res.summary["rationale"] == "best score"
+    assert res.artifacts[0].kind == "table"
+    assert res.artifacts[0].label == "champion"
+
+
+def test_select_champion_rank_two_overrides_true(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "logit", 0.90, 0.85, 0.95), (2, "forest", 0.80, 0.75, 0.85)],
+        {"logit": "logistic_regression", "forest": "random_forest_classifier"},
+    )
+    res = select_champion(
+        run_paths, ranking, candidate="forest", rationale="simpler to deploy at a small cost"
+    )
+    assert res.summary["candidate"] == "forest"
+    assert res.summary["overrides_top"] is True
+    assert res.summary["rank"] == 2
+
+
+def test_select_champion_ineligible_is_tool_param_with_reason(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    # interpretability_required makes the forest (rank 1) ineligible; logit (rank 2) is eligible
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "forest", 0.90, 0.85, 0.95), (2, "logit", 0.80, 0.75, 0.85)],
+        {"forest": "random_forest_classifier", "logit": "logistic_regression"},
+        interpretability_required=True,
+    )
+    with pytest.raises(ToolParamError, match="ineligible"):
+        select_champion(run_paths, ranking, candidate="forest", rationale="want the best score")
+
+
+def test_select_champion_unknown_candidate_is_tool_param(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "logit", 0.90, 0.85, 0.95), (2, "forest", 0.80, 0.75, 0.85)],
+        {"logit": "logistic_regression", "forest": "random_forest_classifier"},
+    )
+    with pytest.raises(ToolParamError, match="not in the ranking"):
+        select_champion(run_paths, ranking, candidate="nope", rationale="x")
+
+
+def test_select_champion_non_ranking_table_is_tool_param(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    ref = new_artifact_ref()
+    save_json(
+        run_paths.artifact(ref, "table"), {"not": "a ranking"}, ref=ref, kind="table", label="x"
+    )
+    with pytest.raises(ToolParamError, match="not a rank_models table"):
+        select_champion(run_paths, ref, candidate="a", rationale="x")
+
+
+def test_select_champion_carries_ci_and_distinguishable(run_paths: RunPaths) -> None:
+    from statlab_tools.tools.champion import select_champion
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "logit", 0.90, 0.80, 0.95), (2, "forest", 0.85, 0.78, 0.92)],
+        {"logit": "logistic_regression", "forest": "random_forest_classifier"},
+    )
+    res = select_champion(run_paths, ranking, candidate="logit", rationale="best")
+    assert res.summary["ci_low"] == 0.80
+    assert res.summary["ci_high"] == 0.95
+    # overlapping top-two CIs -> not distinguishable, carried through from rank_models.
+    assert res.summary["top_two_eligible_distinguishable"] is False
+    assert res.summary["n_candidates"] == 2
+    # the written artifact holds the same fields.
+    payload = load_json(run_paths.artifact(res.artifacts[0].ref, "table"))
+    assert _d(payload)["candidate"] == "logit"
+    assert _d(payload)["overrides_top"] is False
+
+
+def test_mutation_select_champion_accepts_ineligible(
+    run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DoD mutation: `select_champion` accepts an ineligible candidate. Simulated by neutralising
+    the eligibility guard; the ineligible forest then selects successfully, which the real tool
+    refuses."""
+    import statlab_tools.tools.champion as champ
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "forest", 0.90, 0.85, 0.95), (2, "logit", 0.80, 0.75, 0.85)],
+        {"forest": "random_forest_classifier", "logit": "logistic_regression"},
+        interpretability_required=True,
+    )
+    with pytest.raises(ToolParamError):
+        champ.select_champion(run_paths, ranking, candidate="forest", rationale="x")
+
+    # mutation: drop the ineligibility check by forcing every row eligible when loaded.
+    real_loader = champ._load_ranking_table
+
+    def mutated(paths: RunPaths, ref: ArtifactRef) -> dict[str, JsonValue]:
+        table = real_loader(paths, ref)
+        rows = cast("list[dict[str, JsonValue]]", table["ranking"])
+        for row in rows:
+            row["eligible"] = True
+        return table
+
+    monkeypatch.setattr(champ, "_load_ranking_table", mutated)
+    res = champ.select_champion(run_paths, ranking, candidate="forest", rationale="x")
+    assert res.summary["candidate"] == "forest"
+
+
+def test_mutation_overrides_top_always_false(
+    run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DoD mutation: `overrides_top` is always false. Choosing rank 2 must set it true, so a
+    constant-false implementation disagrees."""
+    from statlab_tools.tools.champion import select_champion
+
+    ranking = _ranking_table(
+        run_paths,
+        [(1, "logit", 0.90, 0.85, 0.95), (2, "forest", 0.80, 0.75, 0.85)],
+        {"logit": "logistic_regression", "forest": "random_forest_classifier"},
+    )
+    res = select_champion(run_paths, ranking, candidate="forest", rationale="x")
+    assert res.summary["overrides_top"] is True  # a constant-false mutation would fail here

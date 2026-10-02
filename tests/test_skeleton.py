@@ -28,6 +28,7 @@ from pydantic import JsonValue
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
 from statlab_contracts.layout import ProjectPaths, RunPaths
+from statlab_contracts.reporting import LoggedCall
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -243,19 +244,24 @@ def check_lineage(
     test_scores: int,
     *,
     transform_only: bool,
+    phase: str,
 ) -> None:
-    """D32 as written in PLAN.md (spec §3.3 D-c). `tainted_params` maps each argument name that
-    carries a test-derived ref to that ref. A call that receives one:
+    """D32 as written in PLAN.md (spec §3.3 D-c, extended by chunk 19 D-d). `tainted_params` maps
+    each argument name that carries a test-derived ref to that ref. A call that receives one:
 
     - a `fit_*` tool, or a parameter named `train`, is a violation in any node;
     - before `champion_selection`, only `verify_split` may receive one;
-    - in `champion_selection`, only a `transform_only` tool (chunk 17 D-a) or a `score_*` may; and
-      a `score_*` with a test-derived input is the exactly-once-scored call -- `test_scores` is the
-      count *before* this call, which must still be 0 when this one is the scoring call.
+    - in `champion_selection`, only a `transform_only` tool (chunk 17 D-a), a `score_*`, or a
+      `phase == "reporting"` tool (chunk 19 D-d: `render_metrics_table`/`assemble_report` may read
+      the champion's test-derived score tables **after** the single score) may; a `score_*` with a
+      test-derived input is the exactly-once-scored call -- `test_scores` is the count *before*
+      this call, which must still be 0 when this one is the scoring call. `select_champion`
+      (phase `champion`) never may: choosing must not see test.
 
-    `transform_only` is the tool's `meta.transform_only` flag, read from `tools/list` (chunk 17
-    D-a). It replaces the former `apply_*`/`predict`/`predict_proba` name-prefix matching, which
-    missed `drop_columns` and the row-wise feature constructors -- all legitimate node-12 replays.
+    `transform_only` is the tool's `meta.transform_only` flag and `phase` is its `meta.phase`, both
+    read from `tools/list` (chunk 17 D-a, chunk 19 D-d). `transform_only` replaces the former
+    `apply_*`/`predict`/`predict_proba` name-prefix matching, which missed `drop_columns` and the
+    row-wise feature constructors -- all legitimate node-12 replays.
 
     The `fit_*`/`train` clause and the exactly-once count hold in every node (the count is
     `runs.test_scored_at` in production, a run-wide guard). Nodes *after* `champion_selection`
@@ -280,7 +286,8 @@ def check_lineage(
         return
     if index > _CHAMPION_INDEX:
         return
-    allowed = transform_only or tool.startswith("score_")
+    reporting_after_score = phase == "reporting" and test_scores >= 1
+    allowed = transform_only or tool.startswith("score_") or reporting_after_score
     if not allowed:
         raise AssertionError(f"{tool} may not receive a test-derived input in champion_selection")
 
@@ -296,6 +303,7 @@ class Driver:
     schemas: dict[str, set[str]]
     allow_in: dict[str, list[str]]
     transform_only: dict[str, bool]
+    phase: dict[str, str]
     split_seed: int
     random_seed: int
     dataset: str
@@ -303,6 +311,7 @@ class Driver:
     produced: set[str] = field(default_factory=set)
     test_derived: set[str] = field(default_factory=set)
     called: list[tuple[str, str]] = field(default_factory=list)
+    log: list[LoggedCall] = field(default_factory=list)
     test_scores: int = 0
 
     def _tainted(self, arguments: Mapping[str, object]) -> dict[str, str]:
@@ -337,7 +346,12 @@ class Driver:
         injected = self._inject(tool, arguments)
         tainted = self._tainted(injected)
         check_lineage(
-            node, tool, tainted, self.test_scores, transform_only=self.transform_only[tool]
+            node,
+            tool,
+            tainted,
+            self.test_scores,
+            transform_only=self.transform_only[tool],
+            phase=self.phase[tool],
         )
 
         result = await _raw_call(self.session, tool, injected)
@@ -355,6 +369,13 @@ class Driver:
                 self.test_derived.add(meta.ref)
 
         self.called.append((node, tool))
+        self.log.append(
+            LoggedCall(
+                tool=tool,
+                arguments=cast("dict[str, JsonValue]", injected),
+                outputs=tuple(meta.ref for meta in validated.artifacts),
+            )
+        )
         return validated
 
 
@@ -382,21 +403,23 @@ async def _raw_call(
 
 async def _read_schemas(
     session: ClientSession,
-) -> tuple[dict[str, set[str]], dict[str, list[str]], dict[str, bool], set[str]]:
+) -> tuple[dict[str, set[str]], dict[str, list[str]], dict[str, bool], dict[str, str], set[str]]:
     """Read `tools/list` once: per-tool served input-schema property names, per-tool
-    `meta.allow_in`, per-tool `meta.transform_only` (chunk 17 D-a), and the full set of served
-    tool names."""
+    `meta.allow_in`, per-tool `meta.transform_only` (chunk 17 D-a), per-tool `meta.phase`
+    (chunk 19 D-d), and the full set of served tool names."""
     listing = await session.list_tools()
     tools: list[Tool] = list(listing.tools)
     schemas = {t.name: set(t.input_schema.get("properties", {})) for t in tools}
     allow_in: dict[str, list[str]] = {}
     transform_only: dict[str, bool] = {}
+    phase: dict[str, str] = {}
     for t in tools:
         assert t.meta is not None
         allow_in[t.name] = [str(a) for a in cast("list[object]", t.meta["allow_in"])]
         transform_only[t.name] = bool(t.meta["transform_only"])
+        phase[t.name] = str(t.meta["phase"])
     names = {t.name for t in tools}
-    return schemas, allow_in, transform_only, names
+    return schemas, allow_in, transform_only, phase, names
 
 
 # --- Orchestrator setup: write the CSV and the contract snapshot (spec D-b) -----------------------
@@ -501,13 +524,20 @@ def _config(frame: pd.DataFrame, contract: DataContract) -> TaskConfig:
 
 @dataclass
 class SpineResult:
-    """What the gate assertions read from one spine run."""
+    """What the gate assertions read from one spine run.
+
+    `ranking_ref`, `models` and `valid_frame` were added for chunk 19/20's reporting flow
+    (`tests/test_spine_reporting.py`), which reuses `_open_driver`/`_run_spine` and then continues
+    the same driver: `select_champion` needs the ranking **table** ref, and rendering the
+    champion's validation curve needs the champion model ref plus the scaled valid frame. They are
+    refs the gate already produces internally; exposing them avoids copying the spine."""
 
     driver: Driver
     score_tables: dict[str, str]
     comparison_ref: str
     comparison_summary: dict[str, JsonValue]
     ranking_summary: dict[str, JsonValue]
+    ranking_ref: str
     champion: str
     champion_test_table: str
     split_rows: dict[str, int]
@@ -515,6 +545,8 @@ class SpineResult:
     coefficient_summary: dict[str, JsonValue]
     coefficient_ref: str
     listed_present: set[str]
+    models: dict[str, str]
+    valid_frame: str
 
 
 async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
@@ -708,6 +740,7 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
         estimators={name: name for name in cfg.candidates},
     )
     ranking_summary = dict(ranking_success.summary)
+    ranking_ref = _only_ref(ranking_success)
     champion = cast(str, ranking_summary["top_eligible"])
 
     test_imp = _only_ref(
@@ -776,6 +809,7 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
         comparison_ref=comparison_ref,
         comparison_summary=comparison_summary,
         ranking_summary=ranking_summary,
+        ranking_ref=ranking_ref,
         champion=champion,
         champion_test_table=champion_test_table,
         split_rows=split_rows,
@@ -783,6 +817,8 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
         coefficient_summary=coefficient_summary,
         coefficient_ref=coefficient_ref,
         listed_present=present,
+        models=models,
+        valid_frame=valid_sc,
     )
 
 
@@ -901,7 +937,7 @@ async def _open_driver(
     contract: DataContract,
 ) -> tuple[Driver, TaskConfig]:
     digest = _write_run(settings, run, frame, contract)
-    schemas, allow_in, transform_only, served = await _read_schemas(session)
+    schemas, allow_in, transform_only, phase, served = await _read_schemas(session)
     assert served >= SKELETON_TOOLS, f"missing tools: {sorted(SKELETON_TOOLS - served)!r}"
     cfg = _config(frame, contract)
     driver = Driver(
@@ -910,6 +946,7 @@ async def _open_driver(
         schemas=schemas,
         allow_in=allow_in,
         transform_only=transform_only,
+        phase=phase,
         split_seed=contract.split.seed,
         random_seed=contract.constraints.random_seed,
         dataset=digest,
@@ -1026,39 +1063,77 @@ def test_check_allowed_accepts_wildcard_in_any_node() -> None:
 
 
 @pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores", "transform_only"),
+    ("node", "tool", "tainted", "test_scores", "transform_only", "phase"),
     [
-        ("preprocessing", "apply_imputer", {"frame": "a_test"}, 0, True),
-        ("champion_selection", "fit_scaler", {"train": "a_test"}, 0, False),
-        ("preprocessing", "train_estimator", {"train": "a_test"}, 0, False),
-        ("champion_selection", "train_estimator", {"frame": "a_test"}, 0, False),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 1, False),
+        ("preprocessing", "apply_imputer", {"frame": "a_test"}, 0, True, "cleaning"),
+        ("champion_selection", "fit_scaler", {"train": "a_test"}, 0, False, "encoding"),
+        ("preprocessing", "train_estimator", {"train": "a_test"}, 0, False, "training"),
+        ("champion_selection", "train_estimator", {"frame": "a_test"}, 0, False, "training"),
+        ("champion_selection", "score_classification", {"truth": "a_test"}, 1, False, "evaluation"),
         # only the universal clauses can reject these two: node 12 allows transform-only tools,
         # and nodes after node 12 are otherwise unconstrained
-        ("champion_selection", "apply_imputer", {"train": "a_test"}, 0, True),
-        ("artifact_persistence", "fit_ols", {"matrix": "a_test"}, 0, False),
-        ("model_interpretation", "predict", {"frame": "a_test"}, 0, True),
-        ("artifact_persistence", "score_regression", {"truth": "a_test"}, 1, False),
+        ("champion_selection", "apply_imputer", {"train": "a_test"}, 0, True, "cleaning"),
+        ("artifact_persistence", "fit_ols", {"matrix": "a_test"}, 0, False, "inference"),
+        ("model_interpretation", "predict", {"frame": "a_test"}, 0, True, "training"),
+        ("artifact_persistence", "score_regression", {"truth": "a_test"}, 1, False, "evaluation"),
+        # chunk 19 D-d: a reporting tool reading test BEFORE the champion node is rejected by the
+        # pre-champion clause (only verify_split may), even though its phase is "reporting"
+        ("model_evaluation", "render_metrics_table", {"scores": "a_test"}, 0, False, "reporting"),
+        (
+            "model_interpretation",
+            "assemble_report",
+            {"test_score": "a_test"},
+            0,
+            False,
+            "reporting",
+        ),
+        # chunk 19 D-d: select_champion (phase "champion") may never receive a test-derived input,
+        # in any state -- choosing must not see test
+        ("champion_selection", "select_champion", {"ranking": "a_test"}, 0, False, "champion"),
+        ("champion_selection", "select_champion", {"ranking": "a_test"}, 1, False, "champion"),
+        # in node 12 itself, a reporting tool may read test only AFTER the one score
+        (
+            "champion_selection",
+            "render_metrics_table",
+            {"scores": "a_test"},
+            0,
+            False,
+            "reporting",
+        ),
     ],
 )
 def test_check_lineage_rejects(
-    node: str, tool: str, tainted: dict[str, str], test_scores: int, transform_only: bool
+    node: str,
+    tool: str,
+    tainted: dict[str, str],
+    test_scores: int,
+    transform_only: bool,
+    phase: str,
 ) -> None:
     with pytest.raises(AssertionError):
-        check_lineage(node, tool, tainted, test_scores, transform_only=transform_only)
+        check_lineage(node, tool, tainted, test_scores, transform_only=transform_only, phase=phase)
 
 
 @pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores", "transform_only"),
+    ("node", "tool", "tainted", "test_scores", "transform_only", "phase"),
     [
-        ("data_splitting", "verify_split", {"test": "a_test"}, 0, False),
-        ("champion_selection", "apply_scaler", {"frame": "a_test"}, 0, True),
-        ("champion_selection", "predict_proba", {"frame": "a_test"}, 0, True),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 0, False),
-        ("artifact_persistence", "describe_artifact", {"artifact": "a_test"}, 1, False),
+        ("data_splitting", "verify_split", {"test": "a_test"}, 0, False, "splitting"),
+        ("champion_selection", "apply_scaler", {"frame": "a_test"}, 0, True, "encoding"),
+        ("champion_selection", "predict_proba", {"frame": "a_test"}, 0, True, "training"),
+        ("champion_selection", "score_classification", {"truth": "a_test"}, 0, False, "evaluation"),
+        ("artifact_persistence", "describe_artifact", {"artifact": "a_test"}, 1, False, "artifact"),
+        # chunk 19 D-d: a reporting-phase tool in champion_selection, AFTER the one score, may read
+        # the champion's test-derived score tables
+        ("champion_selection", "render_metrics_table", {"scores": "a_test"}, 1, False, "reporting"),
+        ("champion_selection", "assemble_report", {"test_score": "a_test"}, 1, False, "reporting"),
     ],
 )
 def test_check_lineage_accepts(
-    node: str, tool: str, tainted: dict[str, str], test_scores: int, transform_only: bool
+    node: str,
+    tool: str,
+    tainted: dict[str, str],
+    test_scores: int,
+    transform_only: bool,
+    phase: str,
 ) -> None:
-    check_lineage(node, tool, tainted, test_scores, transform_only=transform_only)
+    check_lineage(node, tool, tainted, test_scores, transform_only=transform_only, phase=phase)

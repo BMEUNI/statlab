@@ -1050,7 +1050,7 @@ def compute_learning_curve(
 
 
 @dataclass(frozen=True)
-class _ScoreTable:
+class ScoreTable:
     """A loaded score table: the slice `compare_models`/`rank_models` need."""
 
     task: str
@@ -1058,7 +1058,7 @@ class _ScoreTable:
     metrics: dict[str, dict[str, float | None]]
 
 
-def _load_score_table(paths: RunPaths, ref: ArtifactRef, candidate: str) -> _ScoreTable:
+def load_score_table(paths: RunPaths, ref: ArtifactRef, candidate: str) -> ScoreTable:
     """Load a score table written by `score_*`, or `tool_param` if the artifact is not one."""
     loaded = load_json(paths.artifact(ref, "table"))
     if not isinstance(loaded, dict) or "metrics" not in loaded or "truth_fingerprint" not in loaded:
@@ -1067,7 +1067,7 @@ def _load_score_table(paths: RunPaths, ref: ArtifactRef, candidate: str) -> _Sco
             field_errors={"candidates": f"{candidate!r} is not a score_* table"},
         )
     metrics_raw = cast("dict[str, dict[str, float | None]]", loaded["metrics"])
-    return _ScoreTable(
+    return ScoreTable(
         task=str(loaded["task"]),
         fingerprint=str(loaded["truth_fingerprint"]),
         metrics=metrics_raw,
@@ -1083,9 +1083,7 @@ def _ci_overlap(a: dict[str, float | None], b: dict[str, float | None]) -> bool:
     return a_lo <= b_hi and b_lo <= a_hi
 
 
-def _rank_candidates(
-    tables: dict[str, _ScoreTable], metric: Metric
-) -> list[tuple[str, _ScoreTable]]:
+def _rank_candidates(tables: dict[str, ScoreTable], metric: Metric) -> list[tuple[str, ScoreTable]]:
     """Candidates ranked by the metric's value in its natural direction; ties keep label order."""
     greater = greater_is_better(metric)
     items = list(tables.items())
@@ -1119,7 +1117,7 @@ def compare_models(
     is false when the leader's CI overlaps the runner-up's (D-f): a conservative "not
     distinguishable on this validation set", not a significance test.
     """
-    tables = {label: _load_score_table(paths, ref, label) for label, ref in candidates.items()}
+    tables = {label: load_score_table(paths, ref, label) for label, ref in candidates.items()}
     tasks = {t.task for t in tables.values()}
     if len(tasks) > 1:
         raise ToolParamError(

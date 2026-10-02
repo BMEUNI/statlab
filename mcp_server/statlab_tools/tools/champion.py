@@ -130,6 +130,10 @@ def rank_models(
             "candidate": label,
             "estimator": name,
             "value": row["value"],
+            # D-a: carry the comparison row's CI so select_champion/the report need not re-read
+            # the comparison. compare_models always writes both (chunk 14 §3.4).
+            "ci_low": row["ci_low"],
+            "ci_high": row["ci_high"],
             "eligible": eligible,
             "ineligible_reason": ineligible_reason,
             "meets_success_threshold": meets,
@@ -156,7 +160,17 @@ def rank_models(
         f"the top validation score is a selection score over {n} candidates; "
         f"only the test score estimates performance"
     )
-    payload: dict[str, JsonValue] = {"metric": metric, "ranking": out_rows}
+    payload: dict[str, JsonValue] = {
+        "metric": metric,
+        "ranking": out_rows,
+        # D-a: what select_champion needs lives in the table too, not only the summary -- a tool
+        # reading the artifact must not have to re-derive these. Chunk 14 tests read only `metric`
+        # and `ranking`, so the extra keys do not disturb them.
+        "top_eligible": top_eligible,
+        "top_two_eligible_distinguishable": top_two_distinguishable,
+        "selection_note": selection_note,
+        "n_candidates": n,
+    }
     ref = new_artifact_ref()
     meta = save_json(paths.artifact(ref, "table"), payload, ref=ref, kind="table", label="ranking")
     summary: dict[str, JsonValue] = {
@@ -175,3 +189,86 @@ def _distinguishable(a: dict[str, JsonValue], b: dict[str, JsonValue]) -> bool:
     b_lo, b_hi = cast(float, b["ci_low"]), cast(float, b["ci_high"])
     overlap = a_lo <= b_hi and b_lo <= a_hi
     return not overlap
+
+
+# --- 3.1 select_champion ---------------------------------------------------------------------
+
+
+def _load_ranking_table(paths: RunPaths, ranking: ArtifactRef) -> dict[str, JsonValue]:
+    """A `rank_models` table (it has `ranking` and `top_eligible`), or `tool_param` otherwise."""
+    loaded = load_json(paths.artifact(ranking, "table"))
+    if not isinstance(loaded, dict) or "ranking" not in loaded or "top_eligible" not in loaded:
+        raise ToolParamError(
+            "ranking is not a rank_models table",
+            field_errors={"ranking": "not a rank_models table (no ranking/top_eligible)"},
+        )
+    return loaded
+
+
+@tool(phase="champion", allow_in=_CHAMPION_PHASES)
+def select_champion(
+    paths: RunPaths,
+    ranking: Annotated[
+        ArtifactRef,
+        Field(description="A rank_models table artifact to choose the champion from."),
+    ],
+    candidate: Annotated[
+        str,
+        Field(min_length=1, description="The candidate label to make champion; must be eligible."),
+    ],
+    rationale: Annotated[
+        str,
+        Field(min_length=1, max_length=2000, description="Why this candidate was chosen."),
+    ],
+) -> ToolSuccess:
+    """Record the chosen champion as a validated pointer into a `rank_models` ranking (D-b).
+
+    `ranking` must be a `rank_models` table. An unknown `candidate` label is `tool_param` naming
+    the available labels; an ineligible candidate is `tool_param` carrying its `ineligible_reason`.
+    Choosing other than `top_eligible` is allowed -- D33e trades accuracy against interpretability
+    and complexity -- but sets `overrides_top: true` so the report prints the rationale beside it.
+    If no candidate is eligible the ranking's `top_eligible` is `null`, every candidate is
+    ineligible, and this tool cannot succeed: node 12 escalates.
+
+    This tool never sees the test score (phase `champion`, D-d): the choice must not depend on
+    test. Writes a `table` artifact (label `champion`) carrying the chosen candidate's row fields
+    plus `overrides_top`, `top_eligible`, the distinguishability flag, the selection note, the
+    candidate count and the rationale; the summary holds the same fields.
+    """
+    table = _load_ranking_table(paths, ranking)
+    rows = cast("list[dict[str, JsonValue]]", table["ranking"])
+    by_label = {str(row["candidate"]): row for row in rows}
+    if candidate not in by_label:
+        labels = sorted(by_label)
+        raise ToolParamError(
+            f"candidate {candidate!r} is not in the ranking; labels: {labels!r}",
+            field_errors={"candidate": f"unknown candidate; one of {labels!r}"},
+        )
+    row = by_label[candidate]
+    if not bool(row["eligible"]):
+        reason = row["ineligible_reason"]
+        raise ToolParamError(
+            f"candidate {candidate!r} is ineligible: {reason}",
+            field_errors={"candidate": f"ineligible: {reason}"},
+        )
+
+    top_eligible = table["top_eligible"]
+    overrides_top = candidate != top_eligible
+    payload: dict[str, JsonValue] = {
+        "candidate": candidate,
+        "estimator": row["estimator"],
+        "rank": row["rank"],
+        "metric": table["metric"],
+        "value": row["value"],
+        "ci_low": row["ci_low"],
+        "ci_high": row["ci_high"],
+        "top_eligible": top_eligible,
+        "overrides_top": overrides_top,
+        "top_two_eligible_distinguishable": table["top_two_eligible_distinguishable"],
+        "selection_note": table["selection_note"],
+        "n_candidates": table["n_candidates"],
+        "rationale": rationale,
+    }
+    ref = new_artifact_ref()
+    meta = save_json(paths.artifact(ref, "table"), payload, ref=ref, kind="table", label="champion")
+    return ToolSuccess(summary=payload, artifacts=(meta,))

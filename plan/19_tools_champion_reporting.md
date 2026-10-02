@@ -1,6 +1,21 @@
 ---
-status: untouched
+status: completed
 dependencies: [14, 15, 16, 18]
+completion_date: 2026-10-02
+implementation_notes: >
+  select_champion + render_metrics_table + assemble_report implemented. D-a added ci_low/ci_high
+  to rank_models ranking rows and top_eligible/top_two_eligible_distinguishable/selection_note/
+  n_candidates to its table payload (chunk 14 tests read only metric/ranking, unedited). ReportSection
+  lives in contracts/statlab_contracts/reporting.py (frozen, extra=forbid, stdlib+pydantic). evaluation
+  _ScoreTable/_load_score_table made public (ScoreTable/load_score_table), no behaviour change, reused
+  by reporting. D-e formatting (.4g, v [lo,hi], em-dash null, cell | escape + newline fold, single-line
+  headings) in reporting.py. D-d: check_lineage gained a `phase` param and the node-12 reporting-permit
+  clause (phase=="reporting" after the one score); driver reads meta.phase; new guard cases both ways.
+  Gates: 2046 passed + 1 skipped, suite ~53s; 100% line+branch (reporting/champion/evaluation/contracts
+  all 100%, TOTAL 0 missed); mypy clean 99 files; ruff check+format clean. All 7 DoD mutations killed;
+  every check_lineage clause (incl. the new reporting one) killed by deletion. Zero Any, zero
+  pragma: no cover, zero new production # type: ignore. One test # type: ignore[arg-type] on a
+  get_args comparison. No backend/ touched; the only contracts/ change is ReportSection.
 ---
 
 # Chunk 19 — Champion and reporting tools
@@ -224,3 +239,16 @@ Chunk 14 tests need edits; the skeleton gate changes beyond D-d; anything needs 
 2. The mutation table.
 3. The classification end-to-end `report.md`, verbatim.
 4. For chunk 20: the `SpineResult`/`Driver` fields chunk 20 needs to build a call log.
+
+---
+
+## 6. Addendum — review corrections (2026-10-02)
+
+- **The reporting clause was wider than D-d.** `check_lineage` let a `reporting`-phase tool read
+  test-derived artifacts in `champion_selection` at any time. D-d allows it only **after** the one
+  score. The clause is now `phase == "reporting" and test_scores >= 1`, with a guard case (a
+  reporting tool in node 12 before the score is rejected) that only this condition decides.
+  Deleting the condition, or the whole clause, now fails a test.
+- The end-to-end `report.md` was read in full. The test line matches the score table (0.7304
+  [0.6092, 0.8348]); the validation line says "selection score over 3 candidate(s) and 1
+  wave(s)"; the not-distinguishable sentence and the Holm table are present.

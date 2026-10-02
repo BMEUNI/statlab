@@ -11,19 +11,18 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**18 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
-underway. Batch B4 (chunks 17 features + 18 interpretation) complete — **M7a passed**; batch B5
-(chunks 19 + 20) next.
+**20 of 41 chunks complete, plus revision batch 09r.** Phase A (foundation) done; Phase B (MCP server)
+complete — **M7b passed**; batch B6 (chunks 21 mcp_client + 25 llm_client) next.
 
-| Verified 2026-10-02, after batch B4 (chunks 17 features + 18 interpretation) | |
+| Verified 2026-10-02, after batch B5 (chunks 19 champion/reporting + 20 reproducibility) | |
 |---|---|
-| Tests | 2002 (2001 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 46 s |
-| Coverage | 100 % line **and** branch (4924 stmts, 1246 branches, 0 missed) |
-| mypy | `--strict` clean on 95 source files, `init_typed = true` |
+| Tests | 2077 (2076 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 64 s |
+| Coverage | 100 % line **and** branch (5331 stmts, 1380 branches, 0 missed) |
+| mypy | `--strict` clean on 101 source files, `init_typed = true` |
 | ruff | `check` and `format --check` clean |
 | Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. 31 `# type: ignore` in tests (three permitted shapes); **2 in production**, both the `__signature__` stub gap, justified inline — B4 added **zero** |
-| Git | local `master`, batch B4 committed, tree clean |
+| Suppressions | zero `pragma: no cover`; zero `Any`. **2 in production**, both the `__signature__` stub gap, justified inline — B5 added **zero** |
+| Git | local `master`, batch B5 committed, tree clean |
 
 Re-verify with `make test && make typecheck && make lint` before trusting this table.
 
@@ -49,6 +48,14 @@ segment), each oracle-checked: permutation importance equals `sklearn.inspection
 importance` to 1e-12, standardised coefficients equal `coef × population sd` by hand (incl. the
 `classes_[0]` sign flip), a noiseless linear PD slope equals the fitted coefficient to 3.5e-15,
 and error analysis aligns by label so a shuffled prediction order gives an identical table.
+**M7b** (chunk 20) — the champion's path is sliced out of the tool log (D-c) and
+`export_pipeline_script` writes a standalone `pipeline.py` that, run in a **fresh subprocess**
+(minimal env PATH+HOME, fresh empty cwd), reproduces the champion's recorded test metric for both
+skeleton fixtures: classification roc_auc 0.730429 and regression rmse 13.640760, each **exactly**
+(diff 0.0, well under the ±0.005 ceiling); the generated script is injection-safe (values via
+`repr` over JSON types, refs as expressions, names validated against the served registry/schema,
+`compile`d before writing) and `snapshot_run` writes a content run hash + per-file digests with no
+environment variable ever reaching the run folder.
 
 ---
 
@@ -402,18 +409,142 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B5 (chunks 19 champion/reporting + 20 reproducibility)
+## Next: batch B6 (chunks 21 mcp_client + 25 llm_client)
 
-Batch B4 is green, so every node-7/8/11 tool exists and is oracle-checked. B5 adds the node-12/13
-champion and persistence tooling:
+**Open scope gap (B5 review).** `PLAN.md` §6.4 says `ridge`, `mnlogit`, `glm_poisson`, `glm_gamma`, target encoding and `split_temporal`/`split_grouped` "follow at M7". No chunk row ever scheduled four of them: `split_temporal` and `split_grouped` (catalogue tools, so 82 of the 84 are served) and the registry lines `ridge` and `mnlogit`. Node 4 (chunk 27a) already escalates a temporal/grouped request rather than falling back to random, so nothing is silently wrong today, but M7b's "full catalogue" criterion is not met for those two tools. Awaiting a decision: schedule them as a small chunk, or defer them out of v1.
 
-- **Chunk 19** — `select_champion`, `render_metrics_table`, `assemble_report`. It consumes the
-  interpretation artifacts B4 produced (see the handoff note at the end of the B4 summary for what
-  each tool's summary does *not* carry).
-- **Chunk 20** — `export_pipeline_script` (champion path only), `snapshot_run`,
-  `compute_run_hash`, `prune_intermediate_artifacts`.
 
-Both are ordinary tool chunks against the chunk-07 decorator; neither is a gate.
+Phase B (the MCP server and its tool catalogue) is complete — **M7b passed**, 84 tools served. The
+engine and its clients come next. B6 is two independent chunks:
+
+- **Chunk 21** — the MCP client the orchestrator uses: `tools/list` + `call_tool` over real HTTP
+  with the bearer token, the single repair retry on a `tool_param` failure (per-field reasons from
+  `Failure.field_errors`), and the allow-list + D32/D-d lineage lock the skeleton's `Driver`
+  prototyped. It will hit the pytest-asyncio task-group hazard (see "Hard-won facts"): a
+  synchronous fixture returning an `@asynccontextmanager` factory, not an async-generator fixture.
+  It also builds a `LoggedCall` per call (tool, injected arguments as sent, output refs) — chunk 20
+  added that contract (`contracts/.../reporting.py`) and the skeleton `Driver` already records it.
+- **Chunk 25** — the LLM client (`llm/` only; no provider named outside it, D18), independent of 21.
+
+Both are ordinary chunks; neither is a gate. B5's reproducibility tools consume a
+`tuple[LoggedCall, ...]` the backend will build from `tool_calls` (chunk 29) — the exact client
+record is in the B5 summary below.
+
+## Batch B5 — completed (summary)
+
+Two chunks, one stage each: chunk 19 (node-12/13 champion + reporting tools) and chunk 20 (node-13
+reproducibility tools). Together they close **M7b** and complete Phase B. Gates after B5: **2075
+passed, 1 skipped** (2076 total), **100 % line and branch** (5331 stmts, 1380 branches, 0 missed),
+mypy `--strict` clean on **101 source files**, ruff `check` + `format --check` clean, suite ≈ 62 s.
+B5 added **zero** `Any`, **zero** `pragma: no cover`, **zero** new production `# type: ignore` (still
+only `tool.py`'s 2 `__signature__` gaps). **Not committed.**
+
+### Chunk 20 (reproducibility) — M7b
+
+Two tools in `tools/reproducibility.py` (`phase="reproducibility"`,
+`allow_in=["artifact_persistence"]`, **stdlib only**): `export_pipeline_script` and `snapshot_run`.
+`compute_run_hash` and `prune_intermediate_artifacts` are **removed** (D-a): the run hash is a field
+of `snapshot_run`'s manifest, and pruning is an engine step on node success (it sets `pruned_at` in
+a DB the stateless MCP server cannot reach). The catalogue is 84 served tools.
+
+- **D-c, the champion's path is a backward slice over refs.** From the call that produced the target
+  (the champion's test score table), repeatedly add the latest earlier call that produced each ref an
+  included call consumes. Refs are recognised by `ARTIFACT_ID_PATTERN`, recursively through lists and
+  dict values (a ref inside a `candidates` dict is followed). This drops other candidates' branches,
+  node 6, profiling, `compare_models`/`rank_models` and the whole inferential branch
+  (`assemble_inference_matrix`/`fit_logit`/`coefficient_table`) automatically — the preprocessing
+  **transformer** fits (`fit_imputer`/`fit_onehot_encoder`/`fit_scaler`) *are* on the path and kept
+  (the §4 "no fit_*" means the inferential model fits, not these). A consumed ref with no earlier
+  producer, or a target no call produced, is `tool_param`.
+- **D-d, the script is unrolled, readable and injection-safe.** One `_call` statement per kept call,
+  commented with its original position. Tool names validated against the served registry, argument
+  names against the tool's input schema (`project`/`run` dropped), values rendered with `repr` over
+  JSON types only with refs replaced by `r{i}.artifacts[k].ref` expressions, the contract snapshot
+  embedded as a `repr`'d JSON string, the dataset sha256 from the slice's single `load_csv`. The
+  source is `compile`d before writing; no value is ever `eval`'d. No timestamp or absolute path, so
+  the same log gives byte-identical bytes. The injection test parses the rendered value back with
+  `ast.literal_eval` and walks the AST for any `system`/`eval`/`exec`/`__import__` call (none).
+- **D-e/D-f, the manifest.** `run_hash` is the sha256 of canonical JSON (sorted keys, no whitespace)
+  over the dataset sha256, the parsed contract and every call with `project`/`run` dropped and each
+  ref replaced by `"@{call}.{output}"` — so two runs with the same data/contract/calls hash alike even
+  though their refs differ. The manifest also holds the Python version, `platform.platform()`, the
+  versions of 11 modelling packages (`null` when not installed) and a sha256+size for every run file
+  except `manifest.json`. It **never** captures environment variables — the bearer token never reaches
+  a run folder (a test sets `STATLAB_MCP_TOKEN` to a known value and asserts it is absent).
+
+**M7b gate** (`tests/test_spine_reporting.py`, both fixtures): after the node-12 reporting flow,
+`export_pipeline_script(calls=driver.log, target=<champion test table>)` and
+`snapshot_run(calls=driver.log)` run over MCP in `artifact_persistence`; the kept tools contain
+exactly one `train_estimator` and none of the comparison/ranking/inference branch; then
+`subprocess.run([sys.executable, pipeline.py, csv], env={PATH, HOME}, cwd=<fresh empty tmp>,
+timeout=300)` exits 0 and its last stdout line's `metrics[primary_metric].value` matches the recorded
+test value within ±0.005. **Both fixtures reproduce exactly: classification roc_auc 0.730429,
+regression rmse 13.640760, diff 0.0.** A one-byte-changed CSV makes the script exit non-zero with the
+sha message. The subprocess with a minimal env in a fresh cwd is what proves the script does not lean
+on the test process's env/cwd/imports.
+
+**All 7 §5 DoD mutations KILLED** (each a one-string replace, `count == 1` asserted, affected tests via
+`subprocess` timeout=300, originals restored in `finally`; `git diff --stat` afterward showed only
+intended files):
+
+| Mutation | Test(s) that failed |
+|---|---|
+| the slice keeps every call | `test_slice_drops_profiling_and_node6_calls` |
+| the slice takes the first earlier producer instead of the latest | `test_slice_binds_consumer_to_the_latest_earlier_producer` |
+| refs are not normalised in the run hash | `test_run_hash_same_for_logs_differing_only_in_ref_values` |
+| argument values rendered with `str()` instead of `repr()` | `test_render_value_covers_every_json_shape`; `test_render_injection_string_is_a_literal_not_code` |
+| the `compile()` check is removed and a broken render goes through | `test_export_rejects_a_non_compiling_render` |
+| the sha256 check in the script header is removed | `test_m7b_pipeline_reproduces_classification` |
+| the manifest includes `os.environ` | `test_manifest_omits_the_token_value` |
+
+**For chunk 21 — the exact `LoggedCall` the client records per call.**
+`LoggedCall(tool: str, arguments: dict[str, JsonValue], outputs: tuple[str, ...])` in
+`contracts/statlab_contracts/reporting.py` (frozen, `extra="forbid"`): `tool` the registered name,
+`arguments` the arguments **as sent** over the wire with the injected `project`/`run`/`seed`
+included (the reproducibility tools drop `project`/`run` themselves), `outputs` the produced artifact
+refs in envelope order. The skeleton `Driver` already appends one per call (`driver.log`); the only
+`test_skeleton.py` change this chunk made was that append. Over the wire pass each as
+`call.model_dump(mode="json")` so `outputs` is a JSON list, not a tuple.
+
+### Chunk 19 (champion + reporting)
+
+Node-12/13 champion + reporting tools. `select_champion` (phase `champion`), `render_metrics_table`
+and `assemble_report` (phase `reporting`), all `allow_in=["champion_selection"]`. The report states
+every number from artifacts, never from LLM text (D-c): the LLM contributes only the narrative
+`sections` between Inference and Figures.
+
+- **D-a** — `rank_models` ranking rows now carry `ci_low`/`ci_high` (copied from the comparison
+  rows), and its table payload carries `top_eligible`, `top_two_eligible_distinguishable`,
+  `selection_note`, `n_candidates` (previously summary-only). Chunk 14 tests read only `metric`
+  and `ranking`, so they passed unedited.
+- **D-b** — `select_champion` is a validated pointer: refuses an ineligible candidate (`tool_param`
+  with its `ineligible_reason`), allows overriding `top_eligible` (records `overrides_top: true`),
+  writes a `champion` table. It never sees test (phase `champion`).
+- **D-c/D-e** — `assemble_report` writes `# title`, `## Result` (test line always; the
+  not-distinguishable/exposure/override sentences each present iff their condition), `## Validation
+  comparison`, `## Inference` (iff a coefficient table), the LLM sections verbatim, `## Figures`
+  (iff plots). Numbers `.4g`, CI `v [lo, hi]`, `null` an em dash, cells escape `|` and fold
+  newlines, headings single-line. Plots copied by reference to `report/plots/<ref>.png`.
+- **D-d** — reading test is allowed for reporting after the one score. `tests/test_skeleton.py`'s
+  `check_lineage` gained a `phase` parameter and a node-12 clause: a `phase == "reporting"` tool
+  may receive a test-derived input (after the single score); `select_champion` (phase `champion`)
+  never may; the driver reads `meta.phase` off `tools/list`. New guard cases test a reporting tool
+  before the score (rejected) and after (accepted), and `select_champion` with test (rejected in
+  every state). The skeleton G1–G7 gate is otherwise unchanged.
+
+`ReportSection(heading 1–80, body ≤ 8000)` lives in `contracts/statlab_contracts/reporting.py`
+(frozen, `extra="forbid"`, stdlib + pydantic) — the only `contracts/` change. `evaluation`'s score
+table loader was made public (`ScoreTable`/`load_score_table`, no behaviour change) and reused by
+`render_metrics_table` rather than re-parsing. `tests/test_spine_reporting.py` reuses the skeleton's
+`_open_driver`/`_run_spine` (SpineResult gained `ranking_ref`, `models`, `valid_frame`) and drives
+the reporting flow end to end over MCP on both fixtures.
+
+Gates: **2046 passed, 1 skipped**, suite ≈ 53 s; **100 % line and branch** (reporting, champion,
+evaluation and `contracts/reporting.py` all 100 %, TOTAL 0 missed); mypy `--strict` clean on 99
+files; ruff `check` + `format --check` clean. Zero `Any`, zero `pragma: no cover`, zero new
+production `# type: ignore` (one test `# type: ignore[arg-type]` on a `get_args` comparison; the
+`α` column header carries a `# noqa: RUF001`). All 7 §5 DoD mutations KILLED; every `check_lineage`
+clause including the new reporting one killed by deletion. No `backend/` touched.
 
 ## Batch B4 — completed (summary)
 
