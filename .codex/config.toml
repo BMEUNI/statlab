@@ -1,6 +1,6 @@
 model = "gpt-6.1-sol"
-model_context_window = 1050000
-model_auto_compact_token_limit = 850000
+model_reasoning_effort = "high"
+model_auto_compact_token_limit = 120000
 
 [features]
 workspace_dependencies = false
@@ -9,4 +9,18 @@ workspace_dependencies = false
 enabled = true
 max_concurrent_threads_per_session = 3
 default_subagent_model = "gpt-6-luna"
-default_subagent_reasoning_effort = "high"
+default_subagent_reasoning_effort = "medium"
+
+[mcp_servers.idea]
+enabled = false
+
+[plugins."superpowers@openai-curated"]
+enabled = false
+
+[[skills.config]]
+path = "/Users/nandordukat/.codex/skills/graphify"
+enabled = false
+
+[[skills.config]]
+path = "/Users/nandordukat/.agents/skills/cavecrew"
+enabled = false

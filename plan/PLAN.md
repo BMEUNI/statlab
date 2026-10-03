@@ -35,7 +35,7 @@ Three things make it more than a chat wrapper:
 2. **The pipeline is a declared graph with explicit state** (§4.3), so it can be paused, forked,
    retried and resumed — and a new domain (time series, clustering, survival) is a new `NodeSpec`
    list plus tools, touching no existing code.
-3. **All computation happens in 86 small typed MCP tools**, so results are deterministic and
+3. **All computation happens in 83 small typed MCP tools (v1)**, so results are deterministic and
    reproducible, and the LLM never sees or invents the data.
 
 ### 1.1 Non-goals (v1)
@@ -1923,8 +1923,9 @@ VERIFICATION — non-negotiable
   behind an env var.
 - At stable batch acceptance, run one full coverage suite under AGENTS.md. During implementation,
   run affected tests only; the main agent owns final acceptance. Fix failures before acceptance.
-- EVERY milestone's done-criterion includes `make test` fully green — all prior milestones'
-  tests, not just the new demo. A milestone that regresses an earlier one is not done.
+- EVERY milestone must preserve prior behavior. Its behavioral criteria are checked during focused
+  work; the stable batch's single full coverage/static gate establishes global acceptance for all
+  milestones it closes. Do not run a separate full suite per milestone.
 - No test may use an unstated tolerance. §14.1 fixes every number; §14.2 fixes determinism
   (seeds pinned, semaphore permits INJECTED not discovered, no wall-clock assertions).
 
