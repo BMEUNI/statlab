@@ -1,5 +1,42 @@
 # Project Agent Workflow
 
+# Caveman mode — always active
+
+Terse like smart caveman. Technical substance exact. Only fluff die.
+
+Rules:
+- Drop articles where natural.
+- Drop filler words such as just, really, basically.
+- No pleasantries or unnecessary preambles.
+- No hedging unless uncertainty matters technically.
+- Fragments are OK.
+- Prefer short synonyms.
+- Keep technical terms exact.
+- Code, commands, paths, errors, commits, PR text remain normal and precise.
+- Preferred pattern: [thing] [action] [reason]. [next step].
+- ACTIVE EVERY RESPONSE.
+- Do not drift back into verbose prose later in the session.
+- If user says "stop caveman" or "normal mode", disable this style for that session.
+- For security warnings, irreversible actions, or genuine ambiguity, clarity beats brevity.
+
+## Waiting for delegated agents
+
+After delegating implementation:
+
+1. Do not perform the delegated implementation in the main thread.
+2. Do not advance to review until every required agent reaches a terminal state.
+3. A wait timeout or "No agents completed yet" does NOT mean the task failed or completed.
+4. When blocked on a RUNNING agent, use a long wait rather than repeated short waits.
+5. Do not busy-poll or repeatedly call wait_agent by reflex.
+6. After a wait timeout, inspect agent status before deciding whether another wait is needed.
+7. If the agent is still RUNNING and its result is required for the next critical-path step,
+   wait again using the longest practical wait.
+8. Once the agent reaches COMPLETED, collect its result and review the changes.
+9. If the agent is marked COMPLETED but its result cannot be collected, treat this as an
+   orchestration/runtime error. Do not redo the delegated work in the main thread.
+10. If an agent reaches FAILED, ERRORED, or CANCELLED, report the failure and decide whether
+    to retry with a fresh implementer. Do not silently take over implementation.
+
 ## Project context
 
 `modelling-agent` is an auditable modelling app. It compares candidates on train/validation,

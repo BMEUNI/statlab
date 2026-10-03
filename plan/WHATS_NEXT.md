@@ -11,29 +11,35 @@ map, hard rules and verified environment facts live in `00_index.md`. Do not dup
 
 ## State
 
-**20 of 41 chunks complete, plus revision batches 09r and 20r.** Phase A (foundation) done; Phase B (MCP server)
-complete — **M7b passed**, scope gap closed by 20r; batch B6 (chunks 21 mcp_client + 25 llm_client) next.
+**22 of 41 chunks complete, plus revision batches 09r and 20r.** Phase A and Phase B complete;
+M7b passed. **B6 (21 MCP client + 25 LLM client) completed and accepted 2026-10-03.** Next batch is
+B7: chunk 22 engine core, then chunk 23 restart reconciliation. Implementation committed with B6.
 
-| Historical verified baseline: `5447651`, 2026-10-02 after chunk 20r | |
+| Accepted B6 candidate: HEAD `901e840` plus recorded source/test hashes | |
 |---|---|
-| Tests | 2097 (2096 passed, 1 skipped — chunk 06's F9, by spec); suite ≈ 63 s |
-| Coverage | 100 % line **and** branch (5417 stmts, 1406 branches, 0 missed) |
-| mypy | `--strict` clean on 103 source files, `init_typed = true` |
-| ruff | `check` and `format --check` clean |
-| Warnings | `filterwarnings = ["error"]`, zero ignores |
-| Suppressions | zero `pragma: no cover`; zero `Any`. **2 in production**, both the `__signature__` stub gap, justified inline — 20r added **zero** |
-| Served tools | **83** (v1): 84 − `split_temporal` − `split_grouped` + `fit_mnlogit` |
-| Git | Baseline commit `5447651`; this row is historical, not current HEAD |
+| Tests | 2189 passed, 1 designed skip (chunk 06 F9); 72.08 s |
+| Coverage | 100% line and branch; 6030 statements, 0 missed; 1566 branches, 0 partial |
+| mypy | Full strict gate clean on 109 source files; `init_typed = true` |
+| Ruff | Full check and format gates clean; 110 files formatted |
+| Warnings/typing | Warnings are errors; no new ignores, explicit forbidden typing tokens or coverage suppressions |
+| Served tools | 83 (v1), unchanged by B6 |
+| Git | Acceptance parent `901e840`; B6 source and agent workflow updates committed |
 
-At session startup inspect git status/HEAD and compare relevant changes with recorded evidence,
-following [AGENTS.md](../AGENTS.md#validation-policy). Do not re-run full gates simply to start.
-Unfinished commit `02f1739` was rewound at the user's request; its chunk-21 changes remain in the
-working tree. The table above is the older baseline, not acceptance of that work. Chunk 21 still
-records a pending cancellation-audit review
-correction; this workflow-only task does not resolve or accept it. Newer temporary logs show 2137
-passed/1 skipped, 100% coverage (5788 statements, 1514 branches), and clean mypy on 106 files, but
-lack a durable candidate/exit-code receipt. Preserve that distinction; reconcile source/evidence
-when B6 resumes rather than treating stale counts or missing receipts as automatic startup gates.
+All four final gate exit codes were 0. Candidate aggregate SHA256:
+`1acc77712c7d252f3afea487329d615bfccf102704066aa6315fbb66f4a77889`.
+The 17 source/test/config inputs were unchanged after execution. Canonical acceptance receipt:
+[chunk 21 section 8](./21_mcp_client.md#8-final-b6-acceptance-2026-10-03); full hashes and gate
+commands/exits in `/private/tmp/statlab-b6-acceptance-candidate.json` and
+`/private/tmp/statlab-b6-acceptance-gates.json`. Planning/status edits preserve product evidence.
+At startup inspect git status/HEAD and relevant input changes under root AGENTS; do not run full
+baseline gates merely to continue.
+
+Recovery at `901e840` restored three missing, formerly untracked files from rewound `02f1739`:
+MCP client, domain lineage policy and MCP client tests. Cancellation auditing and credential-safe
+cleanup were reviewed. Fifteen MCP and nine LLM mutations killed intended assertions and restored
+source exactly. Standalone classification ROC AUC `0.7304292929292929` and regression RMSE
+`13.640760279602766` reproduce with absolute difference `0.0`. Historical pre-B6 counts are
+superseded by the accepted candidate above; no paid LLM requests were used.
 
 Milestones passed: **M1** (chunk 07) — an external MCP client completes `tools/list` and a
 round-trip `call_tool` over real HTTP; a tokenless request is rejected. **M2** (chunk 08) — the
@@ -48,8 +54,9 @@ the contract's constraints; the inferential track fits OLS/Logit/GLM, reproduces
 certified coefficients, and labels confirmatory vs exploratory with Holm correction (D35).
 **M6** (chunk 16) — the 33-tool walking skeleton runs end to end over a real MCP session, zero
 LLM, on a classification *and* a regression fixture, reproducing the probe's numbers to the
-printed precision; the test enforces chunk 21's allow-list and D32 lineage rules on itself and
-scores the champion on test exactly once.
+printed precision. Chunk 21 replaces the former test-local allow-list/lineage checks with the
+production client's dispatch guards and moves `select_champion` before the one test-score replay;
+the normative `SKELETON_TOOLS` set remains 33 tools.
 **M7a** (chunks 17 + 18) — the node-7/8 feature tools (three row-wise constructors, the fitted
 binner, two train-side selectors) and the node-11 interpretation tools (permutation importance,
 coefficient importance, partial dependence rendered as a `plot_curve` kind, error analysis by
@@ -350,27 +357,31 @@ Not oversights. Each waits on something that does not exist yet.
 
 ---
 
-## Next: batch B6 (chunks 21 mcp_client + 25 llm_client)
+## Next: batch B7 (chunks 22 engine core + 23 restart reconciliation)
 
-**Scope gap resolved (chunk 20r).** The M7 §6.4 follow-ups are closed: `ridge` and `mnlogit` (`fit_mnlogit` + multinomial `coefficient_table`) shipped, and `split_temporal`/`split_grouped` were deferred out of v1 (D-c; node 4 escalates a temporal/grouped request as `data` rather than falling back to a leaky random split). The v1 catalogue is **83 served tools**.
+Write the bounded chunk-22 spec using PLAN's declared spine, checkpointer/event-bus requirements
+and available B6 client/repository seams. Stage 22 implements shared-node traversal and
+prune-on-success (D24); stage 23 follows its reviewed focused handoff with boot/status scan and
+node-boundary restart reconciliation. B7 closes M8a. Follow index batch dependencies and root
+AGENTS validation policy; one writer, focused stage handoffs, one stable final batch gate.
 
+## Batch B6 — completed (summary)
 
-Phase B (the MCP server and its tool catalogue) is complete — **M7b passed**, 83 tools served. The
-engine and its clients come next. B6 is two independent chunks:
-
-- **Chunk 21** — the MCP client the orchestrator uses: `tools/list` + `call_tool` over real HTTP
-  with the bearer token, the single repair retry on a `tool_param` failure (per-field reasons from
-  `Failure.field_errors`), and the allow-list + D32/D-d lineage lock the skeleton's `Driver`
-  prototyped. It will hit the pytest-asyncio task-group hazard (see "Hard-won facts"): a
-  synchronous fixture returning an `@asynccontextmanager` factory, not an async-generator fixture.
-  It also builds a `LoggedCall` per call (tool, injected arguments as sent, output refs) — chunk 20
-  added that contract (`contracts/.../reporting.py`) and the skeleton `Driver` already records it.
-- **Chunk 25** — the LLM client (`llm/` only; no provider named outside it, D18), independent of 21.
-
-Both are ordinary stages. Review focused evidence between them; run final global gates once for B6.
-B5's reproducibility tools consume a
-`tuple[LoggedCall, ...]` the backend will build from `tool_calls` (chunk 29) — the exact client
-record is in the B5 summary below.
+- **Chunk 21:** production MCP discovery/cache, both allow-lists, trusted injection/schema checks,
+  recursive artifact ownership/lineage guards, durable one-test-score claim, execution/call rows
+  and persisted `LoggedCall` reconstruction. M6/reporting/M7b now use the client over real HTTP.
+  Cancellation keeps its identity even if auditing fails; cleanup notes exclude foreign text.
+- **Chunk 25:** typed LiteLLM schema/JSON/prompt tiers, prefix overrides, exactly one output repair,
+  timeout 60 and no hidden retries, per-client semaphore (default 4), safe errors and per-attempt
+  metadata/cached-token cost accounting. Import and real mock completion validated offline.
+  Ordinary SDK chat fields are validated by the SDK; arbitrary usage extras are checked here.
+- **Review/acceptance:** all 24 prescribed mutations killed intended assertions and restored;
+  pipeline artifacts reviewed and both metrics reproduced exactly. Full accepted results are in
+  the State table and linked shared receipt. No source gates repeated for status/doc edits.
+- **Next-stage hazards:** reuse `create_node_execution` and the MCP `CallContext`/DB log APIs;
+  share an LLM client to share its semaphore. Routing/keys/prompts belong to 26, recovery/backoff
+  to 31. Flash costs are informational peak upper estimates; unknown pricing records zero with
+  a warning. No new migrations/dependencies or concrete engine were introduced in B6.
 
 Historical summaries below preserve old commands, counts, and receipts. They do not add binding
 validation steps to the current workflow; see AGENTS.md.

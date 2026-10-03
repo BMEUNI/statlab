@@ -36,10 +36,13 @@ from statlab.persistence.ids import new_id, utc_now
 from statlab.persistence.models import (
     ContractRow,
     DatasetRow,
+    LlmCallRow,
+    NodeExecutionRow,
     ProjectRow,
     RunMode,
     RunRow,
     RunStatus,
+    ToolCallRow,
 )
 
 
@@ -221,6 +224,128 @@ def list_runs(conn: sqlite3.Connection, project_id: str) -> tuple[RunRow, ...]:
         "SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC", (project_id,)
     ).fetchall()
     return tuple(RunRow.model_validate(dict(row)) for row in rows)
+
+
+def create_node_execution(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    node_name: str,
+    seq: int,
+    candidate_id: str | None = None,
+    attempt: int = 1,
+) -> NodeExecutionRow:
+    """Create an auditable execution row; callers own reuse across repeated calls."""
+    execution_id, started_at = new_id("ne"), utc_now()
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO node_executions "
+                "(id, run_id, candidate_id, node_name, seq, attempt, status, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
+                (execution_id, run_id, candidate_id, node_name, seq, attempt, started_at),
+            )
+            row = conn.execute(
+                "SELECT * FROM node_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise _wrap_integrity_error(exc, constraint="node_executions identity") from exc
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot create node execution", cause=exc) from exc
+    return NodeExecutionRow.model_validate(dict(row))
+
+
+def record_tool_call(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    node_execution_id: str,
+    tool_name: str,
+    args_json: str,
+    result_json: str,
+    duration_ms: int,
+    ts: str | None = None,
+) -> ToolCallRow:
+    """Persist sent arguments and response, rejecting cross-run attribution."""
+    call_id, created_at = new_id("tc"), ts or utc_now()
+    try:
+        with transaction(conn):
+            execution = conn.execute(
+                "SELECT run_id FROM node_executions WHERE id = ?", (node_execution_id,)
+            ).fetchone()
+            if execution is None or execution["run_id"] != run_id:
+                raise PersistenceError("tool call execution does not belong to run")
+            conn.execute(
+                "INSERT INTO tool_calls "
+                "(id, run_id, node_execution_id, tool_name, args_json, result_json, "
+                "duration_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    call_id,
+                    run_id,
+                    node_execution_id,
+                    tool_name,
+                    args_json,
+                    result_json,
+                    duration_ms,
+                    created_at,
+                ),
+            )
+            row = conn.execute("SELECT * FROM tool_calls WHERE id = ?", (call_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise _wrap_integrity_error(exc, constraint="tool_calls attribution") from exc
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot record tool call", cause=exc) from exc
+    return ToolCallRow.model_validate(dict(row))
+
+
+def record_llm_call(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    node_execution_id: str,
+    signature: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int,
+    cost_usd: float,
+    duration_ms: int,
+    ts: str | None = None,
+) -> LlmCallRow:
+    """Persist LLM accounting metadata, rejecting cross-run attribution."""
+    call_id, created_at = new_id("lc"), ts or utc_now()
+    try:
+        with transaction(conn):
+            execution = conn.execute(
+                "SELECT run_id FROM node_executions WHERE id = ?", (node_execution_id,)
+            ).fetchone()
+            if execution is None or execution["run_id"] != run_id:
+                raise PersistenceError("LLM call execution does not belong to run")
+            conn.execute(
+                "INSERT INTO llm_calls "
+                "(id, run_id, node_execution_id, signature, model, prompt_tokens, "
+                "completion_tokens, cached_tokens, cost_usd, duration_ms, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    call_id,
+                    run_id,
+                    node_execution_id,
+                    signature,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    cost_usd,
+                    duration_ms,
+                    created_at,
+                ),
+            )
+            row = conn.execute("SELECT * FROM llm_calls WHERE id = ?", (call_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise _wrap_integrity_error(exc, constraint="llm_calls attribution") from exc
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot record LLM call", cause=exc) from exc
+    return LlmCallRow.model_validate(dict(row))
 
 
 def update_run_status(

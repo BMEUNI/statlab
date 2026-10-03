@@ -18,6 +18,9 @@ data        — the data cannot support the request. NOT repairable by retrying;
 bug         — an unexpected exception. Escalate with a traceback (server log only).
 """
 
+ORCHESTRATOR_SUPPLIED: Final = "Supplied by the orchestrator; do not choose a value."
+"""Description for tool parameters filled by the backend rather than the agent."""
+
 RETRY_BUDGET: Final[dict[ErrorClass, int]] = {
     "transient": 3,
     "tool_param": 2,

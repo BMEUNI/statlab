@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
+
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import numpy as np
 import pandas as pd
@@ -43,6 +46,7 @@ _STATLAB_VARS = (
     "STATLAB_MAX_UPLOAD_MB",
     "STATLAB_KEEP_INTERMEDIATES",
     "STATLAB_MAX_CONCURRENT_RUNS",
+    "STATLAB_MAX_CONCURRENT_LLM",
     "STATLAB_MCP_HOST",
     "STATLAB_MCP_PORT",
     "STATLAB_FIT_PERMITS",

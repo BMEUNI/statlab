@@ -1,8 +1,14 @@
 ---
-status: untouched
+status: completed
 dependencies: [02, 03, 05, 06, 07, 16, 19, 20]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-03
+implementation_notes: >-
+  Recovered missing files from 02f1739 at HEAD 901e840; cancellation auditing and credential-safe
+  cleanup reviewed. Focused 64 MCP cases and six HTTP integration cases exited 0; fifteen required
+  mutations failed intended assertions and restored exact source hashes. Fresh standalone replays
+  match both recorded metrics exactly. B6 accepted 2026-10-03: 2189 passed, one designed skip,
+  100% line/branch coverage, full mypy and Ruff clean. Candidate 901e840 plus recorded dirty-source
+  digest; implementation committed with B6. Earlier full-gate counts remain historical.
 ---
 
 # Chunk 21 — Backend MCP client
@@ -42,6 +48,10 @@ preserve user content and read only relevant handoff notes.
 | P4 | jsonschema 4.26.0 is already installed via LiteLLM | Reuse Draft202012Validator for the served schema; do not build a validator |
 | P5 | Existing reporting selects a champion after the skeleton has scored test | Move selection into the spine before test replay; reuse the resulting champion table |
 | P6 | Sandbox denies local socket binding and the tilde fixture | Required gates use the hard-timeout wrapper with approved escalation; do not weaken tests |
+| P7 | MCP 2.2 exposes timeout/closed transport RPC failures as `MCPError`; stable codes are `REQUEST_TIMEOUT` and `CONNECTION_CLOSED`. HTTP transport errors come from `httpx2` | Classify those SDK codes and `httpx2.HTTPError` as transient; unrelated SDK exceptions are bugs |
+| P8 | `Draft202012Validator.check_schema()` accepts a local `$ref` to a missing `$defs` entry; actual validation then raises a referencing error | Wrap evaluation failures as `EngineError`; do not misreport a bad server schema as agent `tool_param` |
+| P9 | MCP's JSON transport rejects non-finite numbers although Python `json.dumps` allows them by default | Strict JSON preflight with `allow_nan=False` before artifact resolution, claim, dispatch or logging; route invalid values through the one repair |
+| P10 | Forwarding a body exception into an AnyIO-backed MCP exit stack can yield `ExceptionGroup`; a cleanup failure can also mask cancellation/domain errors | Close the transport stack without forwarding the body exception; preserve an existing exception and attach cleanup failure as a note |
 
 ### Decisions
 
@@ -75,6 +85,7 @@ the callback. Without one, propagate ToolCallError with field_errors intact.
 |---|---|
 | backend/statlab/mcp_client.py | Create client, ToolSpec, CallContext and logged_calls |
 | backend/statlab/domains/lineage.py | Create moved pure policy and spine tuple |
+| backend/statlab/errors.py | Keep ToolCallError's public string free of internal exception text |
 | contracts/statlab_contracts/envelope.py | Move ORCHESTRATOR_SUPPLIED here |
 | mcp_server/statlab_tools/tool.py | Explicitly re-export the moved constant; keep callers working |
 | backend/statlab/persistence/models.py | Add frozen NodeExecutionRow and ToolCallRow |
@@ -111,7 +122,8 @@ Caller dictionaries remain unchanged. Cancellation must propagate, not become a 
 
 ### 3.2 Ordered rules
 
-V1. Tool must be both in ctx.allowed and permitted by meta.allow_in (exact wildcard `[*]`).
+V1. Tool must be both in ctx.allowed and permitted by meta.allow_in (the exact wildcard is
+`meta.allow_in == ["*"]`; `ctx.allowed` is always a set of tool names and has no wildcard bypass).
 Unknown/denied tools raise ToolNotAllowedError before network dispatch.
 
 V2. Find orchestrator-owned fields by description equal to ORCHESTRATOR_SUPPLIED. Discard the
@@ -191,14 +203,14 @@ failure, with meaningful fixtures. Do not make assumptions true by test construc
 
 ## 5. Definition of Done
 
-- [ ] Implementer hands off focused tests (`tests/test_mcp_client.py`; affected integration tests
+- [x] Implementer hands off focused tests (`tests/test_mcp_client.py`; affected integration tests
       only when needed) plus targeted static evidence. Main reviews stage 21 before stage 25.
       Final B6 acceptance follows AGENTS.md: one full coverage execution, strict mypy and ruff;
       100% line/branch, one designed skip. No separate plain full regression or per-stage global run.
-- [ ] No explicit forbidden typing token, no coverage suppression, no new type ignores;
+- [x] No explicit forbidden typing token, no coverage suppression, no new type ignores;
       compute/provider boundaries remain intact. No node-name literals outside domains.
-- [ ] M6 G1-G7 and M7b prove the client path over HTTP on both real fixtures.
-- [ ] Implementer runs these mutations once for final review; each kills at least one targeted
+- [x] M6 G1-G7 and M7b prove the client path over HTTP on both real fixtures.
+- [x] Implementer runs these mutations once for final review; each kills at least one targeted
       test; restore in finally and verify diff afterwards. Reuse reviewed unchanged proofs:
   1. remove ctx.allowed check while keeping meta.allow_in;
   2. keep agent seed instead of injected seed;
@@ -211,9 +223,9 @@ failure, with meaningful fixtures. Do not make assumptions true by test construc
      transform/reporting gate and reporting-after-score predicate);
   9. select_champion allowed after scoring;
   10. record caller params rather than sent arguments.
-- [ ] Read generated report.md, pipeline.py and manifest.json in full, probe a real fixture
+- [x] Read generated report.md, pipeline.py and manifest.json in full, probe a real fixture
       through split/impute/encode/scale/train/score, preserve exact reproduction.
-- [ ] Main records focused stage evidence/frontmatter/index; WHATS_NEXT stays B6 until 25 completes.
+- [x] Main records focused stage evidence/frontmatter/index; WHATS_NEXT stays B6 until 25 completes.
       Completion requires final B6 acceptance. Implementer does not update plans or commit.
 
 ### Explicitly out of scope
@@ -234,3 +246,110 @@ guard; a feature must be dropped; a new dependency or cross-process import is ne
 4. M6/M7b metric values and reproduction differences; artifact paths for independent review.
 5. Exact public CallContext/client/repository signatures.
 6. Any deviations and hazards for chunk 25/22. Do not commit or push.
+
+## 6. Addendum — implementation probes and clarifications
+
+- The `[*]` notation in the first V1 draft was ambiguous. It means a served metadata list exactly
+  equal to `['*']`; wildcard permission never comes from `ctx.allowed`.
+- MCP 2.2 raises `mcp.shared.exceptions.MCPError` for JSON-RPC timeout and closed-connection
+  responses. Use the installed `mcp.types.REQUEST_TIMEOUT` and `CONNECTION_CLOSED` constants,
+  not exception-name/message matching. The streamable HTTP package is `httpx2`.
+- A served schema can pass `check_schema()` while a broken local `$ref` fails later in
+  `iter_errors()`. Such schema-evaluation failures are server/configuration `EngineError`s.
+- JSON Schema accepts NaN/Infinity for some numeric types, but the MCP JSON request transport does
+  not. Strict-JSON preflight rejects them locally as `tool_param` before the durable score claim;
+  optional repair re-enters the entire guarded attempt.
+- MCP's owned transport cleanup must not receive the caller's exception through AnyIO's exit
+  stack. `aclose()` preserves cancellation and domain errors; cleanup failures are notes when an
+  original error exists and `EngineError` only when cleanup is the sole failure.
+- Required-property errors share the aggregate `params` path (or the parent-object path for nested
+  required keys); messages for every missing key are joined so repair receives complete feedback.
+- Continuation review found that interpolating transport/SDK exception text into the persisted
+  failure envelope can disclose bearer credentials or request details. Use a stable failure
+  message and a safe `ToolCallError.__str__`, retain the exception only as the internal cause,
+  and prove a credential-bearing exception never enters `result_json` or public error text. Repository exception
+  coverage and all fifteen independent mutation kills remain required before acceptance.
+- The dict-values mutation exposed a misleading nested-lineage fixture: its context named
+  `model_training`, but its execution belonged to `intake`. Correct the execution attribution
+  so removing recursive value resolution reaches dispatch and fails the expected lineage
+  refusal, rather than failing an unrelated execution guard. An unrelated error is not a kill.
+- The cross-project intermediate-ancestor fixture also needs a valid child artifact link;
+  otherwise removing the ownership guard is masked by the missing-link guard. With that link
+  present, the mutation must fail the ownership-refusal assertion itself.
+- Final review found that a failed cancellation audit write could replace the original
+  `CancelledError` with a persistence error. Make that audit best-effort, attach only a stable
+  diagnostic note on failure, and propagate the original cancellation. Test both successful
+  auditing and a failed write containing credential-bearing exception text. Refresh affected focused
+  evidence after this correction, then the one final B6 acceptance gate when the batch is stable;
+  unrelated reviewed lineage mutation proofs remain valid.
+
+## 7. Addendum — recovery and cleanup review (2026-10-02)
+
+- Continuation at `901e840` found three missing, formerly untracked files:
+  `backend/statlab/mcp_client.py`, `backend/statlab/domains/lineage.py`, and
+  `tests/test_mcp_client.py`. Recover these files from rewound commit `02f1739`; preserve
+  all existing tracked changes. The recovered client and tests already contain the
+  best-effort cancellation-audit correction. Its status requires a current focused receipt.
+- Cleanup currently adds `str(EngineError(..., cause=close_error))` to an existing body
+  exception. That exposes foreign exception text through cancellation/domain-error notes.
+  Use the stable cleanup message alone. Retain the original body exception and internal
+  cleanup cause; prove credential-bearing cleanup failures cannot enter body-error notes.
+- Implementer owns only the recovered client/test correction, runs affected cleanup and
+  cancellation cases, then the focused stage group and scoped static checks. Missing mutation
+  receipts require new prescribed proofs; recovered counts alone do not establish acceptance.
+  Main reviews generated artifacts and stage evidence before chunk 25 starts. Full acceptance
+  remains one gate for stable B6, following root AGENTS.md.
+- Mutation recipe review requires independent selectors: train refusal uses the post-champion
+  read case; fit refusal uses post-champion `fit_ols` with a matrix argument. Node-12 fitting
+  cases also hit other guards and cannot prove either clause independently. Exact-argument
+  logging uses the persisted-seed assertion, not only the sent-seed assertion. Seed-injection
+  removal must fail the sent-seed assertion. Reporting predicate removal must permit an
+  early reporting read so its refusal assertion fails.
+
+### Reviewed stage handoff (2026-10-03)
+
+- Candidate HEAD `901e840` plus dirty implementation. SHA256: client
+  `5996461ec68ed8b54a035b3627ccf5926adf0080810fd11fdc5eba5f7a060ed4`, lineage
+  `1d13130bd3e3d887a6297f815dbacf600e33172ec3416b2b153534246cb23986`, focused tests
+  `ffb8ab1bb2e75cb883f332bd1c06445ec8f868ec1db7691a36bef859e4c70765`.
+- Focused `tests/test_mcp_client.py`: 64 cases, exit 0; six affected M6/reporting/M7b cases:
+  exit 0. Logs `/private/tmp/statlab-stage21-focused-final.log` and
+  `/private/tmp/statlab-stage21-m6-m7b.log`. Scoped Ruff/mypy were reported green by the first
+  worker, but their logs were unavailable after its runtime failure; full static acceptance
+  remains pending. No green checks repeated merely to establish main-agent ownership.
+- Mutation recipe `/private/tmp/statlab-stage21-mutations.py`, execution output
+  `/private/tmp/statlab-stage21-mutation-run.log`, and all fifteen assertion/restoration rows
+  `/private/tmp/statlab-stage21-mutation-logs/receipt.txt` reviewed. Each test exited 1 on its
+  intended assertion, replacement count was 1, and both source hashes restored exactly.
+- Temporary artifacts expired during the runtime interruption. Fresh two-selector M7b run
+  used the 900-second wrapper, exited 0 after required loopback escalation; log
+  `/private/tmp/statlab-stage21-m7b-replay-tests.log`. Standalone replays exited 0:
+  ROC AUC `0.7304292929292929`, RMSE `13.640760279602766`, both absolute differences `0.0`.
+  Main read both generated reports, scripts and manifests before temporary cleanup; fixtures
+  exercise split/impute/encode/scale/train/score, train-only fitting, test replay and tamper refusal.
+- Public execution-row/client/log signatures remain §3's seam. Chunk 25 may start; chunk 21
+  stays `in_progress` until the single stable B6 acceptance gate.
+
+## 8. Final B6 acceptance (2026-10-03)
+
+Main reviewed both stages, all fifteen MCP and nine LLM mutation failures/restorations, and
+required generated artifacts/replay evidence. One stable batch gate executed; all exit codes 0.
+
+| Gate | Result | Full log |
+|---|---|---|
+| Full pytest with coverage, timeout 900 | 2189 passed, 1 designed skip; 72.08 s | `/private/tmp/statlab-b6-acceptance-coverage.log` |
+| Line/branch coverage | 6030 statements, 0 missed; 1566 branches, 0 partial; 100% | Same coverage log |
+| Full strict mypy | Clean, 109 source files | `/private/tmp/statlab-b6-acceptance-mypy.log` |
+| Ruff check | All checks passed | `/private/tmp/statlab-b6-acceptance-ruff-check.log` |
+| Ruff format check | 110 files already formatted | `/private/tmp/statlab-b6-acceptance-ruff-format.log` |
+
+Coverage command is AGENTS' 900-second wrapper with `pytest -q --cov --cov-report=term` and
+`-o addopts='--strict-markers --strict-config'` to remove duplicate quiet output only. Full mypy
+and Ruff commands are unchanged. Loopback/home-fixture escalation was approved. No paid LLM calls.
+
+Candidate HEAD `901e840` plus 17 source/test/config file hashes in
+`/private/tmp/statlab-b6-acceptance-candidate.json`; aggregate SHA256
+`1acc77712c7d252f3afea487329d615bfccf102704066aa6315fbb66f4a77889`.
+All candidate inputs were unchanged after execution. Actual gate exits/commands and summaries are
+recorded in `/private/tmp/statlab-b6-acceptance-gates.json`. Docs/status edits preserve this evidence.
+Both B6 chunks are completed; implementation committed with B6. User AGENTS/config edits remain intact.

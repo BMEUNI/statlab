@@ -55,6 +55,9 @@ class ToolCallError(StatlabError):
         self.tool = tool
         self.failure = failure
 
+    def __str__(self) -> str:
+        return self.message
+
     @property
     def error_class(self) -> ErrorClass:
         return self.failure.error_class
@@ -64,6 +67,29 @@ class ToolCallError(StatlabError):
         """Attempts allowed for this failure's class. Delegates to the single source of
         truth in `statlab_contracts.envelope` rather than indexing `RETRY_BUDGET` itself."""
         return _retry_budget(self.failure.error_class)
+
+
+class LlmCallError(StatlabError):
+    """A provider request failed; provider exception text stays internal."""
+
+    def __init__(self, failure: Failure, *, cause: BaseException | None = None) -> None:
+        super().__init__(f"LLM call failed: {failure.message}", cause=cause)
+        self.failure = failure
+
+    def __str__(self) -> str:
+        return self.message
+
+    @property
+    def error_class(self) -> ErrorClass:
+        return self.failure.error_class
+
+    @property
+    def retry_budget(self) -> int:
+        return _retry_budget(self.failure.error_class)
+
+
+class LlmOutputError(LlmCallError):
+    """A response remained invalid after the single repair request."""
 
 
 class ToolNotAllowedError(StatlabError):

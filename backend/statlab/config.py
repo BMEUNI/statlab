@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=200, ge=1, le=2048, alias="STATLAB_MAX_UPLOAD_MB")
     keep_intermediates: bool = Field(default=False, alias="STATLAB_KEEP_INTERMEDIATES")
     max_concurrent_runs: int = Field(default=0, ge=0, alias="STATLAB_MAX_CONCURRENT_RUNS")
+    max_concurrent_llm: int = Field(default=4, ge=1, alias="STATLAB_MAX_CONCURRENT_LLM")
 
     @field_validator("mcp_token")
     @classmethod

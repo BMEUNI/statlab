@@ -35,6 +35,7 @@ def test_defaults_applied(valid_env: Path, empty_env_file: Path) -> None:
     assert settings.max_upload_mb == 200
     assert settings.keep_intermediates is False
     assert settings.max_concurrent_runs == 0
+    assert settings.max_concurrent_llm == 4
     assert settings.mcp_url == "http://127.0.0.1:8765/mcp"
 
 
@@ -49,6 +50,7 @@ def test_overrides_honoured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setenv("STATLAB_MAX_UPLOAD_MB", "50")
     monkeypatch.setenv("STATLAB_KEEP_INTERMEDIATES", "true")
     monkeypatch.setenv("STATLAB_MAX_CONCURRENT_RUNS", "4")
+    monkeypatch.setenv("STATLAB_MAX_CONCURRENT_LLM", "7")
     empty = tmp_path / "empty.env"
     empty.write_text("", encoding="utf-8")
 
@@ -61,6 +63,7 @@ def test_overrides_honoured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert settings.keep_intermediates is True
     assert isinstance(settings.keep_intermediates, bool)
     assert settings.max_concurrent_runs == 4
+    assert settings.max_concurrent_llm == 7
 
 
 def test_bool_coercion_is_identity(
@@ -200,6 +203,14 @@ def test_negative_concurrency(
 ) -> None:
     """C15."""
     monkeypatch.setenv("STATLAB_MAX_CONCURRENT_RUNS", "-1")
+    with pytest.raises(ConfigError):
+        load_settings(env_file=empty_env_file)
+
+
+def test_llm_concurrency_must_be_positive(
+    valid_env: Path, empty_env_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STATLAB_MAX_CONCURRENT_LLM", "0")
     with pytest.raises(ConfigError):
         load_settings(env_file=empty_env_file)
 

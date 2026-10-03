@@ -25,7 +25,15 @@ import anyio
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 from pydantic.fields import FieldInfo
-from statlab_contracts.envelope import ErrorClass, ToolFailure, ToolResult, ToolSuccess
+from statlab_contracts.envelope import (
+    ORCHESTRATOR_SUPPLIED as ORCHESTRATOR_SUPPLIED,
+)
+from statlab_contracts.envelope import (
+    ErrorClass,
+    ToolFailure,
+    ToolResult,
+    ToolSuccess,
+)
 from statlab_contracts.layout import RunPaths
 
 from statlab_tools.artifacts import ToolArtifactError
@@ -83,9 +91,6 @@ class ToolDataError(Exception):
 _TRANSIENT_EXCEPTIONS: Final = (ToolArtifactError, OSError, TimeoutError)
 """§6.1.1's `transient` row: IO and timeouts. `ToolArtifactError` covers content-IO failures
 from `statlab_tools.artifacts`; `OSError`/`TimeoutError` cover everything else at that shape."""
-
-ORCHESTRATOR_SUPPLIED: Final = "Supplied by the orchestrator; do not choose a value."
-"""Description for values supplied by the orchestrator rather than selected by the model."""
 
 ToolFn = Callable[..., ToolSuccess]
 

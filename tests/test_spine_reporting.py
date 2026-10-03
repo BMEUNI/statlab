@@ -1,9 +1,8 @@
 """Chunk 19 §4 end-to-end: the node-12/13 reporting flow over a real MCP session.
 
 Reuses the skeleton's `_open_driver`/`_run_spine` (never copies them, spec §4): run the full
-walking skeleton, then continue the **same** driver through the champion/report tools. The driver
-still enforces chunk 21's allow-list and the D32/D-d lineage lock on every call, so this exercises
-the reporting-phase test-read permit (D-d) over the wire, not only in the unit guard tests.
+walking skeleton, then continue the **same** production client through champion/report tools.
+This exercises the reporting-phase test-read permit (D-d) over real HTTP, not only in unit tests.
 
 The classification fixture renders a validation ROC curve and includes the plot; the regression
 fixture runs the same flow without a plot (`compute_roc_curve` is binary only). The report's test
@@ -18,12 +17,12 @@ from typing import cast
 
 import pytest
 from pydantic import JsonValue
+from statlab.mcp_client import logged_calls
 from statlab_contracts.artifacts import ArtifactRef
 from statlab_contracts.layout import ProjectPaths, RunPaths
 from statlab_tools.settings import ToolSettings
 
 from tests.test_skeleton import (
-    SessionFactory,
     SpineResult,
     TaskConfig,
     _houses_contract,
@@ -95,15 +94,6 @@ async def _run_reporting(result: SpineResult, cfg: TaskConfig) -> tuple[str, boo
         had_plot = True
 
     # --- champion_selection: select, render the comparison, assemble the report ----------------
-    champion_table = _only_ref(
-        await driver.call(
-            "champion_selection",
-            "select_champion",
-            ranking=result.ranking_ref,
-            candidate=result.champion,
-            rationale="the top eligible candidate by the primary metric",
-        )
-    )
     validation = _only_ref(
         await driver.call(
             "champion_selection",
@@ -111,26 +101,27 @@ async def _run_reporting(result: SpineResult, cfg: TaskConfig) -> tuple[str, boo
             scores=dict(result.score_tables),
         )
     )
-    section = {"heading": "Narrative", "body": "An LLM-authored summary of the run."}
+    sections: list[JsonValue] = [
+        {"heading": "Narrative", "body": "An LLM-authored summary of the run."}
+    ]
     report = await driver.call(
         "champion_selection",
         "assemble_report",
         title="Modelling report",
-        champion=champion_table,
+        champion=result.champion_table_ref,
         test_score=result.champion_test_table,
         validation_table=validation,
-        sections=[section],
+        sections=sections,
         coefficient_table=result.coefficient_ref,
         plots=list(plots),
-        prior_test_scorings=0,
-        n_waves=1,
+        trusted={"prior_test_scorings": 0, "n_waves": 1},
     )
     return str(report.summary["path"]), had_plot
 
 
 @pytest.mark.asyncio
 async def test_spine_reporting_classification(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
@@ -138,32 +129,31 @@ async def test_spine_reporting_classification(
     frame = subscribers()
     contract = _subscribers_contract()
     run = "r_repcls000000000"
-    async with mcp_session() as session:
-        driver, cfg = await _open_driver(session, tool_settings, run, frame, contract)
+    async with _open_driver(live_server, tool_settings, run, frame, contract) as (driver, cfg):
         result = await _run_spine(driver, cfg)
         path, had_plot = await _run_reporting(result, cfg)
+        assert driver.test_scores == 1
     assert had_plot
     assert path == "report/report.md"
-    md = _report_text(tool_settings, run)
+    md = _report_text(tool_settings, result.driver.run)
     # D-c: the test value in the report is the champion's RECORDED test score.
-    expected = _recorded_test_value(tool_settings, run, result, cfg.primary_metric)
+    expected = _recorded_test_value(tool_settings, result.driver.run, result, cfg.primary_metric)
     assert f"test {cfg.primary_metric} is {expected}" in md
     assert "selection score" in md
     assert "not distinguishable" in md  # the subscribers top-two CIs overlap (chunk 16 §B3)
     for goal in cfg.goals:
         assert str(goal["question"]) in md
     # the plot link resolves relative to report.md.
-    paths = RunPaths(data_dir=tool_settings.data_dir, slug="proj", run_id=run)
+    paths = RunPaths(data_dir=tool_settings.data_dir, slug="proj", run_id=result.driver.run)
     assert "![" in md and "](plots/" in md
     plots_dir = paths.report / "plots"
     assert list(plots_dir.glob("*.png")), "no plot copied into report/plots/"
     # exactly one test scoring, enforced by the driver's lineage lock.
-    assert driver.test_scores == 1
 
 
 @pytest.mark.asyncio
 async def test_spine_reporting_regression(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
@@ -171,20 +161,19 @@ async def test_spine_reporting_regression(
     frame = houses()
     contract = _houses_contract()
     run = "r_repreg000000000"
-    async with mcp_session() as session:
-        driver, cfg = await _open_driver(session, tool_settings, run, frame, contract)
+    async with _open_driver(live_server, tool_settings, run, frame, contract) as (driver, cfg):
         result = await _run_spine(driver, cfg)
         path, had_plot = await _run_reporting(result, cfg)
+        assert driver.test_scores == 1
     assert not had_plot
     assert path == "report/report.md"
-    md = _report_text(tool_settings, run)
-    expected = _recorded_test_value(tool_settings, run, result, cfg.primary_metric)
+    md = _report_text(tool_settings, result.driver.run)
+    expected = _recorded_test_value(tool_settings, result.driver.run, result, cfg.primary_metric)
     assert f"test {cfg.primary_metric} is {expected}" in md
     assert "selection score" in md
     for goal in cfg.goals:
         assert str(goal["question"]) in md
     assert "## Figures" not in md
-    assert driver.test_scores == 1
 
 
 # --- M7b gate (chunk 20 §4): the exported pipeline.py reproduces the champion's test metric -----
@@ -260,20 +249,21 @@ async def _export_and_snapshot(result: SpineResult) -> tuple[dict[str, JsonValue
     the same driver that ran the spine (its `log` is the tool call record, D-b). Returns the
     export summary and the kept tool names."""
     driver = result.driver
-    log_payload = [call.model_dump(mode="json") for call in driver.log]
+    log_payload: list[JsonValue] = [
+        call.model_dump(mode="json") for call in logged_calls(driver.conn, driver.run)
+    ]
     export = await driver.call(
         "artifact_persistence",
         "export_pipeline_script",
-        calls=log_payload,
-        target=result.champion_test_table,
+        trusted={"calls": log_payload, "target": result.champion_test_table},
     )
-    await driver.call("artifact_persistence", "snapshot_run", calls=log_payload)
+    await driver.call("artifact_persistence", "snapshot_run", trusted={"calls": log_payload})
     tools = [str(t) for t in cast("list[JsonValue]", export.summary["tools"])]
     return dict(export.summary), tools
 
 
 async def _run_m7b(
-    mcp_session: SessionFactory,
+    live_server: str,
     settings: ToolSettings,
     run: str,
     frame: object,
@@ -287,8 +277,7 @@ async def _run_m7b(
 
     assert isinstance(frame, DataFrame)
     assert isinstance(contract, DataContract)
-    async with mcp_session() as session:
-        driver, cfg = await _open_driver(session, settings, run, frame, contract)
+    async with _open_driver(live_server, settings, run, frame, contract) as (driver, cfg):
         result = await _run_spine(driver, cfg)
         await _run_reporting(result, cfg)
         summary, kept = await _export_and_snapshot(result)
@@ -299,7 +288,7 @@ async def _run_m7b(
         f"forbidden tool kept: {sorted(set(kept) & _FORBIDDEN_KEPT)!r}"
     )
 
-    paths = RunPaths(data_dir=settings.data_dir, slug="proj", run_id=run)
+    paths = RunPaths(data_dir=settings.data_dir, slug="proj", run_id=result.driver.run)
     pipeline_py = paths.pipeline_py
     assert pipeline_py.exists()
     project = ProjectPaths(data_dir=settings.data_dir, slug="proj")
@@ -314,7 +303,7 @@ async def _run_m7b(
     metrics = cast("dict[str, dict[str, JsonValue]]", printed["metrics"])
     reproduced = metrics[cfg.primary_metric]["value"]
     assert isinstance(reproduced, (int, float)) and not isinstance(reproduced, bool)
-    recorded = _recorded_test_point(settings, run, result, cfg.primary_metric)
+    recorded = _recorded_test_point(settings, result.driver.run, result, cfg.primary_metric)
     diff = abs(float(reproduced) - recorded)
     assert diff <= 0.005, (
         f"reproduced {cfg.primary_metric} {reproduced} differs from recorded {recorded} "
@@ -342,23 +331,23 @@ async def _run_m7b(
 
 @pytest.mark.asyncio
 async def test_m7b_pipeline_reproduces_classification(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
     """M7b, classification: pipeline.py reproduces the champion's test roc_auc within +/-0.005
     (§14.1), run in a fresh process on the CSV."""
     await _run_m7b(
-        mcp_session, tool_settings, "r_m7bcls000000000", subscribers(), _subscribers_contract()
+        live_server, tool_settings, "classification", subscribers(), _subscribers_contract()
     )
 
 
 @pytest.mark.asyncio
 async def test_m7b_pipeline_reproduces_regression(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
     """M7b, regression: pipeline.py reproduces the champion's test rmse within +/-0.005 (§14.1),
     run in a fresh process on the CSV."""
-    await _run_m7b(mcp_session, tool_settings, "r_m7breg000000000", houses(), _houses_contract())
+    await _run_m7b(live_server, tool_settings, "regression", houses(), _houses_contract())

@@ -172,24 +172,65 @@ class ArtifactRow(BaseModel):
     that put `RunRow.test_scored_at` in the schema rather than in process memory.
     """
     split: SplitRole | None
-    """R4: which split a frame artifact is (`train`/`valid`/`test`), or `None`. Only chunk 10's
-    split tools set it. The D32 lineage lock keys on this rather than the free-string `label`."""
     derived_from_test: bool
-    """R4: whether this artifact descends from the test split. The INTEGER column holds 0/1;
-    `_artifact_row_from` maps it to `bool` explicitly, since pydantic would otherwise accept the
-    raw int and leave the type a lie. Chunk 21 propagates the lock through this flag."""
 
     def meta(self) -> ArtifactMeta:
-        """Parse the stored `meta_json`.
-
-        Raises
-        ------
-        PersistenceError
-            On invalid JSON, meaning the row predates a schema change or was hand-edited.
-        """
+        """Parse stored metadata and wrap corrupt rows as persistence errors."""
         try:
             return ArtifactMeta.model_validate_json(self.meta_json)
         except ValidationError as exc:
             raise PersistenceError(
                 f"artifact row {self.id!r} holds invalid meta JSON", cause=exc
             ) from exc
+
+
+class NodeExecutionRow(BaseModel):
+    """A node attempt to which every dispatched tool call is attributed."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    run_id: str
+    candidate_id: str | None
+    node_name: str
+    seq: int
+    attempt: int
+    status: NodeExecutionStatus
+    summary: str | None
+    error: str | None
+    concurrency_at_start: int | None
+    started_at: str
+    ended_at: str | None
+
+
+class ToolCallRow(BaseModel):
+    """Persisted request and response for one MCP dispatch attempt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    run_id: str
+    node_execution_id: str
+    tool_name: str
+    args_json: str
+    result_json: str
+    duration_ms: int
+    ts: str
+
+
+class LlmCallRow(BaseModel):
+    """Persisted accounting metadata for one structured-output request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    run_id: str
+    node_execution_id: str
+    signature: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    cost_usd: float
+    duration_ms: int
+    ts: str

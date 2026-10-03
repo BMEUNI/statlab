@@ -1,9 +1,8 @@
-"""Chunk 16 -- the walking-skeleton gate (M6).
+"""Chunk 16 -- the walking-skeleton gate (M6), driven through the production MCP client.
 
-The 33 `[v1]` tools (PLAN.md §6.4) driven end to end over a *real* MCP session, with zero LLM,
-on a classification fixture and a regression fixture. This module adds no production module: it
-plays the orchestrator chunk 21 will become, minimally, and enforces chunk 21's two rules
-(allow-list, D32 lineage) on itself before every call.
+The 33 `[v1]` tools (PLAN.md §6.4) run end to end over a real MCP session, with zero LLM, on
+classification and regression fixtures. The production client owns discovery, authorization,
+lineage checks, and the durable call audit.
 
 The gate's value is what it finds. If a tool's wire contract, `allow_in` or the lineage rule
 makes the spine impossible as written, that surfaces here as a failure, not as something to work
@@ -16,8 +15,9 @@ why each test opens its own session inside its own task.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from contextlib import AbstractAsyncContextManager
+import sqlite3
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -25,18 +25,23 @@ import numpy as np
 import pandas as pd
 import pytest
 from pydantic import JsonValue
+from statlab.config import Settings
+from statlab.mcp_client import CallContext, McpClient
+from statlab.persistence.db import connect, migrate
+from statlab.persistence.repository import (
+    create_contract,
+    create_node_execution,
+    create_project,
+    create_run,
+    get_project_by_slug,
+    get_run,
+)
 from statlab_contracts.contract import DataContract
-from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
+from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import ProjectPaths, RunPaths
-from statlab_contracts.reporting import LoggedCall
 
 if TYPE_CHECKING:
-    from mcp import ClientSession
-    from mcp.types import CallToolResult, Tool
     from statlab_tools.settings import ToolSettings
-
-SessionFactory = Callable[[], AbstractAsyncContextManager["ClientSession"]]
-
 
 # --- The 33 [v1] tools (spec §3.3, D-g) ----------------------------------------------------------
 
@@ -207,219 +212,67 @@ def _houses_contract() -> DataContract:
     )
 
 
-# --- 3.2 / 3.3 The driver and its two rule checks -------------------------------------------------
-
-
-def check_allowed(node: str, allow_in: list[str]) -> None:
-    """Chunk 21's allow-list rule (D-c): the node must be in the tool's `meta.allow_in`, or
-    `allow_in` must be the wildcard `["*"]`."""
-    if allow_in == ["*"]:
-        return
-    if node not in allow_in:
-        raise AssertionError(f"node {node!r} not in allow_in {allow_in!r}")
-
-
-SPINE_NODES: tuple[str, ...] = (
-    "intake",
-    "problem_definition",
-    "data_profiling",
-    "data_splitting",
-    "experiment_design",
-    "inferential_analysis",
-    "preprocessing",
-    "feature_engineering",
-    "model_training",
-    "model_evaluation",
-    "model_interpretation",
-    "champion_selection",
-    "artifact_persistence",
-)
-_CHAMPION_INDEX: int = SPINE_NODES.index("champion_selection")
-
-
-def check_lineage(
-    node: str,
-    tool: str,
-    tainted_params: Mapping[str, str],
-    test_scores: int,
-    *,
-    transform_only: bool,
-    phase: str,
-) -> None:
-    """D32 as written in PLAN.md (spec §3.3 D-c, extended by chunk 19 D-d). `tainted_params` maps
-    each argument name that carries a test-derived ref to that ref. A call that receives one:
-
-    - a `fit_*` tool, or a parameter named `train`, is a violation in any node;
-    - before `champion_selection`, only `verify_split` may receive one;
-    - in `champion_selection`, only a `transform_only` tool (chunk 17 D-a), a `score_*`, or a
-      `phase == "reporting"` tool (chunk 19 D-d: `render_metrics_table`/`assemble_report` may read
-      the champion's test-derived score tables **after** the single score) may; a `score_*` with a
-      test-derived input is the exactly-once-scored call -- `test_scores` is the count *before*
-      this call, which must still be 0 when this one is the scoring call. `select_champion`
-      (phase `champion`) never may: choosing must not see test.
-
-    `transform_only` is the tool's `meta.transform_only` flag and `phase` is its `meta.phase`, both
-    read from `tools/list` (chunk 17 D-a, chunk 19 D-d). `transform_only` replaces the former
-    `apply_*`/`predict`/`predict_proba` name-prefix matching, which missed `drop_columns` and the
-    row-wise feature constructors -- all legitimate node-12 replays.
-
-    The `fit_*`/`train` clause and the exactly-once count hold in every node (the count is
-    `runs.test_scored_at` in production, a run-wide guard). Nodes *after* `champion_selection`
-    are otherwise unconstrained: a read-only `describe_artifact` on the transformed test frame
-    there cannot influence selection, so D32 does not forbid it.
-    """
-    if not tainted_params:
-        return
-    if "train" in tainted_params:
-        raise AssertionError(f"{tool} received a test-derived `train` in {node!r}")
-    if tool.startswith("fit_"):
-        raise AssertionError(f"fit_* tool {tool} received a test-derived input in {node!r}")
-    if tool.startswith("score_") and test_scores >= 1:
-        raise AssertionError("the champion was scored on test more than once")
-    index = SPINE_NODES.index(node)
-    if index < _CHAMPION_INDEX:
-        if tool != "verify_split":
-            raise AssertionError(
-                f"only verify_split may receive a test-derived input before champion_selection; "
-                f"{tool} did in {node!r}"
-            )
-        return
-    if index > _CHAMPION_INDEX:
-        return
-    reporting_after_score = phase == "reporting" and test_scores >= 1
-    allowed = transform_only or tool.startswith("score_") or reporting_after_score
-    if not allowed:
-        raise AssertionError(f"{tool} may not receive a test-derived input in champion_selection")
+# --- 3.2 / 3.3 Thin driver over the production client ---------------------------------------------
 
 
 @dataclass
 class Driver:
-    """Plays the orchestrator for one task over one live session (spec §3.2). Enforces the two
-    chunk-21 rules on itself before each call, then calls the tool over the wire and validates
-    the envelope with `TOOL_RESULT_ADAPTER`."""
+    """Thin test convenience over the production client and persisted audit log."""
 
-    session: ClientSession
-    run: str
-    schemas: dict[str, set[str]]
-    allow_in: dict[str, list[str]]
-    transform_only: dict[str, bool]
-    phase: dict[str, str]
-    split_seed: int
-    random_seed: int
+    client: McpClient
+    conn: sqlite3.Connection
+    paths: RunPaths
+    contract: DataContract
     dataset: str
-    project: str = "proj"
     produced: set[str] = field(default_factory=set)
-    test_derived: set[str] = field(default_factory=set)
     called: list[tuple[str, str]] = field(default_factory=list)
-    log: list[LoggedCall] = field(default_factory=list)
-    test_scores: int = 0
+    executions: dict[str, str] = field(default_factory=dict)
+    champion_selected: bool = False
 
-    def _tainted(self, arguments: Mapping[str, object]) -> dict[str, str]:
-        """The arguments carrying a test-derived ref, found by walking values recursively
-        (dict values such as `candidates` included) for strings this run marked test-derived."""
-        tainted: dict[str, str] = {}
-        for name, value in arguments.items():
-            for ref in _refs_in(value):
-                if ref in self.test_derived:
-                    tainted[name] = ref
-                    break
-        return tainted
+    @property
+    def run(self) -> str:
+        return self.paths.run_id
 
-    def _inject(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
-        """Inject what chunk 21 injects, keyed on the tool's served input schema (D-b): the
-        orchestrator-supplied `project`/`run`, and `seed`. `dataset` is passed explicitly by the
-        caller (only `load_csv` has it). Split tools' `seed` is `split.seed`; every other tool's
-        is `constraints.random_seed`. Nothing is injected into a tool whose schema lacks the
-        parameter (`list_estimators` has no `project`/`run`/`seed`)."""
-        props = self.schemas[tool]
-        injected = dict(arguments)
-        if "project" in props:
-            injected["project"] = self.project
-        if "run" in props:
-            injected["run"] = self.run
-        if "seed" in props:
-            injected["seed"] = self.split_seed if tool.startswith("split_") else self.random_seed
-        return injected
+    @property
+    def test_scores(self) -> int:
+        run = get_run(self.conn, self.run)
+        return int(run is not None and run.test_scored_at is not None)
 
-    async def call(self, node: str, tool: str, **arguments: object) -> ToolSuccess:
-        check_allowed(node, self.allow_in[tool])
-        injected = self._inject(tool, arguments)
-        tainted = self._tainted(injected)
-        check_lineage(
-            node,
-            tool,
-            tainted,
-            self.test_scores,
-            transform_only=self.transform_only[tool],
-            phase=self.phase[tool],
-        )
+    async def call(
+        self,
+        node: str,
+        tool: str,
+        *,
+        trusted: Mapping[str, JsonValue] | None = None,
+        **arguments: JsonValue,
+    ) -> ToolSuccess:
+        execution_id = self.executions.get(node)
+        if execution_id is None:
+            from statlab.domains.lineage import SPINE_TOOLS_NODES
 
-        result = await _raw_call(self.session, tool, injected)
-        assert result.structured_content is not None, f"{tool} returned no structured_content"
-        validated = TOOL_RESULT_ADAPTER.validate_python(result.structured_content["result"])
-        assert validated.ok is True, f"{tool} failed: {validated!r}"
-
-        if tool.startswith("score_") and tainted:
-            self.test_scores += 1
-
-        tainted_inputs = bool(tainted)
-        for meta in validated.artifacts:
-            self.produced.add(meta.ref)
-            if tainted_inputs or meta.split == "test":
-                self.test_derived.add(meta.ref)
-
-        self.called.append((node, tool))
-        self.log.append(
-            LoggedCall(
-                tool=tool,
-                arguments=cast("dict[str, JsonValue]", injected),
-                outputs=tuple(meta.ref for meta in validated.artifacts),
+            execution = create_node_execution(
+                self.conn,
+                run_id=self.run,
+                node_name=node,
+                seq=SPINE_TOOLS_NODES.index(node),
             )
+            execution_id = execution.id
+            self.executions[node] = execution_id
+        context = CallContext(
+            self.paths,
+            node,
+            execution_id,
+            self.client.allowed_tools(node),
+            self.contract,
+            self.dataset,
+            self.champion_selected,
         )
-        return validated
-
-
-def _refs_in(value: object) -> list[str]:
-    """Every string found by walking `value` recursively -- a plain string, every element of a
-    list/tuple, every value of a dict (so `candidates`/`estimators` dicts are covered)."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Mapping):
-        return [ref for v in value.values() for ref in _refs_in(v)]
-    if isinstance(value, (list, tuple)):
-        return [ref for v in value for ref in _refs_in(v)]
-    return []
-
-
-async def _raw_call(
-    session: ClientSession, name: str, arguments: dict[str, object]
-) -> CallToolResult:
-    from mcp.types import CallToolResult
-
-    result = await session.call_tool(name, arguments)
-    assert isinstance(result, CallToolResult)
-    return result
-
-
-async def _read_schemas(
-    session: ClientSession,
-) -> tuple[dict[str, set[str]], dict[str, list[str]], dict[str, bool], dict[str, str], set[str]]:
-    """Read `tools/list` once: per-tool served input-schema property names, per-tool
-    `meta.allow_in`, per-tool `meta.transform_only` (chunk 17 D-a), per-tool `meta.phase`
-    (chunk 19 D-d), and the full set of served tool names."""
-    listing = await session.list_tools()
-    tools: list[Tool] = list(listing.tools)
-    schemas = {t.name: set(t.input_schema.get("properties", {})) for t in tools}
-    allow_in: dict[str, list[str]] = {}
-    transform_only: dict[str, bool] = {}
-    phase: dict[str, str] = {}
-    for t in tools:
-        assert t.meta is not None
-        allow_in[t.name] = [str(a) for a in cast("list[object]", t.meta["allow_in"])]
-        transform_only[t.name] = bool(t.meta["transform_only"])
-        phase[t.name] = str(t.meta["phase"])
-    names = {t.name for t in tools}
-    return schemas, allow_in, transform_only, phase, names
+        result = await self.client.call(context, tool, arguments, trusted=trusted)
+        self.produced.update(meta.ref for meta in result.artifacts)
+        self.called.append((node, tool))
+        if tool == "select_champion":
+            self.champion_selected = True
+        return result
 
 
 # --- Orchestrator setup: write the CSV and the contract snapshot (spec D-b) -----------------------
@@ -539,6 +392,7 @@ class SpineResult:
     ranking_summary: dict[str, JsonValue]
     ranking_ref: str
     champion: str
+    champion_table_ref: str
     champion_test_table: str
     split_rows: dict[str, int]
     inference_summary: dict[str, JsonValue]
@@ -620,7 +474,7 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
         "coefficient_table",
         fit=fit,
         manifest=manifest,
-        goals=cfg.goals,
+        goals=cast("JsonValue", cfg.goals),
     )
     coefficient_ref = _only_ref(coef_success)
     coefficient_summary = dict(coef_success.summary)
@@ -742,6 +596,15 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
     ranking_summary = dict(ranking_success.summary)
     ranking_ref = _only_ref(ranking_success)
     champion = cast(str, ranking_summary["top_eligible"])
+    champion_table_ref = _only_ref(
+        await driver.call(
+            "champion_selection",
+            "select_champion",
+            ranking=ranking_ref,
+            candidate=champion,
+            rationale="the top eligible candidate by the primary metric",
+        )
+    )
 
     test_imp = _only_ref(
         await driver.call(
@@ -811,6 +674,7 @@ async def _run_spine(driver: Driver, cfg: TaskConfig) -> SpineResult:
         ranking_summary=ranking_summary,
         ranking_ref=ranking_ref,
         champion=champion,
+        champion_table_ref=champion_table_ref,
         champion_test_table=champion_test_table,
         split_rows=split_rows,
         inference_summary=inference_summary,
@@ -929,41 +793,73 @@ def _planted_df(cfg: TaskConfig) -> int:
 # --- The two gate runs (G1-G7) --------------------------------------------------------------------
 
 
+@asynccontextmanager
 async def _open_driver(
-    session: ClientSession,
+    server_url: str,
     settings: ToolSettings,
     run: str,
     frame: pd.DataFrame,
     contract: DataContract,
-) -> tuple[Driver, TaskConfig]:
-    digest = _write_run(settings, run, frame, contract)
-    schemas, allow_in, transform_only, phase, served = await _read_schemas(session)
-    assert served >= SKELETON_TOOLS, f"missing tools: {sorted(SKELETON_TOOLS - served)!r}"
+) -> AsyncIterator[tuple[Driver, TaskConfig]]:
+    from statlab.storage import ensure_run_layout
+
+    db_path = settings.data_dir / "backend.sqlite"
+    conn = connect(db_path)
+    migrate(conn)
+    project = get_project_by_slug(conn, "proj")
+    if project is None:
+        project = create_project(conn, slug="proj", name="Skeleton fixture")
+    contract_row = create_contract(
+        conn,
+        project_id=project.id,
+        path=settings.data_dir / "contract.json",
+        contract=contract,
+    )
+    run_row = create_run(
+        conn,
+        project_id=project.id,
+        contract_id=contract_row.id,
+        mode="autonomous",
+        config_json="{}",
+    )
+    paths = RunPaths(data_dir=settings.data_dir, slug="proj", run_id=run_row.id)
+    ensure_run_layout(paths)
+    digest = _write_run(settings, run_row.id, frame, contract)
     cfg = _config(frame, contract)
+    backend_settings = Settings(
+        mcp_token=settings.mcp_token,
+        data_dir=settings.data_dir,
+        db_path=db_path,
+        mcp_url=f"{server_url}/mcp",
+    )
+    client = McpClient(backend_settings, conn)
     driver = Driver(
-        session=session,
-        run=run,
-        schemas=schemas,
-        allow_in=allow_in,
-        transform_only=transform_only,
-        phase=phase,
-        split_seed=contract.split.seed,
-        random_seed=contract.constraints.random_seed,
+        client=client,
+        conn=conn,
+        paths=paths,
+        contract=contract,
         dataset=digest,
     )
-    return driver, cfg
+    try:
+        async with client:
+            assert set(client.tools) >= SKELETON_TOOLS, (
+                f"missing tools: {sorted(SKELETON_TOOLS - set(client.tools))!r}"
+            )
+            yield driver, cfg
+    finally:
+        driver.conn.close()
 
 
 def _assert_g1_g2_g3(result: SpineResult, cfg: TaskConfig) -> None:
     driver = result.driver
     # G1 is enforced inside Driver.call: every envelope is validated with TOOL_RESULT_ADAPTER
     # and `ok` is asserted true, with the failure message in the assertion text.
-    # G2: no violation (check_allowed/check_lineage raise in Driver.call) and exactly one scoring.
+    # G2: production-client lineage guard permits exactly one test scoring.
     assert driver.test_scores == 1, f"test_scores == {driver.test_scores}, expected 1"
     # G3: the set of tools called is SKELETON_TOOLS minus the other task's tools.
     called = {tool for _node, tool in driver.called}
     other = REGRESSION_ONLY if cfg.is_classification else CLASSIFICATION_ONLY
-    expected = SKELETON_TOOLS - other
+    expected = (SKELETON_TOOLS - other) | {"select_champion"}
     assert called == expected, (
         f"called set mismatch: unexpected={sorted(called - expected)!r}, "
         f"missing={sorted(expected - called)!r}"
@@ -981,24 +877,24 @@ def _patch_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_skeleton_classification_end_to_end(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
     """The classification spine (subscribers), G1-G7, over one live session."""
     frame = subscribers()
     contract = _subscribers_contract()
-    async with mcp_session() as session:
-        driver, cfg = await _open_driver(
-            session, tool_settings, "r_skelcls00000000", frame, contract
-        )
+    async with _open_driver(live_server, tool_settings, "classification", frame, contract) as (
+        driver,
+        cfg,
+    ):
         result = await _run_spine(driver, cfg)
-    _assert_g1_g2_g3(result, cfg)
+        _assert_g1_g2_g3(result, cfg)
     _assert_g4_g5_g6_g7(
         result,
         cfg,
         tool_settings,
-        "r_skelcls00000000",
+        result.driver.run,
         expected_coeffs={
             "tenure_months": -0.05,
             "plan__premium": -1.9,
@@ -1009,24 +905,24 @@ async def test_skeleton_classification_end_to_end(
 
 @pytest.mark.asyncio
 async def test_skeleton_regression_end_to_end(
-    mcp_session: SessionFactory,
+    live_server: str,
     tool_settings: ToolSettings,
     _patch_bootstrap: None,
 ) -> None:
     """The regression spine (houses), G1-G7, over one live session."""
     frame = houses()
     contract = _houses_contract()
-    async with mcp_session() as session:
-        driver, cfg = await _open_driver(
-            session, tool_settings, "r_skelreg00000000", frame, contract
-        )
+    async with _open_driver(live_server, tool_settings, "regression", frame, contract) as (
+        driver,
+        cfg,
+    ):
         result = await _run_spine(driver, cfg)
-    _assert_g1_g2_g3(result, cfg)
+        _assert_g1_g2_g3(result, cfg)
     _assert_g4_g5_g6_g7(
         result,
         cfg,
         tool_settings,
-        "r_skelreg00000000",
+        result.driver.run,
         expected_coeffs={
             "neighbourhood__centre": 40.0,
             "neighbourhood__rural": -25.0,
@@ -1047,93 +943,3 @@ def test_skeleton_tools_cover_the_33() -> None:
     assert not (CLASSIFICATION_ONLY & REGRESSION_ONLY)
     common = SKELETON_TOOLS - CLASSIFICATION_ONLY - REGRESSION_ONLY
     assert common | CLASSIFICATION_ONLY | REGRESSION_ONLY == SKELETON_TOOLS
-
-
-# --- 3.5 Guard tests (no server) ------------------------------------------------------------------
-
-
-def test_check_allowed_rejects_fit_scaler_in_preprocessing() -> None:
-    with pytest.raises(AssertionError):
-        check_allowed("preprocessing", ["feature_engineering"])
-
-
-def test_check_allowed_accepts_wildcard_in_any_node() -> None:
-    check_allowed("preprocessing", ["*"])
-    check_allowed("artifact_persistence", ["*"])
-
-
-@pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores", "transform_only", "phase"),
-    [
-        ("preprocessing", "apply_imputer", {"frame": "a_test"}, 0, True, "cleaning"),
-        ("champion_selection", "fit_scaler", {"train": "a_test"}, 0, False, "encoding"),
-        ("preprocessing", "train_estimator", {"train": "a_test"}, 0, False, "training"),
-        ("champion_selection", "train_estimator", {"frame": "a_test"}, 0, False, "training"),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 1, False, "evaluation"),
-        # only the universal clauses can reject these two: node 12 allows transform-only tools,
-        # and nodes after node 12 are otherwise unconstrained
-        ("champion_selection", "apply_imputer", {"train": "a_test"}, 0, True, "cleaning"),
-        ("artifact_persistence", "fit_ols", {"matrix": "a_test"}, 0, False, "inference"),
-        ("model_interpretation", "predict", {"frame": "a_test"}, 0, True, "training"),
-        ("artifact_persistence", "score_regression", {"truth": "a_test"}, 1, False, "evaluation"),
-        # chunk 19 D-d: a reporting tool reading test BEFORE the champion node is rejected by the
-        # pre-champion clause (only verify_split may), even though its phase is "reporting"
-        ("model_evaluation", "render_metrics_table", {"scores": "a_test"}, 0, False, "reporting"),
-        (
-            "model_interpretation",
-            "assemble_report",
-            {"test_score": "a_test"},
-            0,
-            False,
-            "reporting",
-        ),
-        # chunk 19 D-d: select_champion (phase "champion") may never receive a test-derived input,
-        # in any state -- choosing must not see test
-        ("champion_selection", "select_champion", {"ranking": "a_test"}, 0, False, "champion"),
-        ("champion_selection", "select_champion", {"ranking": "a_test"}, 1, False, "champion"),
-        # in node 12 itself, a reporting tool may read test only AFTER the one score
-        (
-            "champion_selection",
-            "render_metrics_table",
-            {"scores": "a_test"},
-            0,
-            False,
-            "reporting",
-        ),
-    ],
-)
-def test_check_lineage_rejects(
-    node: str,
-    tool: str,
-    tainted: dict[str, str],
-    test_scores: int,
-    transform_only: bool,
-    phase: str,
-) -> None:
-    with pytest.raises(AssertionError):
-        check_lineage(node, tool, tainted, test_scores, transform_only=transform_only, phase=phase)
-
-
-@pytest.mark.parametrize(
-    ("node", "tool", "tainted", "test_scores", "transform_only", "phase"),
-    [
-        ("data_splitting", "verify_split", {"test": "a_test"}, 0, False, "splitting"),
-        ("champion_selection", "apply_scaler", {"frame": "a_test"}, 0, True, "encoding"),
-        ("champion_selection", "predict_proba", {"frame": "a_test"}, 0, True, "training"),
-        ("champion_selection", "score_classification", {"truth": "a_test"}, 0, False, "evaluation"),
-        ("artifact_persistence", "describe_artifact", {"artifact": "a_test"}, 1, False, "artifact"),
-        # chunk 19 D-d: a reporting-phase tool in champion_selection, AFTER the one score, may read
-        # the champion's test-derived score tables
-        ("champion_selection", "render_metrics_table", {"scores": "a_test"}, 1, False, "reporting"),
-        ("champion_selection", "assemble_report", {"test_score": "a_test"}, 1, False, "reporting"),
-    ],
-)
-def test_check_lineage_accepts(
-    node: str,
-    tool: str,
-    tainted: dict[str, str],
-    test_scores: int,
-    transform_only: bool,
-    phase: str,
-) -> None:
-    check_lineage(node, tool, tainted, test_scores, transform_only=transform_only, phase=phase)

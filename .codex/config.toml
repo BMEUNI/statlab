@@ -1,8 +1,12 @@
+model = "gpt-6.1-sol"
+model_context_window = 1050000
+model_auto_compact_token_limit = 850000
+
+[features]
+workspace_dependencies = false
+
 [agents]
 enabled = true
-# Keep implementation stages cheap; this limit does not authorize parallel writes.
 max_concurrent_threads_per_session = 3
 default_subagent_model = "gpt-6-luna"
 default_subagent_reasoning_effort = "high"
-
-# The main agent model remains inherited from the user/composer configuration.

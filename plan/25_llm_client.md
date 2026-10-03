@@ -1,8 +1,13 @@
 ---
-status: untouched
+status: completed
 dependencies: [01, 02, 05, 21]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-03
+implementation_notes: >-
+  Typed three-tier LLM client, one repair, bounded requests and per-attempt metadata/cached-cost
+  accounting implemented and reviewed. Offline import/mock, cancellation and malformed-boundary
+  evidence pass; all nine mutation properties killed and restored. B6 accepted 2026-10-03 with
+  2189 passed, one designed skip, 100% line/branch coverage and full static gates clean.
+  See chunk 21 section 8 for shared candidate/exit/log receipt. Committed with B6.
 ---
 
 # Chunk 25 — Typed LiteLLM client
@@ -119,7 +124,9 @@ response_format and includes schema. Keep caller's invariant/system prefix ahead
 messages: append the schema to an existing initial system message or insert one at the front.
 Never mutate the original messages; never send a model-specific parameter to another provider.
 
-V3. Nonstreaming completion, explicit request timeout, semaphore. Require ModelResponse and
+V3. Nonstreaming completion, explicit request timeout, `num_retries=0`, semaphore. The installed
+LiteLLM/OpenAI adapter otherwise inherits provider retries; recovery owns those, and unlogged
+retries would violate per-attempt accounting. Require ModelResponse and
 nonempty choices with text content; None/empty content is output validation failure. Parse
 only message.content with output.model_validate_json; ignore reasoning_content.
 
@@ -163,14 +170,14 @@ no new type ignores. Untyped third-party payloads held as object and narrowed.
 
 ## 5. Definition of Done
 
-- [ ] Implementer hands off focused LLM tests and affected regressions/targeted static checks.
+- [x] Implementer hands off focused LLM tests and affected regressions/targeted static checks.
       Main reviews the complete B6 candidate, then owns one final gate under AGENTS.md: full pytest
       WITH coverage via timeout=900, strict mypy, ruff check/format; 100% line/branch and zero new
       ignores/coverage suppressions. No separate plain full suite or duplicate worker final run.
-- [ ] No paid/live provider requests; import test blocks socket connects in a fresh process.
-- [ ] Each attempted completion has a row; repair count exactly one, cached costs independently
+- [x] No paid/live provider requests; import test blocks socket connects in a fresh process.
+- [x] Each attempted completion has a row; repair count exactly one, cached costs independently
       calculated, concurrency proved by a barrier rather than elapsed-time guess.
-- [ ] Implementer runs each mutation once for final review (one replace, count==1, finally restore,
+- [x] Implementer runs each mutation once for final review (one replace, count==1, finally restore,
       timeout=300); rerun only proofs whose property changed:
   1. consult LiteLLM before override (DeepSeek wrongly schema);
   2. remove import's local-model-map env default;
@@ -181,7 +188,7 @@ no new type ignores. Untyped third-party payloads held as object and narrowed.
   7. omit the semaphore;
   8. map rate limit to bug;
   9. omit the first invalid attempt's log.
-- [ ] Main updates frontmatter/index after final acceptance; WHATS_NEXT measured evidence + one
+- [x] Main updates frontmatter/index after final acceptance; WHATS_NEXT measured evidence + one
       Next B7 heading, batch B6 summary and tradeoffs. Docs preserve product gate evidence.
       Implementer does not update plans, commit, or push; main commits only when authorized.
 
@@ -203,3 +210,107 @@ API; a live call/new dependency or dropping planned behavior becomes necessary.
 4. Independently computed cached-token bill vs logged bill.
 5. Offline import/mock and semaphore proof; no network calls.
 6. What chunk 26 must know; deviations/concerns. Do not commit or push.
+
+## 6. Addendum — review corrections (2026-10-02)
+
+- Installed LiteLLM's request context defaults max_retries to `litellm.num_retries` (None),
+  while the OpenAI adapter has its own retry defaults. V3 explicitly sends `num_retries=0`.
+  The fake request must assert that value; transport failures still log one row and escape
+  to recovery without a second request. This closes a gap in the original "no backoff" rule.
+- Chunk 21 review established safe public boundary-error text: retain foreign exceptions as
+  internal causes, but never interpolate their text into failures or public error strings.
+  Follow `ToolCallError.__str__` for the LLM errors and test credential-bearing provider errors.
+
+## 7. Addendum — stage review (2026-10-03)
+
+Initial focused handoff at `901e840` plus dirty B6 code: 26 selected cases exited 0
+(`/private/tmp/b6-stage25-focused-final.log`); scoped mypy and Ruff exited 0
+(`b6-stage25-mypy.log`, `b6-stage25-ruff-check.log`, `b6-stage25-ruff-format.log` under
+`/private/tmp`). Broader config selection passed 54 cases but encountered the known sandbox-only
+tilde-path failure; final acceptance uses required escalation. This is development evidence.
+
+### Required narrow corrections
+
+- Delete unused TypeVar and the explicitly unreachable `AssertionError` tail. Express the two
+  attempts with a loop that returns or raises through reachable behavior; keep exactly one repair.
+- Narrow the returned object to SDK `ModelResponse` and require nonempty choices. Installed
+  SDK constructors validate `choices: list[Choices]`, `message: Message` and `content: str | None`;
+  trust those validated fields instead of duplicating their guards. Preserve `None`/empty-string
+  repair semantics and record the returned attempt before content parsing.
+  Empty/non-chat choices with valid usage still retain that returned usage and cost; only missing
+  or malformed accounting becomes zero. Do not discard consumed tokens merely because content
+  cannot be parsed.
+  Apply the same domain wrapping to malformed usage/details shape; keep invalid usage at zero
+  accounting with one failed-attempt row. No raw SDK attribute failures may escape.
+- Derive example selection from the generated schema once; do not separately traverse both
+  config extras and generated extras. Honor an explicitly supplied empty dictionary. Label only
+  the generic fallback as syntax-only. Serialize schema/example as strict JSON and wrap malformed
+  schema/example serialization before dispatch rather than exposing a foreign exception.
+- Unexpected validation-library/custom-validator exceptions (for example `TypeError`, which
+  Pydantic does not turn into `ValidationError`) are safe domain bugs, not output repair cases.
+  Preserve the already-recorded usage and issue no second completion for such failures.
+
+### Acceptance evidence gaps
+
+Add meaningful focused cases for all four transient SDK classes and a bug class, provider-specific
+kwargs absent for other providers, actual native response format, stable prefix in both attempts,
+prompt-tier repair, reasoning-content exclusion, failed cancellation auditing with credential-bearing
+cause and original cancellation identity, negative/noninteger token counts, finite/nonnegative cost
+fallbacks, explicit/model/generic examples, and direct repository attribution/integrity/closed-DB
+errors. Prove default real completion through the client with an offline mock, not only a direct
+SDK call. Preserve blocked-network import evidence for the unchanged import-default property.
+
+Only the original owned implementation/test files may change. Run affected LLM/config cases and
+scoped static checks; no coverage/global gate. Handoff updated exact nine mutation recipes and stop.
+Main reviews the terminal correction handoff, then delegates prescribed mutations before one
+stable B6 acceptance gate. Source corrections invalidate affected focused evidence; unchanged MCP
+lineage mutations, pipeline/artifact review, and import-default proof remain reusable.
+
+### SDK-shape correction and mutation authorization
+
+Read-only inspection of LiteLLM 1.100.0 on 2026-10-03 corrected the initial review assumption:
+ordinary `ModelResponse` construction rejects non-chat choices and non-text content. It accepts
+arbitrary `usage` metadata as an extra field. No source mutation was used for this probe.
+Do not use `model_construct`/validator bypasses to manufacture chat states the SDK refuses.
+Use ordinary constructors for malformed usage (which they accept), and demonstrate SDK chat
+validation failures through the awaited request seam (safe bug, one zero-usage row because no
+response returned). Delete unreachable/redundant chat attribute/type guards. Keep the nonempty
+choices guard and returned-usage preservation. This follows root AGENTS' unreachable-code rule.
+
+Main reviewed all nine mutation properties against the focused candidate. After this bounded
+correction and focused green, the implementer may execute the nine prescribed proofs using exact
+single replacements, intended assertions, timeout 300 and finally byte restoration. Mutations
+target unchanged capability/import/repair/cache/cost/semaphore/error/logging rules. Prefix-order
+mutation must replace the complete function prefix once; the error-class mutation must target
+the `_TRANSIENT_ERRORS` tuple rather than its import. First-invalid logging mutation targets the
+single accounting call in `_record_response`. No extra probes/global gates. Main reviews the
+terminal correction/mutation receipts and final diff before full B6 acceptance.
+
+Final source review identified untested reachable boundaries: a persistence failure after a
+returned SDK response, and a non-attribute failure while reading arbitrary SDK usage metadata.
+Cover both with ordinary constructor/request seams and no validator bypass. Check the public
+LLM error retry-budget values against the shared taxonomy (transient 3, bug 0, output 2).
+These tests do not change implementation or the nine proved properties; preserve their mutation
+receipts and run only affected focused/static checks before final batch acceptance.
+
+## 8. Completion and next-stage seam (2026-10-03)
+
+- Latest LLM module receipt: 51 passed, exit 0; test-file Ruff/mypy exited 0. Logs
+  `/private/tmp/b6-stage25-finaltests-focused.log`, `b6-stage25-finaltests-ruff-check.log`,
+  `b6-stage25-finaltests-ruff-format.log`, `b6-stage25-finaltests-mypy.log`. Config checks retain
+  unchanged focused evidence. Final full B6 gate covers every test and source file.
+- All nine prescribed mutations exited 1 on intended assertions and restored exact client bytes;
+  per-case logs `/private/tmp/b6-stage25-m01_prefix_order.log` through
+  `/private/tmp/b6-stage25-m09_first_invalid_log.log` (names recorded in the stage handoff).
+  Tuple-only rate-limit replacement count is 1; an earlier count of 2 did not execute a test.
+  Main inspected every failure and verified restored client Git blob hash
+  `15b3017beee7458da7b66d2ac668de2243a1e361`; final test blob hash
+  `cba3fdbca33745348580ee322715a37fde161bc6`.
+- [Shared B6 acceptance receipt](./21_mcp_client.md#8-final-b6-acceptance-2026-10-03) records
+  candidate hashes, commands, real exit codes, 100% coverage and clean full static gates.
+- Chunk 26 supplies model routing/keys/prompts. Call `LlmClient.complete` with explicit model,
+  typed output and execution attribution; reuse a client to share its semaphore (default 4).
+  Requests use timeout 60, `num_retries=0`, and one output repair in every tier. Ordinary SDK
+  chat constructors validate shape; usage extras are checked at our boundary. Reasoning text
+  is excluded from parsing/storage. Flash cost is a peak upper estimate; unknown prices log
+  zero with a warning. Recovery/backoff remains chunk 31. No paid requests were used in validation.
