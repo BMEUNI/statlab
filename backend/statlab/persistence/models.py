@@ -8,9 +8,10 @@ for why that distinction is a correctness requirement, not a style preference.
 
 from __future__ import annotations
 
-from typing import Final, Literal, get_args
+import json
+from typing import Final, Literal, NoReturn, get_args
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta
 from statlab_contracts.contract import DataContract
 from statlab_contracts.vocabulary import SplitRole
@@ -201,6 +202,46 @@ class NodeExecutionRow(BaseModel):
     concurrency_at_start: int | None
     started_at: str
     ended_at: str | None
+
+
+class CandidateRow(BaseModel):
+    """The engine's persisted candidate identity and human description."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str
+    run_id: str
+    label: str
+    rationale: str
+    spec_json: str
+    varies_from_baseline_json: str
+    wave: int
+    status: str
+    rank: int | None
+    created_at: str
+
+
+class GateRow(BaseModel):
+    """An existing gate; recovery never creates or answers it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str
+    run_id: str
+    node_execution_id: str
+    question_json: str
+    answer_json: str | None
+    status: str
+    ts: str
+
+    def question(self) -> dict[str, JsonValue]:
+        try:
+            parsed = json.loads(self.question_json, parse_constant=_reject_json_constant)
+            return TypeAdapter(dict[str, JsonValue]).validate_python(parsed, strict=True)
+        except ValueError as exc:
+            raise PersistenceError("invalid gate question JSON", cause=exc) from exc
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError("invalid JSON numeric constant")
 
 
 class ToolCallRow(BaseModel):

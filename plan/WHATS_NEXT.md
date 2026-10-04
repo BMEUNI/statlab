@@ -6,46 +6,58 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**22 of 41 chunks complete, plus revisions 09r and 20r. B6 accepted 2026-10-03; committed
-`de2aa83` (`feat(b6): add guarded MCP and typed LLM clients`).** Phases A/B and M7b complete.
+**24 of 41 chunks complete, plus revisions 09r and 20r. B7 accepted and committed 2026-10-04.**
+Acceptance parent: `4b3c19d`; the B7 commit contains the receipt's exact accepted product inputs.
+Phases A/B and M7b complete. B6 remains committed at `de2aa83`.
 
-Accepted B6: 2189 passed, one designed skip; 100% line/branch coverage; full mypy and Ruff clean.
-Coverage run: 72.08 s. Acceptance candidate was parent `901e840` plus recorded changes, later
-committed as `de2aa83`. Do not mistake acceptance-parent SHA for current implementation HEAD.
-[Durable acceptance summary](./21_mcp_client.md#8-final-b6-acceptance-2026-10-03) records results,
-commands, exits, aggregate input digest and required mutation/replay evidence. Docs-only changes
-preserve acceptance; no startup baseline or repeat of B6 proofs.
+Accepted B7: **2298 passed, one designed skip; 100% line/branch; full mypy/Ruff/format exit 0**.
+JUnit coverage-run time: 78.857 s. [Durable B7 receipt](./receipts/B7.md) records candidate hashes,
+focused handoffs, review corrections, the initial coverage-only failure and final acceptance.
+B6 client/dependency inputs and required mutation/replay evidence were reused; no new dependency
+or migration. Docs/status changes preserve product acceptance; no startup baseline.
 
-## Next: batch B7 (chunks 22 engine core + 23 restart reconciliation)
+B7 proves M8a's engine/restart subset. PLAN's node-6/fan-out concurrency proof remains chunk 24;
+the complete M8a milestone is not yet closed.
 
-Draft bounded chunk 22 from PLAN's declared spine, checkpointer/event-bus requirements and available
-B6 client/repository seams. Stage 22 owns shared-node traversal and prune-on-success (D24).
-After its focused terminal handoff and dependency review, specify/implement stage 23 boot/status
-scan and node-boundary restart reconciliation. B7 closes M8a. Detailed specs do not exist yet.
+## Next: batch B8 (chunks 24 candidate fan-out + 26 routing/skills)
 
-Use one writer, focused handoffs, consolidated batch review and one stable final gate per AGENTS.
-For engine/restart work, consider `implementer_strong` given async/state-machine boundaries.
+Draft bounded chunk 24 from PLAN D17/D24/D29/D31/D32/D36c and the accepted engine/restart seams.
+Specify the shared-split guarantee, candidate progress/checkpoints, real fan-out/concurrency proof,
+test-lock preservation, budget/search-wave behavior and tool-boundary control requirements.
+Use `implementer_strong` for these concurrency/state boundaries. Then bound chunk 26 routing,
+skills validation and project memory using the accepted B6 LLM client and declared spine.
 
-## B6 seams and hazards for B7
+Follow AGENTS: exact ownership, focused terminal handoffs, consolidated review and one stable
+acceptance gate. Work sequentially unless independent parallel ownership is explicitly authorized.
 
-- Reuse `create_node_execution`, MCP `CallContext`, durable test-score claim and DB call-log APIs.
-  Production dispatch enforces both allow-lists, trusted injection and ownership/lineage guards.
-- Share one LLM client to share its semaphore. Exactly one output repair; timeout 60; no hidden
-  retries. Cancellation retains its identity; returned usage is recorded before content validation.
-- Ordinary SDK chat fields are validated by SDK. Usage extras still need boundary checks.
-- Routing/keys/prompts belong to 26; recovery/backoff to 31. No concrete engine, migration or new
-  dependency was introduced by B6. Unknown pricing records zero with warning; Flash costs are
-  informational peak upper estimates.
+## B7 seams and hazards for B8
+
+- Reuse frozen `RunState`/`BoundaryResult`, `Checkpointer`, `EventBus`, `RunLoop` and shared
+  `RunTracker`; generic graph code contains no domain node names. Current state accepts at most
+  one supplied candidate. Public `c_01` and run-qualified DB identity are distinct.
+- `RunLoop` saves each boundary before pruning exact-execution dataframe intermediates; all
+  retained refs and non-frame artifacts survive. Cancellation/crashed attempts never prune.
+- `RestartReconciler` prepares the whole scan before returning scheduled task handles. Caller
+  owns awaiting/cancellation/exception consumption; boot invocation precedes new live runs.
+  Paused/awaiting remain dormant; only actual unanswered pending gates are republished.
+- Cursor is recovery authority. SQL-ahead outcome replays a new attempt; checkpoint-ahead state
+  repairs audit/events/status without dispatch. Interrupted attempt is bug/`process terminated`.
+  Test score claims/fingerprints and prior tool audit are never reset, so replay may fail closed.
+- Event bus is one writer per run/process; no multi-process writers. Failed checkpoint cleanup
+  can leave a temporary file while retaining the original error and prior checkpoint.
+- Share one B6 LLM client/semaphore. One output repair, timeout 60, no hidden retry; cancellation
+  retains identity. SDK validates ordinary fields; usage extras remain boundary checks.
 
 ## Deferred responsibilities
 
 | Responsibility | Owner |
 |---|---|
-| Candidate IDs (`c_01`, sequential) | 22 |
+| Multi-candidate progress/fan-out and full M8a concurrency proof | 24 |
 | Estimator validation, family cap D28, `max_candidates` | 27b |
 | Remaining table repositories | First real caller's chunk |
 | Provider-name environment check, within `llm/` | 26 |
 | Cancel running node at tool-call boundary (D36c) | 31 |
+| Gate creation/answering and callable recovery API boot wiring | 32 / 33 |
 | Modelling heuristics/pitfalls | Human; 26 scaffolds TODO headings only (D12) |
 
 ## References on demand

@@ -25,17 +25,24 @@ guard with an `assert` or an `if`, both of which would be just as untestable.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
+from pydantic import ValidationError
+from statlab_contracts.candidate import CandidateSpec
 from statlab_contracts.contract import DataContract
+from statlab_contracts.envelope import Failure
 
+from statlab.domains.base import NodeResult
 from statlab.errors import PersistenceError
 from statlab.persistence.db import transaction
 from statlab.persistence.ids import new_id, utc_now
 from statlab.persistence.models import (
+    CandidateRow,
     ContractRow,
     DatasetRow,
+    GateRow,
     LlmCallRow,
     NodeExecutionRow,
     ProjectRow,
@@ -234,6 +241,7 @@ def create_node_execution(
     seq: int,
     candidate_id: str | None = None,
     attempt: int = 1,
+    concurrency_at_start: int | None = None,
 ) -> NodeExecutionRow:
     """Create an auditable execution row; callers own reuse across repeated calls."""
     execution_id, started_at = new_id("ne"), utc_now()
@@ -241,9 +249,19 @@ def create_node_execution(
         with transaction(conn):
             conn.execute(
                 "INSERT INTO node_executions "
-                "(id, run_id, candidate_id, node_name, seq, attempt, status, started_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
-                (execution_id, run_id, candidate_id, node_name, seq, attempt, started_at),
+                "(id, run_id, candidate_id, node_name, seq, attempt, status, started_at, "
+                "concurrency_at_start) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+                (
+                    execution_id,
+                    run_id,
+                    candidate_id,
+                    node_name,
+                    seq,
+                    attempt,
+                    started_at,
+                    concurrency_at_start,
+                ),
             )
             row = conn.execute(
                 "SELECT * FROM node_executions WHERE id = ?", (execution_id,)
@@ -354,14 +372,16 @@ def update_run_status(
     *,
     status: RunStatus,
     current_node: str | None = None,
+    ended_at: str | None = None,
 ) -> RunRow:
     """Raises `PersistenceError` on an unknown `run_id` -- updating nothing is a bug in the
     caller, unlike reading nothing."""
     try:
         with transaction(conn):
             cursor = conn.execute(
-                "UPDATE runs SET status = ?, current_node = ? WHERE id = ?",
-                (status, current_node, run_id),
+                "UPDATE runs SET status = ?, current_node = ?, ended_at = COALESCE(?, ended_at) "
+                "WHERE id = ?",
+                (status, current_node, ended_at, run_id),
             )
             if cursor.rowcount == 0:
                 raise PersistenceError(f"no run with id {run_id!r} to update")
@@ -369,6 +389,147 @@ def update_run_status(
     except sqlite3.IntegrityError as exc:
         raise _wrap_integrity_error(exc, constraint="runs.status") from exc
     return RunRow.model_validate(dict(row))
+
+
+def next_node_attempt(
+    conn: sqlite3.Connection, *, run_id: str, node_name: str, candidate_id: str | None
+) -> int:
+    try:
+        (attempt,) = conn.execute(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM node_executions "
+            "WHERE run_id = ? AND node_name = ? AND candidate_id IS ?",
+            (run_id, node_name, candidate_id),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot read node attempts", cause=exc) from exc
+    return int(attempt)
+
+
+def has_run_history(conn: sqlite3.Connection, run_id: str) -> bool:
+    """A missing checkpoint may initialize only a run without durable work or score claims."""
+    try:
+        row = conn.execute(
+            "SELECT test_scored_at, test_fingerprint FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise PersistenceError("run does not exist")
+        if row["test_scored_at"] is not None or row["test_fingerprint"] is not None:
+            return True
+        (present,) = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM node_executions WHERE run_id = ?) "
+            "OR EXISTS(SELECT 1 FROM candidates WHERE run_id = ?) "
+            "OR EXISTS(SELECT 1 FROM gates WHERE run_id = ?) "
+            "OR EXISTS(SELECT 1 FROM artifacts WHERE run_id = ?)",
+            (run_id, run_id, run_id, run_id),
+        ).fetchone()
+        return bool(present)
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot read run history", cause=exc) from exc
+
+
+def list_node_executions(conn: sqlite3.Connection, run_id: str) -> tuple[NodeExecutionRow, ...]:
+    try:
+        rows = conn.execute(
+            "SELECT * FROM node_executions WHERE run_id = ? ORDER BY rowid", (run_id,)
+        ).fetchall()
+        return tuple(NodeExecutionRow.model_validate(dict(row)) for row in rows)
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read node executions", cause=exc) from exc
+
+
+def interrupt_node_execution(conn: sqlite3.Connection, execution_id: str) -> None:
+    """Keep the original summary and every attempt/audit row when a process dies."""
+    try:
+        with transaction(conn):
+            conn.execute(
+                "UPDATE node_executions SET status = 'failed', error = ?, ended_at = ? "
+                "WHERE id = ? AND status = 'running'",
+                (
+                    Failure(error_class="bug", message="process terminated").model_dump_json(),
+                    utc_now(),
+                    execution_id,
+                ),
+            )
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot interrupt node execution", cause=exc) from exc
+
+
+def list_pending_gates(
+    conn: sqlite3.Connection, *, run_id: str, execution_id: str
+) -> tuple[GateRow, ...]:
+    try:
+        rows = conn.execute(
+            "SELECT gates.* FROM gates "
+            "WHERE gates.run_id = ? AND gates.node_execution_id = ? "
+            "AND gates.status = 'pending' AND gates.answer_json IS NULL ORDER BY gates.rowid",
+            (run_id, execution_id),
+        ).fetchall()
+        gates = tuple(GateRow.model_validate(dict(row)) for row in rows)
+        execution = conn.execute(
+            "SELECT run_id FROM node_executions WHERE id = ?", (execution_id,)
+        ).fetchone()
+        if execution is None or execution["run_id"] != run_id:
+            raise PersistenceError("gate execution ownership mismatch")
+        return gates
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read pending gates", cause=exc) from exc
+
+
+def finish_node_execution(
+    conn: sqlite3.Connection, execution_id: str, result: NodeResult
+) -> NodeExecutionRow:
+    try:
+        with transaction(conn):
+            cursor = conn.execute(
+                "UPDATE node_executions SET status = ?, summary = ?, error = ?, ended_at = ? "
+                "WHERE id = ?",
+                (
+                    result.status,
+                    json.dumps(result.summary),
+                    result.error.model_dump_json() if result.error else None,
+                    utc_now(),
+                    execution_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise PersistenceError("node execution does not exist")
+            row = conn.execute(
+                "SELECT * FROM node_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot persist node outcome", cause=exc) from exc
+    return NodeExecutionRow.model_validate(dict(row))
+
+
+def ensure_candidate(
+    conn: sqlite3.Connection, *, candidate_id: str, run_id: str, spec: CandidateSpec
+) -> CandidateRow:
+    try:
+        with transaction(conn):
+            row = conn.execute("SELECT * FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO candidates (id, run_id, label, rationale, spec_json, "
+                    "varies_from_baseline_json, wave, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, 'pending', ?)",
+                    (
+                        candidate_id,
+                        run_id,
+                        spec.label,
+                        spec.rationale,
+                        spec.model_dump_json(),
+                        json.dumps(spec.varies_from_baseline),
+                        utc_now(),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
+                ).fetchone()
+            elif row["run_id"] != run_id or row["spec_json"] != spec.model_dump_json():
+                raise PersistenceError("candidate identity mismatch")
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot persist candidate", cause=exc) from exc
+    return CandidateRow.model_validate(dict(row))
 
 
 def claim_test_scoring(conn: sqlite3.Connection, run_id: str, *, at: str | None = None) -> bool:
