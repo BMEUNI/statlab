@@ -44,7 +44,10 @@ source/tests. Reuse the committed B8 receipt and exact accepted product inputs.
   Explicit controls drain calls; ordinary cancellation retains identity. No thread preemption.
 - Pass declared spine and entered tool registry to `load_run_skill`, then `skill.allowed`
   unchanged to `CallContext`. Snapshot bytes/hash are immutable; manifest integration is 29.
-  Human-authored modelling Heuristics/Pitfalls remain TODO placeholders (D12).
+  User-authorized modelling policy now fills all 26 Heuristics/Pitfalls sections (D12);
+  all role defaults use V4.1-Flash (D16). [Policy/model receipt](./receipts/modelling-skill-2026-10-04.md):
+  18 focused skill checks passed; full acceptance timed out; further tests stopped by user.
+  This adjunct task does not complete any B9 domain implementation.
 - Initialize one immutable `PromptContext` from project memory. `remember` is append-only;
   later writes affect future contexts/runs. Q&A routing uses current node role.
 - Startup must validate selected role models and explicit skill model literals and preserve
@@ -62,7 +65,6 @@ source/tests. Reuse the committed B8 receipt and exact accepted product inputs.
 | Final reporting, skill hash manifest and eventual automatic memory extraction | 29 |
 | Control handlers, resume, gate answers and callable recovery API boot wiring | 30–33 |
 | Remaining table repositories | First real caller's chunk |
-| Modelling heuristics/pitfalls | Human; 26 supplied TODO headings only (D12) |
 
 ## References on demand
 

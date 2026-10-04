@@ -9,7 +9,9 @@ Score the selected champion on test once. Return typed decisions and cite record
 Load data and validate the agreed contract.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Confirm target, task type, positive class and units against the agreed contract.
+- Check that every feature exists at prediction time; treat ID and leakage flags as review evidence.
+- Validate schema and contract before modelling proceeds.
 
 ### Tools
 load_csv
@@ -22,7 +24,8 @@ detect_leaky_columns
 Validated contract and registered input artifact.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not silently change the target, task, units or positive class to fit the observed data.
+- Do not treat an ID or leakage flag as proof; resolve uncertainty through typed escalation.
 
 ## problem_definition
 
@@ -30,7 +33,9 @@ TODO: Human author supplies domain pitfalls.
 Clarify the modelling objective within the confirmed contract.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Freeze the prediction objective, primary metric, direction and relevant error tradeoffs.
+- Predeclare inferential hypotheses, predictors, controls and alpha before profiling.
+- State whether each question is predictive or associational.
 
 ### Tools
 
@@ -39,7 +44,8 @@ TODO: Human author supplies domain heuristics.
 Problem statement and task objectives.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not invent missing domain facts or imply that association or prediction establishes causation.
+- No tools are available in this node; carry unresolved contract questions forward for escalation.
 
 ## data_profiling
 
@@ -47,7 +53,9 @@ TODO: Human author supplies domain pitfalls.
 Describe the input schema, distributions and data quality.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Check schema, missingness, class balance, cardinality and feature/target distributions.
+- Record units, plausible extremes, redundancy and target relationships as descriptive evidence.
+- Disclose that profiling occurs before the split and uses the whole input.
 
 ### Tools
 cast_dtypes
@@ -65,7 +73,9 @@ plot_target_relation
 Profile summaries and diagnostic plots.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Whole-input profiling can influence later choices; do not describe it as train-only analysis.
+- Correlations and outlier flags do not establish errors or causal relationships.
+- Treat target-driven inference after profiling as exploratory.
 
 ## data_splitting
 
@@ -73,7 +83,10 @@ TODO: Human author supplies domain pitfalls.
 Prepare one shared train, validation and locked test split.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Create one shared seeded split; stratify classification when supported.
+- Use random splitting only for independent rows; escalate temporal or grouped data because v1 has no such split.
+- Remove only contract-approved, target-independent exact duplicates or high-missing rows before splitting; account for missing targets.
+- Verify counts, overlap and duplicates; require at least 30 validation and test rows and 5 per class for classification.
 
 ### Tools
 drop_duplicate_rows
@@ -88,7 +101,9 @@ verify_split
 Split artifacts and verification report.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Never fall back to random splitting when rows are grouped or time-dependent.
+- Do not remove rows after splitting or inspect test data to alter the split.
+- Do not proceed when the minimum validation/test counts fail.
 
 ## experiment_design
 
@@ -96,7 +111,10 @@ TODO: Human author supplies domain pitfalls.
 Declare candidates for comparison on the shared split.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Declare up to max_candidates (normally 3–5), including a cheap, interpretable baseline.
+- Tie candidates to profiling evidence; diversify supported families and preprocessing, with at most two per family unless justified.
+- Specify transformations, estimator, parameters and bounds; deduplicate candidate specifications.
+- Use list_estimators as the authority on available models.
 
 ### Tools
 list_estimators
@@ -105,7 +123,8 @@ list_estimators
 Candidate specifications and rationale.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not claim a universally best model or propose unsupported ensembles, search methods, resampling or libraries.
+- Do not exceed the candidate limit or leave candidate settings ambiguous.
 
 ## inferential_analysis
 
@@ -113,7 +132,10 @@ TODO: Human author supplies domain pitfalls.
 Fit the declared inferential analysis on training data.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Use the shared train-only inference matrix with median/mode imputation and explicit reference levels; remove collinearity only, without predictive scaling or selection.
+- Match model to target: OLS for continuous, Logit for binary, MNLogit for multiclass and Poisson GLM for counts.
+- Review convergence, VIF, residual and influence diagnostics; report assumption limits and overdispersion.
+- Use coefficient_table's joint tests for predeclared goals; compare its Holm-adjusted p-value (raw p-value for a single test) with goal alpha, and report p-values, effects and intervals.
 
 ### Tools
 build_dummy_matrix
@@ -133,7 +155,9 @@ plot_residuals
 Inferential model, coefficients and diagnostics.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Profiling-driven hypotheses are exploratory; do not p-hack or equate significance with effect size.
+- Do not make causal claims or promise unsupported robust/negative-binomial corrections.
+- Check convergence and diagnostics before interpreting coefficients.
 
 ## preprocessing
 
@@ -141,7 +165,9 @@ TODO: Human author supplies domain pitfalls.
 Fit candidate preprocessing on training data and apply fitted transforms.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Make column decisions and fit imputation/clipping on candidate training data, then apply the frozen transforms to validation.
+- Use contract-compatible median/mode imputation; disclose all-missing and constant columns and missingness.
+- Clip plausible extremes only with a stated rationale; defer test transforms until champion selection.
 
 ### Tools
 drop_constant_columns
@@ -156,7 +182,8 @@ apply_outlier_clipper
 Fitted transforms and prepared candidate frames.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not delete rows automatically, impute the target, or refit transforms on validation or test.
+- Match missing-value handling to the chosen estimator; do not assume every estimator accepts missing values.
 
 ## feature_engineering
 
@@ -164,7 +191,10 @@ TODO: Human author supplies domain pitfalls.
 Fit candidate feature transforms on training data and apply them.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- One-hot encode nominal features; use ordinal encoding only when the contract defines a real order.
+- Scale regularized linear models when appropriate; consider target encoding only for justified high-cardinality non-ID features.
+- Use the encoder's out-of-fold training output and apply the fitted encoder to held-out rows.
+- Fit binning and selection on training data; require available-at-prediction-time inputs and domain rationale for derived features.
 
 ### Tools
 fit_onehot_encoder
@@ -187,7 +217,9 @@ select_by_mutual_info
 Fitted feature transforms and candidate feature frames.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not replace out-of-fold target-encoded training values with in-sample encoded values.
+- Preserve target, row indices and order; ensure ratio denominators are finite and nonzero.
+- Do not invent unavailable missing-indicator behavior or derive features unavailable at prediction time.
 
 ## model_training
 
@@ -195,7 +227,10 @@ TODO: Human author supplies domain pitfalls.
 Train or tune the declared candidate estimator.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Train on training data only; use bounded small grids when tuning adds value and report evaluated versus total points and budget warnings.
+- Respect contract CV folds, the reproducible seed and n_jobs=1.
+- Calibrate only through the supported train_estimator path, which uses training-internal CV.
+- Treat validation as the authority for candidate selection.
 
 ### Tools
 list_estimators
@@ -207,7 +242,9 @@ get_model_params
 Fitted candidate estimator and training summary.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- tune_estimator cross-validates on the prepared frame; it does not refit learned preprocessing or selection inside folds.
+- CV can be optimistic, especially after target encoding or selection; do not call it leakage-free pipeline CV or nested unbiased evaluation.
+- Do not calibrate on validation or claim unsupported search methods.
 
 ## model_evaluation
 
@@ -215,7 +252,10 @@ TODO: Human author supplies domain pitfalls.
 Evaluate candidates using training and validation evidence.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Compare candidates on identical validation rows with the contract metric and direction.
+- Inspect class balance, probability quality and relevant confusion, ROC or precision-recall diagnostics; align labels and probabilities.
+- For classification, use pr_auc (average precision, macro for multiclass) when minority share is below 0.1; otherwise use roc_auc unless an audited override applies.
+- Choose and freeze any threshold on validation for the stated objective; report RMSE and MAE in target units, and unitless R2.
 
 ### Tools
 predict
@@ -237,7 +277,9 @@ compare_models
 Validation metrics and diagnostic artifacts.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Search and threshold tuning make validation selection scores optimistic; do not use test diagnostics.
+- Do not describe average precision as trapezoidal PR area or invent percentage metrics.
+- Use training-only CV and learning curves as diagnostics, not as a replacement for validation selection.
 
 ## model_interpretation
 
@@ -245,7 +287,9 @@ TODO: Human author supplies domain pitfalls.
 Interpret candidate predictions and diagnostics.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Confirm candidate quality before interpreting; use validation permutation importance and error analysis.
+- Inspect supported slices with counts and describe uncertainty for small groups.
+- Explain coefficient dependence on encoding/scale and permutation importance limits under correlated predictors.
 
 ### Tools
 predict
@@ -261,7 +305,9 @@ analyze_errors
 Model interpretation and error analysis.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Correlated inputs can mask permutation importance; partial dependence can show implausible feature combinations.
+- Do not infer causality or certainty from tiny slices.
+- Any validation-driven change is additional search; never inspect test to revise a candidate.
 
 ## champion_selection
 
@@ -269,7 +315,10 @@ TODO: Human author supplies domain pitfalls.
 Select the champion using validation evidence, then score it on test once.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Select only from validation evidence, satisfying hard constraints; prefer a simpler comparable model, not a model solely for contended fit wall-clock time.
+- Report the winner, runner-up and selection history; use returned seeded 1000-resample percentile 95% bootstrap intervals and describe overlap as not distinguishable on this validation set.
+- Freeze champion, transforms and threshold, apply frozen operations to test, then call exactly one task score tool.
+- Report prior fingerprint exposure and qualify repeated test estimates; use returned evidence for reporting.
 
 ### Tools
 rank_models
@@ -304,7 +353,9 @@ assemble_report
 Champion identity, final test metrics and report.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Never fit or refit on train plus validation, select a threshold on test, or run a second test score.
+- Do not inspect test diagnostics or change the winner based on test results, even if a tool is listed here.
+- Overlapping bootstrap intervals are descriptive, not a formal equality test; repeated exposure weakens test estimates.
 
 ## artifact_persistence
 
@@ -312,7 +363,9 @@ TODO: Human author supplies domain pitfalls.
 Export and snapshot the completed run.
 
 ### Heuristics
-TODO: Human author supplies domain heuristics.
+- Export the actual successful pipeline and snapshot the run using existing tools.
+- Preserve artifact IDs and order, contract, seeds, versions, skill snapshot hash, lineage, exposure and limitations.
+- Cite actual tool outputs and artifacts in the record.
 
 ### Tools
 export_pipeline_script
@@ -322,5 +375,7 @@ snapshot_run
 Reproducible pipeline and durable run snapshot.
 
 ### Pitfalls
-TODO: Human author supplies domain pitfalls.
+- Do not claim evidence or replay that was not produced; never include secrets or evaluate arbitrary formulas.
+- Do not load untrusted pickle artifacts or imply cross-version or deployment-distribution guarantees.
+- Snapshots are immutable; edits affect future unsnapshotted runs only.
 

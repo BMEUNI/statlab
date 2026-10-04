@@ -66,11 +66,11 @@ Three things make it more than a chat wrapper:
 | **D9** | **Persistent SSE stream down, REST up.** One long-lived `EventSource` per run carries all telemetry; user messages, gate answers and lifecycle commands go up as ordinary validated `POST`s. Every event has a monotonic `seq`, mirrored to `events.jsonl`, so `?since=<seq>` replays a run's full history on reconnect or in a newly opened tab. **Agent prose streams token-by-token; structured decisions do not** — a gate proposal appears complete and validated, never assembling field by field. | Resolves **Q4 = a**. The traffic is deeply asymmetric: the server emits every tool call, metric and plot while the client sends a handful of commands. SSE is built for that shape and gives reconnection, heartbeats and replay from the platform instead of hand-written WebSocket plumbing. A run can last twenty minutes; reconnecting into the middle of one without losing the transcript is a hard requirement, and `seq` + `events.jsonl` is what delivers it. |
 | **D10** | **Every non-skipped node gates in guided mode** *(amended by D29: shared nodes gate; per-candidate nodes gate only on exceptions)*, but each gate carries an applicable default and an **"approve all remaining"** action that collapses the rest of the run into auto mode. Gates also accept **free-text instructions**, which the agent interprets into a revised proposal and re-gates. **Gates block indefinitely** — no auto-approve timeout — and survive a server restart, so a gate opened yesterday can be answered today. | Resolves **Q3 = c + iii**. "Approve all remaining" gives the escape hatch without inventing a third mode, and is precisely what a user wants after a rewind ("redo the split, then just run the rest"). Auto-approve-on-timeout is rejected because it is the one setting that can silently produce a report claiming human review that never happened. Free-text answers are what make this a conversation rather than a form. |
 | **D11** | **Rewind forks.** Rewinding to node N creates a new run with `forked_from_run_id` set, state copied up to N and artifacts **hard-linked** (same inode — immutable, so sharing is safe and disk cost is near zero). **A forked run keeps the parent's artifact refs** (refs are globally unique; the registry is keyed by ref), so the child gets hard-linked files and no new registry rows, and lineage facts such as `derived_from_test` are inherited rather than copied. Listing a run's artifacts follows `forked_from_run_id`; deleting a run must refuse while a fork references its artifacts (review 2026-10-01). The original run stays frozen and complete. **One run = exactly one reproducible path**, by construction. The UI follows the user to the fork so it feels continuous, and the run list renders lineage (`r_07 ← forked from r_03 at node 4`). | Resolves **Q9 = b**. Node 13 claims reproducibility; a run rewound three times in place cannot honestly make that claim, because its record would describe a history its `pipeline.py` never took. Forking also converts rewind from a destructive edit into the run-comparison feature (§12.5) for free. Accepted cost: the run list becomes a tree. |
-| **D12** | **One hand-written skill file, `skills/modelling.md`**, with a shared preamble and one `## <node_name>` section per staging node, each having a fixed set of required headings the loader validates at startup. **The `Tools` allow-list is enforced in `mcp_client` against the active node**, not merely stated in the prompt. Authored by the user (not agent-generated). **Build order: the coding agent scaffolds the file with all required headings and `TODO` placeholder heuristics; the real domain content is written by hand afterwards, once the nodes exist.** | Resolves **Q8 = a + i**. The value of a skill file is consistency *across* nodes, which is visible in one document and invisible across eleven. If the agent writes its own instructions the file stops being a control surface and becomes decoration — this is the part of the system that is the author's contribution rather than DeepSeek's. Code-level tool enforcement is ~10 lines and turns a prompt suggestion into a guarantee. |
+| **D12** | **One author-controlled skill file, `skills/modelling.md`**, with a shared preamble and one `## <node_name>` section per staging node, each having a fixed set of required headings the loader validates at startup. **The `Tools` allow-list is enforced in `mcp_client` against the active node**, not merely stated in the prompt. **Authorship amendment (2026-10-04, explicit user instruction): the user authorized the coding agent to research primary sources and fill the modelling Heuristics/Pitfalls using its judgement.** The scaffold-first build order remains historical; policy content can now be agent-drafted under user control. Keep the declared nodes, required headings and enforced tool permissions unchanged. Research, bounded scope and acceptance are recorded in [MODELLING_SKILL.md](./MODELLING_SKILL.md). | Resolves **Q8 = a + i**. The value of a skill file is consistency *across* nodes, which is visible in one document and invisible across eleven. The file remains the author's control surface: agent drafting now requires the explicit user authorization recorded above, and it cannot widen tool permissions or override architecture invariants. Code-level tool enforcement is ~10 lines and turns a prompt suggestion into a guarantee. |
 | **D13** | **The MCP server is a standalone HTTP service** — its own process, its own port, implementing the MCP **Streamable HTTP** transport (the current spec transport; plain HTTP+SSE is deprecated). Any MCP client can connect to it, not just this backend. The backend reaches it via `MCP_SERVER_URL`. **Bound to `127.0.0.1` by default and gated by a bearer token**, because this service reads and writes the filesystem and executes model fitting — it must not be openly reachable. Artifact paths are config-driven (`STATLAB_DATA_DIR`), shared with the backend, never relative to CWD. | Resolves **Q12 = b**. A genuinely independent, network-addressable MCP server is an explicit project goal, and it means the tool layer is reusable and demonstrable outside this app. Accepted cost: a third process to run and a health check. |
 | **D14** | **Single-user, loopback-only, no login.** The web app binds to `127.0.0.1` with no auth; the MCP server binds to `127.0.0.1` behind a bearer token from `.env`. No `user_id` / `owner_id` columns are added — a nullable column is a one-line migration if multi-user ever becomes real, and adding it now would be speculative. Remote demos go through an SSH tunnel, never by binding `0.0.0.0`. | Resolves **Q5 = a + i**. Multi-user is not a login screen, it is an authorization model threaded through every project and run query — a different project. Loopback-only makes the absence of auth a deliberate, defensible choice instead of an oversight, and the MCP token removes the one genuinely sharp edge: a service that writes files and burns CPU on request should not be callable by any local process that stumbles onto the port. |
 | **D15** | **Small-data only, and honest about it.** Everything is in-memory pandas; **nothing is ever sampled.** Guards instead of sampling: upload rejected above **200 MB** with a clear message, node 1 warns above **200k rows** that fitting will be slow, `max_fit_seconds` defaults to **300**, and distribution plots cap at **50 categories** per chart. | Resolves **Q6 = a**. Sampling is a correctness footgun: the moment some numbers come from a sample and others do not, every downstream statistic needs provenance tracking to stay honest, and the D7 inference track cannot report p-values from a silently sampled frame. Refusing a file we cannot handle properly is less code *and* more honest than half-handling it. Upgrade path stays narrow — v2 adds a chunked reader plus a `sampled: true` flag in every tool summary — precisely because v1 never pretends. |
-| **D16** | **Hybrid routing, cost displayed but never enforced.** `deepseek-flash` is the default; `deepseek-v4-pro` for the genuinely reasoning-shaped nodes (problem definition, **experiment design**, inferential analysis, interpretation & diagnostics, champion selection — the D28/D31 nodes postdate this decision and were added in review). All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain, so changing any node's model is a one-line edit or an env var — no code restructuring. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**. The nodes differ qualitatively: "propose an imputation strategy from this missingness table" is extraction-shaped work Flash does well, while "given five models' metrics, calibration and diagnostics, which ships and what are the caveats" is what Pro exists for — and it is the output a human reads most closely. A full run is cents either way, so a token cap protects nothing while adding a failure mode that aborts a nearly-finished run; the real runaway risk is *compute*, already bounded by `max_retune_loops` and `max_fit_seconds`. |
+| **D16** | **Role routing, cost displayed but never enforced.** User amendment 2026-10-04: use **DeepSeek-V4.1-Flash for every role**, including reasoning; its API name is `deepseek-flash` (LiteLLM: `deepseek/deepseek-flash`). This supersedes the previous Pro reasoning default. Role assignments and reasoning-mode requests remain distinct. All routing lives in **one dict in `llm/routing.py`** with a single `model_for(node)` accessor and a documented precedence chain; explicit skill/env overrides remain supported. Token and cost totals are logged to `llm_calls` and streamed live to the UI; **no hard budget cap**. | Resolves **Q7 = b + i**, amended by explicit user model choice. Flash supports thinking and non-thinking modes ([official model details](https://api-docs.deepseek.com/quick_start/pricing/), verified 2026-10-04). Role indirection preserves future configuration changes without restructuring nodes. Compute remains bounded by `max_retune_loops` and `max_fit_seconds`; cost accounting stays informational. |
 | **D17** | **Unbounded parallel runs.** Each run is its own asyncio task; any number may execute at once, across or within projects. Three guards make that safe: (1) a **global fit semaphore** in the MCP server sized to `os.cpu_count()` (default) — runs proceed in parallel through LLM, IO and profiling work and serialise *only* at CPU-bound fits, with `n_jobs=1` per estimator so nothing oversubscribes; (2) **SQLite in WAL mode** with `busy_timeout=5000`, so concurrent readers never block and writers queue instead of erroring; (3) every `node_executions` row records **`concurrency_at_start`**, so a slow timing can be attributed to contention rather than misread as a regression. **Rewind still halts its parent** (marks it `superseded`) — parallelism is for runs the user deliberately starts, not for branches they just abandoned. | Resolves **Q13 = c**. Parallel runs are genuinely useful (kick off an auto run, explore a guided one). The naive risk is not parallelism itself but N simultaneous `GridSearchCV` calls thrashing the cores and making every logged `duration_ms` meaningless; the semaphore removes that while preserving the concurrency the user asked for. WAL is one line and is the difference between "concurrent" and "intermittent `database is locked`". |
 | **D18** | **Provider-agnostic LLM layer: LiteLLM + Pydantic. No agent framework.** Supersedes D1's DSPy wiring and resolves **Q15**'s library question. Every LLM interaction is a Pydantic output model whose `model_json_schema()` is handed to the provider's structured-output facility; LiteLLM normalises the call, the schema support, the retries and the cost maths across providers. **DeepSeek is the default, not a dependency** — swapping to Claude or GPT is a model-string change plus an API key, with no code edit. DSPy is dropped: its payoff is prompt *optimisers*, which are out of scope, and it provides no memory (memory is §7's SQLite tables — a misconception worth naming). LangChain stays dropped. | Resolves **Q15 = no mandate**. Without optimisers, DSPy is a verbose way to do what Pydantic + a JSON schema already does, and it obscures the actual prompt — bad for a project that must be explained. LiteLLM is the one dependency that pays for itself here: multi-provider routing, `supports_response_schema()` capability detection, and `completion_cost()` per-provider pricing are all things we would otherwise hand-roll and maintain. |
 | **D19** | **Report is markdown + PNG files.** `report/report.md` referencing `report/plots/*.png`, rendered in the UI. No PDF toolchain, no embedded base64. HTML export from the same markdown is a later two-line addition if a single shareable file is ever wanted. | Resolves **Q10 = a**. Keeps the report a *source artifact* rather than a rendered output: `report.md`, `pipeline.py` and `manifest.json` are all text, all diffable, all inspectable with a text editor, and the plots are files the tools already produce. A PDF renderer (weasyprint/pandoc/LaTeX) is exactly the dependency that breaks on a new Python release and blocks a build for reasons unrelated to this project. |
@@ -1138,7 +1138,8 @@ takes a provider-prefixed model string, so switching provider is configuration:
 ```bash
 # .env — swap any of these, no code change
 STATLAB_MODEL_DEFAULT=deepseek/deepseek-flash
-STATLAB_MODEL_REASONING=deepseek/deepseek-v4-pro
+STATLAB_MODEL_REASONING=deepseek/deepseek-flash
+STATLAB_MODEL_CLASSIFY=deepseek/deepseek-flash
 # STATLAB_MODEL_DEFAULT=anthropic/claude-sonnet-4-5
 # STATLAB_MODEL_DEFAULT=openai/gpt-5.4
 DEEPSEEK_API_KEY=...        # LiteLLM reads the key each provider expects
@@ -1165,7 +1166,10 @@ not a table we maintain. A local override map exists only for providers it price
 Every call logs `model`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cost_usd` to
 `llm_calls`; the run total streams to the UI. **No hard cap** (D16).
 
-#### DeepSeek specifics (default provider, verified 2026-10-02)
+#### DeepSeek specifics (default provider, model mapping reverified 2026-10-04)
+
+All roles default to DeepSeek-V4.1-Flash by user instruction (D16). Its API model name is
+`deepseek-flash`; do not substitute the marketing version label as an API identifier.
 
 The legacy `deepseek-chat` / `deepseek-reasoner` names were **retired 24 July 2026** and are no
 longer routed.
@@ -1227,7 +1231,7 @@ class Role(StrEnum):
 
 MODELS: dict[Role, str] = {                    # overridden by STATLAB_MODEL_<ROLE>
     Role.DEFAULT:   "deepseek/deepseek-flash",
-    Role.REASONING: "deepseek/deepseek-v4-pro",
+    Role.REASONING: "deepseek/deepseek-flash",
     Role.CLASSIFY:  "deepseek/deepseek-flash",
 }
 
@@ -1301,7 +1305,7 @@ restart; the run resumes in `awaiting_user` and the UI re-renders the pending ga
 
 ## 9. The skill file
 
-`skills/modelling.md` — one hand-authored file, version-controlled, and hashed into the run
+`skills/modelling.md` — one author-controlled file (D12 authorship amendment), version-controlled, and hashed into the run
 manifest so every run records which skill version produced it (`skill.snapshot.md` is copied
 into the run folder).
 
@@ -1318,14 +1322,12 @@ One or two sentences: what this node is responsible for deciding.
 
 ### Heuristics
 - If the positive rate is below 10%, stratify and prefer PR-AUC over ROC-AUC.
-- If a datetime column is the natural ordering, split temporally — never randomly.
-- If rows are grouped (repeated customers), split by group or the test set leaks.
+- If prediction depends on temporal ordering, escalate: temporal splitting is deferred in v1.
+- If rows are grouped (repeated customers), escalate: grouped splitting is deferred in v1.
 
 ### Tools
 split_random
 split_stratified
-split_temporal
-split_grouped
 verify_split
 
 ### Outputs
@@ -1351,13 +1353,11 @@ train / valid / test artifacts registered, split report with per-class counts pe
 
 ### 9.3 Authoring plan
 
-The coding agent scaffolds `skills/modelling.md` with every required heading present and
-`TODO:` placeholders for `Heuristics` and `Pitfalls` — enough to pass the loader and run
-end-to-end, with the agent falling back on its own judgement where heuristics are absent.
-The domain content is then written by hand, node by node, once the nodes are implemented
-and their real decision points are visible. **This is deliberately the last content task,
-not the first**: heuristics written before the nodes exist would be guesses about an
-interface that doesn't exist yet.
+The coding agent initially scaffolded every required heading with `TODO:` Heuristics/Pitfalls.
+On 2026-10-04 the user explicitly authorized research-informed agent drafting using its judgement
+(D12 amendment). [MODELLING_SKILL.md](./MODELLING_SKILL.md) freezes the bounded policy task and
+primary-source evidence. Guidance must follow current contracts and served tools; it cannot
+claim unimplemented node behavior or widen capabilities. The user retains policy control.
 
 **Split responsibility, because the two halves have different risk.** The `Tools` sections are
 *not* placeholder material — they are validated against the live registry at startup (§9.2), so a
@@ -1366,7 +1366,9 @@ wrong tool name is a crash, not a stub. Therefore:
 - **M9 sub-step, gated:** scaffold all 13 sections with **correct, registry-validated `Tools`
   lists** and `TODO:` heuristics. Its check is that the loader starts clean against the real
   server. This is where a phantom tool name like `split_data` would be caught.
-- **Human, after M9:** replace the `TODO:` heuristics and pitfalls with real domain knowledge.
+- **User-authorized policy drafting (2026-10-04):** replace all Heuristics/Pitfalls placeholders
+  using researched guidance and repository constraints; validate against the real registry.
+  Revisit guidance only when concrete node implementation reveals a capability mismatch.
 
 Per-project skill overrides are a later addition, out of scope for v1.
 
@@ -1729,11 +1731,11 @@ recorded so the reasoning is not lost.
 | **Q4** | Transport and streaming granularity? | **RESOLVED = a.** Persistent SSE down + REST up, token streaming for prose only. See **D9** and §11.1. |
 | **Q3** | Guided-mode gate granularity and timeout? | **RESOLVED = c + iii.** Every non-skipped node gates, with defaults, `instruct` and `approve_all_remaining`; blocks indefinitely, survives restart. See **D10** and §8. |
 | **Q9** | Rewind: in place or fork? | **RESOLVED = b.** Fork with hard-linked artifacts. See **D11**, §5, §10, §12.5. |
-| **Q8** | Skill file layout, authorship, format? | **RESOLVED = a + i.** One hand-written `skills/modelling.md`, fixed section shape, loader validates at startup, tool allow-list enforced in code. Agent scaffolds headings with `TODO`s; heuristics written by hand **after** the nodes exist. See **D12** and §9. |
+| **Q8** | Skill file layout, authorship, format? | **RESOLVED = a + i.** One author-controlled `skills/modelling.md`, fixed section shape, loader validates at startup, tool allow-list enforced in code. User authorized researched agent drafting on 2026-10-04; scaffold-only authorship procedure is superseded. See **D12** and §9. |
 | **Q12** | MCP transport? | **RESOLVED = b.** Standalone MCP server over Streamable HTTP on its own port, bearer-token gated, loopback-bound, usable by any MCP client. See **D13**. |
 | **Q5** | Auth and network exposure? | **RESOLVED = a + i.** Loopback-only everywhere, no login, MCP server bearer-token gated, no user columns. See **D14** and §11.2. |
 | **Q6** | Dataset size ceiling and sampling? | **RESOLVED = a.** In-memory pandas, 200 MB upload cap, 200k-row warning, never sampled. See **D15**. |
-| **Q7** | Model routing and budget? | **RESOLVED = b + i.** Flash default, Pro for 3 reasoning nodes, all routing in one dict with a 4-level precedence chain; cost logged and displayed, never capped. See **D16** and §7.3. |
+| **Q7** | Model routing and budget? | **RESOLVED = b + i; user amendment 2026-10-04.** V4.1-Flash for all roles, role-specific reasoning requests retained, all routing in one dict with a 4-level precedence chain; cost logged and displayed, never capped. See **D16** and §7.3. |
 | **Q13** | Concurrent runs? | **RESOLVED = c.** Unbounded parallel runs, protected by a global fit semaphore, SQLite WAL, and recorded `concurrency_at_start`. See **D17** and §3.3. |
 | **Q15** | Mandated libraries, deadline, written component? | **RESOLVED.** Nothing mandated, no deadline. Consequence: DSPy dropped and the LLM layer made provider-agnostic — see **D18** and §7.1–7.3. Milestones stay as planned since there is no date to cut scope against. |
 | **Q10** | Report format? | **RESOLVED = a.** Markdown + PNGs, no PDF toolchain; HTML export deferred. See **D19**. |

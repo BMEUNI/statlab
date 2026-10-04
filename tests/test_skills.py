@@ -62,11 +62,12 @@ def _text(name: str = "alpha", tools: str = "", model: str | None = None) -> str
     return text
 
 
-def test_scaffold(registry: dict[str, ToolSpec]) -> None:
+def test_modelling_policy(registry: dict[str, ToolSpec]) -> None:
     policy = load_skill(Path("skills/modelling.md"), spine=_spine(_NAMES), tools=registry)
     assert tuple(skill.node for skill in policy.nodes) == _NAMES
     for skill in policy.nodes:
-        assert "TODO:" in skill.heuristics and "TODO:" in skill.pitfalls
+        assert skill.heuristics and skill.pitfalls
+        assert "TODO:" not in skill.heuristics and "TODO:" not in skill.pitfalls
         assert skill.purpose and skill.outputs
         assert skill.allowed <= registry.keys()
     assert "split_temporal" not in policy.original_bytes.decode()

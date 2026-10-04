@@ -23,7 +23,7 @@ class Role(StrEnum):
 
 MODELS: Mapping[Role, str] = {
     Role.DEFAULT: "deepseek/deepseek-flash",
-    Role.REASONING: "deepseek/deepseek-v4-pro",
+    Role.REASONING: "deepseek/deepseek-flash",
     Role.CLASSIFY: "deepseek/deepseek-flash",
 }
 
