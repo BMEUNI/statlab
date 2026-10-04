@@ -18,6 +18,7 @@ from statlab.persistence.repository import (
     create_dataset,
     create_project,
     create_run,
+    ensure_candidate,
     find_dataset_by_hash,
     get_contract,
     get_dataset,
@@ -28,9 +29,10 @@ from statlab.persistence.repository import (
     list_projects,
     list_runs,
     set_test_fingerprint,
+    update_candidate_status,
     update_run_status,
 )
-from statlab_contracts.candidate import CandidateSpec
+from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.contract import DataContract
 
 
@@ -858,6 +860,33 @@ def _make_run(
     )
 
 
+def test_candidate_wave_identity_and_status(
+    migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
+) -> None:
+    run = _make_run(migrated_db, project, contract)
+    spec = CandidateSpec(
+        label="Baseline",
+        rationale="Reference candidate.",
+        estimator=EstimatorSpec(name="fixture"),
+        is_baseline=True,
+    )
+    created = ensure_candidate(
+        migrated_db, candidate_id="fixture_candidate", run_id=run.id, spec=spec, wave=2
+    )
+    assert created.wave == 2 and created.status == "pending"
+    assert (
+        ensure_candidate(migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=2)
+        == created
+    )
+    with pytest.raises(PersistenceError, match="identity"):
+        ensure_candidate(migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=1)
+    update_candidate_status(migrated_db, created.id, "completed")
+    updated = ensure_candidate(
+        migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=2
+    )
+    assert updated.wave == 2 and updated.status == "completed"
+
+
 def test_new_run_has_no_test_fingerprint(
     migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
 ) -> None:
@@ -992,3 +1021,16 @@ def test_count_prior_test_scorings_excludes_the_asking_run_itself(
         migrated_db, project_id=project.id, fingerprint="fp_shared", exclude_run_id=current.id
     )
     assert count == 0
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_candidate_status_sql_failure(closed: bool) -> None:
+    conn = sqlite3.connect(":memory:")
+    if closed:
+        conn.close()
+    try:
+        with pytest.raises(PersistenceError, match="candidate status") as caught:
+            update_candidate_status(conn, "missing", "completed")
+        assert isinstance(caught.value.cause, sqlite3.Error)
+    finally:
+        conn.close()

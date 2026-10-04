@@ -18,6 +18,7 @@ from statlab.graph import (
     RestartReconciler,
     RunState,
     RunTracker,
+    TraversalPlan,
 )
 from statlab.persistence.models import ProjectRow, RunRow, RunStatus
 from statlab.persistence.repository import (
@@ -37,6 +38,8 @@ from statlab_contracts.artifacts import ArtifactRef
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import Failure
 
+from tests.test_candidate_fanout import initial as fanout_initial
+from tests.test_candidate_fanout import loop as fanout_loop
 from tests.test_graph_engine import (
     World,
     artifact,
@@ -208,6 +211,65 @@ async def test_awaiting_republishes_actual_pending_gates_only(engine_world: Worl
     ]
     assert len(engine_world.conn.execute("SELECT * FROM gates").fetchall()) == 4
     assert list_node_executions(engine_world.conn, state.run_id)[1].status == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("placement", ["prefix", "overlap", "tail", "overlap_branch", "branch"])
+async def test_fanout_shared_awaiting_republishes_unanswered_gates(
+    engine_world: World, placement: str
+) -> None:
+    nodes = (node("prefix"), node("companion"), node("fit", candidate=True), node("tail"))
+    shared_node = {
+        "prefix": "prefix",
+        "overlap": "companion",
+        "tail": "tail",
+        "overlap_branch": "companion",
+        "branch": None,
+    }[placement]
+    tracker = RunTracker()
+    traversal = TraversalPlan(overlap_shared="companion")
+    active: set[str] = set()
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        awaiting = inv.spec.name == shared_node or (
+            placement in ("overlap_branch", "branch")
+            and inv.candidate is not None
+            and inv.candidate.public_id == "c_01"
+        )
+        if awaiting:
+            public_id = inv.candidate.public_id if inv.candidate else "shared"
+            gate_id = f"pending_{public_id}"
+            active.add(gate_id)
+            gate(engine_world, inv.execution.id, gate_id)
+            gate(engine_world, inv.execution.id, f"answered_{public_id}", answer="{}")
+            gate(engine_world, inv.execution.id, f"closed_{public_id}", status="answered")
+            return NodeResult(status="awaiting_user")
+        return NodeResult(status="completed")
+
+    runner = fanout_loop(engine_world, nodes, execute, traversal=traversal, tracker=tracker)
+    start = fanout_initial(engine_world, nodes)
+    state = await runner.run(start)
+    assert state.status == "awaiting_user" and state.traversal == traversal
+    if shared_node is None:
+        assert state.pending_result is None
+    else:
+        assert state.pending_result is not None and state.pending_result.node_name == shared_node
+    assert runner.checkpointer.load(spine_id="synthetic", spine=start.spine) == state
+
+    async def no_dispatch(inv: NodeInvocation) -> NodeResult:
+        raise AssertionError("awaiting fan-out must remain dormant")
+
+    recovering = fanout_loop(engine_world, nodes, no_dispatch, traversal=traversal, tracker=tracker)
+    reconciler = RestartReconciler(
+        conn=engine_world.conn,
+        resolver=lambda row: RecoveryBinding(recovering, start),
+        tracker=tracker,
+    )
+    batch = await recover(reconciler, engine_world)
+    assert not batch.tasks and batch.dormant == (state,)
+    opened = [event for event in await recovering.events.replay() if event.type == "gate.opened"]
+    assert {event.payload["gate_id"] for event in opened} == active
+    assert len(opened) == len(active)
 
 
 def get_run_row(world: World) -> RunRow:
@@ -485,7 +547,7 @@ async def test_corruption_and_ownership_fail_closed(engine_world: World, defect:
         engine_world.conn.execute(
             "UPDATE candidates SET spec_json = '{}' WHERE run_id = ?", (state.run_id,)
         )
-        Checkpointer(engine_world.paths).save(state.model_copy(update={"candidate": candidate}))
+        Checkpointer(engine_world.paths).save(state.model_copy(update={"branches": (candidate,)}))
     with pytest.raises((PersistenceError, EngineError)):
         await recover(service(engine_world, nodes), engine_world)
     assert len(list_node_executions(engine_world.conn, state.run_id)) <= 1

@@ -275,3 +275,24 @@ class LlmCallRow(BaseModel):
     cost_usd: float
     duration_ms: int
     ts: str
+
+
+class MemoryRow(BaseModel):
+    """An immutable project fact with optional run provenance."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str
+    project_id: str
+    key: str
+    value_json: str
+    source_run_id: str | None
+    ts: str
+
+    def value(self) -> JsonValue:
+        try:
+            parsed = json.loads(self.value_json, parse_constant=_reject_json_constant)
+            value: JsonValue = TypeAdapter(JsonValue).validate_python(parsed, strict=True)
+            json.dumps(value, allow_nan=False)
+            return value
+        except ValueError, TypeError:
+            raise PersistenceError("invalid project memory JSON") from None

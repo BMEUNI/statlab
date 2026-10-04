@@ -29,7 +29,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from pydantic import ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from statlab_contracts.candidate import CandidateSpec
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import Failure
@@ -44,6 +44,7 @@ from statlab.persistence.models import (
     DatasetRow,
     GateRow,
     LlmCallRow,
+    MemoryRow,
     NodeExecutionRow,
     ProjectRow,
     RunMode,
@@ -502,7 +503,7 @@ def finish_node_execution(
 
 
 def ensure_candidate(
-    conn: sqlite3.Connection, *, candidate_id: str, run_id: str, spec: CandidateSpec
+    conn: sqlite3.Connection, *, candidate_id: str, run_id: str, spec: CandidateSpec, wave: int = 1
 ) -> CandidateRow:
     try:
         with transaction(conn):
@@ -511,7 +512,7 @@ def ensure_candidate(
                 conn.execute(
                     "INSERT INTO candidates (id, run_id, label, rationale, spec_json, "
                     "varies_from_baseline_json, wave, status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, 'pending', ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                     (
                         candidate_id,
                         run_id,
@@ -519,17 +520,30 @@ def ensure_candidate(
                         spec.rationale,
                         spec.model_dump_json(),
                         json.dumps(spec.varies_from_baseline),
+                        wave,
                         utc_now(),
                     ),
                 )
                 row = conn.execute(
                     "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
                 ).fetchone()
-            elif row["run_id"] != run_id or row["spec_json"] != spec.model_dump_json():
+            elif (
+                row["run_id"] != run_id
+                or row["spec_json"] != spec.model_dump_json()
+                or row["wave"] != wave
+            ):
                 raise PersistenceError("candidate identity mismatch")
     except sqlite3.Error as exc:
         raise PersistenceError("cannot persist candidate", cause=exc) from exc
     return CandidateRow.model_validate(dict(row))
+
+
+def update_candidate_status(conn: sqlite3.Connection, candidate_id: str, status: str) -> None:
+    try:
+        with transaction(conn):
+            conn.execute("UPDATE candidates SET status = ? WHERE id = ?", (status, candidate_id))
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot update candidate status", cause=exc) from exc
 
 
 def claim_test_scoring(conn: sqlite3.Connection, run_id: str, *, at: str | None = None) -> bool:
@@ -604,3 +618,53 @@ def count_prior_test_scorings(
         (project_id, fingerprint, exclude_run_id),
     ).fetchone()
     return int(count)
+
+
+# --- project memory ---------------------------------------------------------------------------
+
+
+def create_memory(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    key: str,
+    value: JsonValue,
+    source_run_id: str | None = None,
+) -> MemoryRow:
+    if not key.strip():
+        raise PersistenceError("project memory key must not be blank")
+    try:
+        validated: JsonValue = TypeAdapter(JsonValue).validate_python(value, strict=True)
+        serialized = json.dumps(
+            validated, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+    except ValueError, TypeError:
+        raise PersistenceError("invalid project memory JSON") from None
+    memory_id = new_id("mem")
+    try:
+        with transaction(conn):
+            if source_run_id is not None:
+                source = conn.execute(
+                    "SELECT project_id FROM runs WHERE id = ?", (source_run_id,)
+                ).fetchone()
+                if source is None or source["project_id"] != project_id:
+                    raise PersistenceError("memory provenance must belong to destination project")
+            conn.execute(
+                "INSERT INTO memory (id, project_id, key, value_json, source_run_id, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (memory_id, project_id, key, serialized, source_run_id, utc_now()),
+            )
+            row = conn.execute("SELECT * FROM memory WHERE id = ?", (memory_id,)).fetchone()
+    except sqlite3.Error:
+        raise PersistenceError("could not write project memory") from None
+    return MemoryRow.model_validate(dict(row))
+
+
+def list_memory(conn: sqlite3.Connection, project_id: str) -> tuple[MemoryRow, ...]:
+    try:
+        rows = conn.execute(
+            "SELECT * FROM memory WHERE project_id = ? ORDER BY ts, rowid", (project_id,)
+        ).fetchall()
+        return tuple(MemoryRow.model_validate(dict(row)) for row in rows)
+    except sqlite3.Error, ValidationError:
+        raise PersistenceError("could not read project memory") from None

@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from pydantic import JsonValue
+from statlab_contracts.candidate import CandidateSet
+from statlab_contracts.contract import Constraints
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, Failure
 
 from statlab.config import Settings
 from statlab.domains.base import NodeResult, NodeSpec
 from statlab.errors import EngineError, LlmCallError, PersistenceError, ToolCallError
 from statlab.events import EventBus
+from statlab.graph.candidates import (
+    BoundaryStopError,
+    CandidatePlanner,
+    FitBudget,
+    RetuneDecider,
+    RunControl,
+    TraversalPlan,
+)
 from statlab.graph.checkpoint import Checkpointer
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState, SpineEntry
 from statlab.persistence.ids import utc_now
@@ -23,6 +35,7 @@ from statlab.persistence.repository import (
     get_run,
     has_run_history,
     next_node_attempt,
+    update_candidate_status,
     update_run_status,
 )
 from statlab.storage import get_artifact, prune_intermediates
@@ -70,11 +83,28 @@ class RunLoop:
         events: EventBus,
         settings: Settings,
         tracker: RunTracker,
+        constraints: Constraints | None = None,
+        traversal: TraversalPlan | None = None,
+        candidate_planner: CandidatePlanner | None = None,
+        retune_decider: RetuneDecider | None = None,
+        control: RunControl | None = None,
     ) -> None:
         self.conn, self.nodes, self.spine_id = conn, nodes, spine_id
         self.executor, self.checkpointer, self.events = executor, checkpointer, events
         self.settings, self.tracker = settings, tracker
         self.last_error: EngineError | None = None
+        self.constraints = constraints or Constraints()
+        self.traversal = traversal
+        self.candidate_planner, self.retune_decider = candidate_planner, retune_decider
+        self.control = control or RunControl()
+        self.budget = FitBudget(conn, checkpointer.paths.run_id, self.constraints)
+        self._coordinator = asyncio.Lock()
+        self._state: RunState
+        self._lifecycle_stop = False
+        self._fanout_enabled = any(
+            value is not None
+            for value in (traversal, candidate_planner, retune_decider, control, constraints)
+        )
 
     async def run(self, initial: RunState) -> RunState:
         run_id = self.checkpointer.paths.run_id
@@ -133,6 +163,8 @@ class RunLoop:
             raise EngineError("SQL run status refuses execution")
         if state.status not in ("pending", "running"):
             return state
+        if state.traversal is not None or self._fanout_enabled or len(state.branches) > 1:
+            return await self._fanout(state)
         if state.candidate is not None:
             ensure_candidate(
                 self.conn,
@@ -189,8 +221,13 @@ class RunLoop:
                 if candidate is None:
                     updates["shared_results"] = (*state.shared_results, boundary)
                 else:
-                    updates["candidate"] = candidate.model_copy(
-                        update={"results": (*candidate.results, boundary)}
+                    updates["branches"] = (
+                        candidate.model_copy(
+                            update={
+                                "results": (*candidate.results, boundary),
+                                "position": state.cursor + 1,
+                            }
+                        ),
                     )
                 state = state.model_copy(update=updates)
             self.checkpointer.save(state)
@@ -212,6 +249,372 @@ class RunLoop:
         self.checkpointer.save(state)
         await self._status(state, None)
         return state
+
+    @property
+    def _latest(self) -> RunState:
+        return self._state
+
+    def _save_latest(self) -> None:
+        self._state = self._latest.model_copy(update={"budget": self.budget.snapshot()})
+        self.checkpointer.save(self._latest)
+
+    def _branch(self, public_id: str) -> CandidateProgress:
+        return next(branch for branch in self._latest.branches if branch.public_id == public_id)
+
+    def _replace_branch(self, branch: CandidateProgress) -> None:
+        self._state = self._latest.model_copy(
+            update={
+                "branches": tuple(
+                    branch if item.public_id == branch.public_id else item
+                    for item in self._latest.branches
+                )
+            }
+        )
+        update_candidate_status(self.conn, branch.database_id(self._latest.run_id), branch.status)
+
+    async def _boundary(
+        self,
+        index: int,
+        public_id: str | None = None,
+        *,
+        overlap: bool = False,
+        design: bool = False,
+    ) -> bool:
+        async with self._coordinator:
+            try:
+                self.control.check()
+            except BoundaryStopError:
+                self._lifecycle_stop = True
+                return False
+            snapshot = self._latest
+            candidate = self._branch(public_id) if public_id is not None else None
+            if overlap:
+                snapshot = snapshot.model_copy(
+                    update={
+                        "branches": tuple(
+                            item.model_copy(
+                                update={
+                                    "results": (),
+                                    "pending_result": None,
+                                    "position": 0,
+                                    "retune_count": 0,
+                                    "status": "pending",
+                                }
+                            )
+                            for item in snapshot.branches
+                        )
+                    }
+                )
+            spec = self.nodes[index]
+            candidate_id = candidate.database_id(snapshot.run_id) if candidate else None
+            execution = create_node_execution(
+                self.conn,
+                run_id=snapshot.run_id,
+                node_name=spec.name,
+                seq=index + 1,
+                candidate_id=candidate_id,
+                attempt=next_node_attempt(
+                    self.conn,
+                    run_id=snapshot.run_id,
+                    node_name=spec.name,
+                    candidate_id=candidate_id,
+                ),
+                concurrency_at_start=self.tracker.concurrency,
+            )
+            update_run_status(self.conn, snapshot.run_id, status="running", current_node=spec.name)
+            payload: dict[str, JsonValue] = {"node": spec.name, "execution_id": execution.id}
+            if candidate is not None:
+                payload["candidate_id"] = candidate.public_id
+            await self.events.append("node.started", payload)
+        stop: BoundaryStopError | None = None
+        try:
+            result = await self.executor(NodeInvocation(snapshot, spec, execution, candidate))
+            self.control.check()
+        except BoundaryStopError as exc:
+            stop = exc
+        except (ToolCallError, LlmCallError) as exc:
+            result = NodeResult(status="failed", error=exc.failure)
+        except Exception as exc:
+            self.last_error = EngineError("node executor failed", cause=exc)
+            result = NodeResult(
+                status="failed", error=Failure(error_class="bug", message="Node execution failed")
+            )
+        async with self._coordinator:
+            if stop is not None:
+                if stop.reason == "budget_exhausted":
+                    result = NodeResult(
+                        status="failed",
+                        error=Failure(error_class="data", message="Fit budget exhausted"),
+                    )
+                    boundary = BoundaryResult(
+                        node_name=spec.name, execution_id=execution.id, result=result
+                    )
+                    finish_node_execution(self.conn, execution.id, result)
+                    if candidate is not None:
+                        self._replace_branch(
+                            self._branch(candidate.public_id).model_copy(
+                                update={"status": "budget_exhausted", "pending_result": boundary}
+                            )
+                        )
+                    else:
+                        self._state = self._latest.model_copy(
+                            update={
+                                "status": "failed",
+                                "pending_result": boundary,
+                            }
+                        )
+                    await self.events.append(
+                        "node.failed", {**payload, "result": result.model_dump(mode="json")}
+                    )
+                else:
+                    self._lifecycle_stop = True
+                self._save_latest()
+                return False
+            if result.status == "skipped" and not spec.skippable:
+                raise EngineError("non-skippable node returned skipped")
+            boundary = BoundaryResult(node_name=spec.name, execution_id=execution.id, result=result)
+            finish_node_execution(self.conn, execution.id, result)
+            if candidate is not None:
+                latest = self._branch(candidate.public_id)
+                if result.status in ("failed", "awaiting_user"):
+                    latest = latest.model_copy(
+                        update={"status": result.status, "pending_result": boundary}
+                    )
+                else:
+                    latest = latest.model_copy(
+                        update={
+                            "status": "running",
+                            "results": (*latest.results, boundary),
+                            "position": index + 1,
+                            "pending_result": None,
+                        }
+                    )
+                self._replace_branch(latest)
+            elif result.status in ("failed", "awaiting_user"):
+                self._state = self._latest.model_copy(
+                    update={"status": result.status, "pending_result": boundary}
+                )
+            else:
+                updates: dict[str, object] = {
+                    "shared_results": (*self._latest.shared_results, boundary),
+                    "pending_result": None,
+                }
+                if not overlap and not design:
+                    updates["cursor"] = index + 1
+                self._state = self._latest.model_copy(update=updates)
+            self._save_latest()
+            if result.status != "awaiting_user":
+                await self.events.append(
+                    f"node.{result.status}", {**payload, "result": result.model_dump(mode="json")}
+                )
+            if result.status == "completed":
+                self._prune(execution.id, self._latest)
+            return result.status in ("completed", "skipped")
+
+    async def _advance_branch(
+        self, public_id: str, start: int, end: int, traversal: TraversalPlan
+    ) -> None:
+        while True:
+            branch = self._branch(public_id)
+            if branch.status in ("failed", "awaiting_user", "budget_exhausted", "completed"):
+                return
+            index = max(start, branch.position)
+            if index == end:
+                async with self._coordinator:
+                    self._replace_branch(
+                        branch.model_copy(update={"position": end, "status": "completed"})
+                    )
+                    self._save_latest()
+                return
+            if not await self._boundary(index, public_id):
+                return
+            branch = self._branch(public_id)
+            if (
+                self.retune_decider is not None
+                and self.nodes[index].name == traversal.evaluation_node
+                and branch.retune_count < self.constraints.max_retune_loops
+                and not self.budget.snapshot().exhausted
+            ):
+                retune = await self.retune_decider(self._latest, branch)
+                if retune:
+                    async with self._coordinator:
+                        if self.control.status is not None:
+                            self._lifecycle_stop = True
+                            return
+                        if not self.budget.snapshot().exhausted:
+                            training_index = next(
+                                i
+                                for i, spec in enumerate(self.nodes)
+                                if spec.name == traversal.training_node
+                            )
+                            self._replace_branch(
+                                branch.model_copy(
+                                    update={
+                                        "position": training_index,
+                                        "retune_count": branch.retune_count + 1,
+                                    }
+                                )
+                            )
+                            self._save_latest()
+
+    async def _join(self, tasks: tuple[asyncio.Task[bool] | asyncio.Task[None], ...]) -> None:
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    async def _fanout(self, state: RunState) -> RunState:
+        traversal = self.traversal or state.traversal or TraversalPlan()
+        if (
+            state.status != "pending"
+            and state.traversal is not None
+            and state.traversal != traversal
+        ):
+            raise EngineError("checkpoint traversal mismatch")
+        start, end = traversal.region(state.spine)
+        if self.candidate_planner is not None and traversal.design_node is None:
+            raise EngineError("candidate planner requires design node")
+        if self.retune_decider is not None and traversal.training_node is None:
+            raise EngineError("retune decider requires training/evaluation")
+        if len(state.branches) > self.constraints.max_candidates:
+            raise EngineError("max_candidates exceeded")
+        if len(state.branches) > 1:
+            CandidateSet(candidates=tuple(branch.spec for branch in state.branches))
+        if start < end and not state.branches:
+            raise EngineError("per-candidate node requires a candidate")
+        for branch in state.branches:
+            ensure_candidate(
+                self.conn,
+                candidate_id=branch.database_id(state.run_id),
+                run_id=state.run_id,
+                spec=branch.spec,
+                wave=branch.wave,
+            )
+        self._state = state.model_copy(update={"status": "running", "traversal": traversal})
+        self._save_latest()
+        await self._status(
+            self._latest, self.nodes[state.cursor].name if state.cursor < len(self.nodes) else None
+        )
+        prefix_end = start - 1 if traversal.overlap_shared else start
+        while self._latest.cursor < prefix_end:
+            if not await self._boundary(self._latest.cursor):
+                return await self._finish_fanout()
+        if self._latest.cursor < end and start < end:
+            while True:
+                # A saved new wave precedes its design attempt, so restart never replans it.
+                if traversal.design_node is not None:
+                    designs = sum(
+                        boundary.node_name == traversal.design_node
+                        for boundary in self._latest.shared_results
+                    )
+                    if designs < self._latest.wave:
+                        design_index = next(
+                            i
+                            for i, spec in enumerate(self.nodes)
+                            if spec.name == traversal.design_node
+                        )
+                        if not await self._boundary(design_index, design=True):
+                            return await self._finish_fanout()
+                work: list[asyncio.Task[bool] | asyncio.Task[None]] = []
+                if traversal.overlap_shared is not None and not any(
+                    boundary.node_name == traversal.overlap_shared
+                    for boundary in self._latest.shared_results
+                ):
+                    work.append(asyncio.create_task(self._boundary(start - 1, overlap=True)))
+                work.extend(
+                    asyncio.create_task(
+                        self._advance_branch(branch.public_id, start, end, traversal)
+                    )
+                    for branch in self._latest.branches
+                    if branch.wave == self._latest.wave
+                )
+                await self._join(tuple(work))
+                if self._lifecycle_stop or self._latest.status != "running":
+                    return await self._finish_fanout()
+                if any(branch.status == "awaiting_user" for branch in self._latest.branches):
+                    self._state = self._latest.model_copy(update={"status": "awaiting_user"})
+                    return await self._finish_fanout()
+                viable = any(
+                    branch.status == "completed"
+                    or (
+                        branch.status == "budget_exhausted"
+                        and any(
+                            boundary.node_name == traversal.evaluation_node
+                            for boundary in branch.results
+                        )
+                    )
+                    for branch in self._latest.branches
+                )
+                if not viable:
+                    self._state = self._latest.model_copy(update={"status": "failed"})
+                    return await self._finish_fanout()
+                if (
+                    self.candidate_planner is None
+                    or self._latest.wave >= self.constraints.max_search_waves
+                    or len(self._latest.branches) >= self.constraints.max_candidates
+                    or self.budget.snapshot().exhausted
+                ):
+                    break
+                proposal = await self.candidate_planner(self._latest, self._latest.wave + 1)
+                if not proposal:
+                    break
+                if len(self._latest.branches) + len(proposal) > self.constraints.max_candidates:
+                    raise EngineError("max_candidates exceeded")
+                hashes = {branch.spec.spec_hash for branch in self._latest.branches}
+                if any(spec.spec_hash in hashes for spec in proposal):
+                    raise EngineError("duplicate candidate specification across waves")
+                if self.control.status is not None:
+                    self._lifecycle_stop = True
+                    return await self._finish_fanout()
+                if self.budget.snapshot().exhausted:
+                    break
+                CandidateSet(
+                    candidates=tuple(branch.spec for branch in self._latest.branches) + proposal
+                )
+                wave = self._latest.wave + 1
+                new = tuple(
+                    CandidateProgress(
+                        public_id=f"c_{len(self._latest.branches) + i:02d}",
+                        spec=spec,
+                        wave=wave,
+                        position=start,
+                    )
+                    for i, spec in enumerate(proposal, 1)
+                )
+                for branch in new:
+                    ensure_candidate(
+                        self.conn,
+                        candidate_id=branch.database_id(self._latest.run_id),
+                        run_id=self._latest.run_id,
+                        spec=branch.spec,
+                        wave=wave,
+                    )
+                self._state = self._latest.model_copy(
+                    update={"wave": wave, "branches": (*self._latest.branches, *new)}
+                )
+                self._save_latest()
+            self._state = self._latest.model_copy(update={"cursor": end})
+            self._save_latest()
+        while self._latest.cursor < len(self.nodes):
+            if not await self._boundary(self._latest.cursor):
+                return await self._finish_fanout()
+        self._state = self._latest.model_copy(update={"status": "completed"})
+        return await self._finish_fanout()
+
+    async def _finish_fanout(self) -> RunState:
+        if self._lifecycle_stop or self.control.status is not None:
+            self._state = self._latest.model_copy(
+                update={"status": self.control.status or "paused"}
+            )
+        self._save_latest()
+        current = (
+            self.nodes[self._latest.cursor].name if self._latest.cursor < len(self.nodes) else None
+        )
+        await self._status(self._latest, current)
+        return self._latest
 
     def _prune(self, execution_id: str, state: RunState) -> None:
         try:

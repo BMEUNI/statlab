@@ -13,7 +13,7 @@ install: ## Sync the pinned dependency set
 check-env: ## Fail fast if configuration is missing or unsafe
 	@$(PY) -c "from statlab.config import load_settings; load_settings(); print('backend config OK')"
 	@$(PY) -c "from statlab_tools.settings import load_tool_settings; load_tool_settings(); print('mcp config OK')"
-	# chunk 26: append the LLM provider-key check here (must live inside llm/, D18)
+	@$(PY) -m statlab.llm.routing
 
 test: ## Run the full suite with coverage gating
 	$(PY) -c 'import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:], timeout=900).returncode)' $(PY) -m pytest -q --cov --cov-report=term
