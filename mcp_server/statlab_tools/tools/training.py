@@ -318,6 +318,7 @@ def list_estimators(
             continue
         out[name] = {
             "task": entry.task,
+            "family": entry.family,
             "default_grid": {
                 k: [_param_json(v) for v in values] for k, values in entry.default_grid.items()
             },

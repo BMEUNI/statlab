@@ -429,6 +429,13 @@ the change, because a contract field the user set is authoritative (D5) and sile
 their file format is how you get a run that succeeds on the wrong data. The same rule holds
 generally: **where the contract specifies a value, tool params are derived from it, not chosen.**
 
+**B9 metric sequencing clarification (2026-10-04, D33d/D35):** node 2 freezes inference goals
+before EDA and records the automatic primary-metric rule when no metric is supplied. Class
+balance is first returned by `summarize_target` in node 3; that node resolves `pr_auc` for
+minority share <0.1, otherwise `roc_auc`. A supplied metric remains authoritative and any
+agent override of the automatic rule is explained in the problem spec. Regression defaults
+to `rmse`. This finalization changes no predeclared inference goals and grants node 2 no tools.
+
 ---
 
 ### 4.2 Candidates: the run is a comparison, not a path (D26)

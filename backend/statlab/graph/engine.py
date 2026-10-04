@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from statlab_contracts.candidate import CandidateSet
 from statlab_contracts.contract import Constraints
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, Failure
@@ -483,7 +483,7 @@ class RunLoop:
             raise EngineError("max_candidates exceeded")
         if len(state.branches) > 1:
             CandidateSet(candidates=tuple(branch.spec for branch in state.branches))
-        if start < end and not state.branches:
+        if start < end and not state.branches and self.candidate_planner is None:
             raise EngineError("per-candidate node requires a candidate")
         for branch in state.branches:
             ensure_candidate(
@@ -502,6 +502,12 @@ class RunLoop:
         while self._latest.cursor < prefix_end:
             if not await self._boundary(self._latest.cursor):
                 return await self._finish_fanout()
+        if (
+            start < end
+            and not self._latest.branches
+            and not await self._bootstrap_candidates(start, traversal)
+        ):
+            return await self._finish_fanout()
         if self._latest.cursor < end and start < end:
             while True:
                 # A saved new wave precedes its design attempt, so restart never replans it.
@@ -603,6 +609,50 @@ class RunLoop:
                 return await self._finish_fanout()
         self._state = self._latest.model_copy(update={"status": "completed"})
         return await self._finish_fanout()
+
+    async def _bootstrap_candidates(self, start: int, traversal: TraversalPlan) -> bool:
+        planner = self.candidate_planner
+        if planner is None or not any(
+            boundary.node_name == traversal.design_node and boundary.result.status == "completed"
+            for boundary in self._latest.shared_results
+        ):
+            raise EngineError("initial candidates require an approved design boundary")
+        try:
+            self.control.check()
+        except BoundaryStopError:
+            self._lifecycle_stop = True
+            return False
+        if self.budget.snapshot().exhausted:
+            raise EngineError("initial candidate bootstrap has no remaining fit budget")
+        proposal = await planner(self._latest, 1)
+        try:
+            self.control.check()
+        except BoundaryStopError:
+            self._lifecycle_stop = True
+            return False
+        if self.budget.snapshot().exhausted:
+            raise EngineError("initial candidate bootstrap has no remaining fit budget")
+        if not proposal or len(proposal) > self.constraints.max_candidates:
+            raise EngineError("initial candidate proposal is empty or exceeds max_candidates")
+        try:
+            CandidateSet(candidates=proposal)
+        except ValidationError as exc:
+            raise EngineError("invalid initial candidate proposal", cause=exc) from exc
+        branches = tuple(
+            CandidateProgress(public_id=f"c_{i:02d}", spec=spec, wave=1, position=start)
+            for i, spec in enumerate(proposal, 1)
+        )
+        for branch in branches:
+            ensure_candidate(
+                self.conn,
+                candidate_id=branch.database_id(self._latest.run_id),
+                run_id=self._latest.run_id,
+                spec=branch.spec,
+                wave=1,
+            )
+        self._state = self._latest.model_copy(update={"wave": 1, "branches": branches})
+        self._save_latest()
+        return True
 
     async def _finish_fanout(self) -> RunState:
         if self._lifecycle_stop or self.control.status is not None:

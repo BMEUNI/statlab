@@ -7,6 +7,7 @@ D27's invariant: no node name appears outside `backend/statlab/domains/`. Chunk 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
@@ -37,6 +38,17 @@ class NodeSpec:
     decision_schema: type[BaseModel]
     tool_phases: tuple[str, ...]
     gate_policy: GatePolicy
+
+
+@dataclass(frozen=True, slots=True)
+class Domain:
+    """Caller-selected metadata; execution remains an engine callback."""
+
+    name: str
+    contract_model: type[BaseModel]
+    skill_file: Path
+    tool_phases: tuple[str, ...]
+    nodes: tuple[NodeSpec, ...]
 
 
 class NodeResult(BaseModel):

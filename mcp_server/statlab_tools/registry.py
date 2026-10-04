@@ -43,6 +43,7 @@ class EstimatorEntry:
     estimator ineligible when the contract requires interpretability (D-g)."""
 
     task: Task
+    family: Literal["linear", "random_forest", "hist_gradient_boosting"]
     build: Callable[[int, ClassWeight], object]
     default_grid: Grid
     handles_missing: bool
@@ -107,6 +108,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
     return {
         "logistic_regression": EstimatorEntry(
             task="classification",
+            family="linear",
             build=logistic_regression,
             default_grid={"C": (0.1, 1.0, 10.0)},
             handles_missing=False,
@@ -115,6 +117,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "random_forest_classifier": EstimatorEntry(
             task="classification",
+            family="random_forest",
             build=random_forest_classifier,
             default_grid=_grid_rf,
             handles_missing=True,
@@ -123,6 +126,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "hist_gb_classifier": EstimatorEntry(
             task="classification",
+            family="hist_gradient_boosting",
             build=hist_gb_classifier,
             default_grid=_grid_hgb,
             handles_missing=True,
@@ -131,6 +135,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "linear_regression": EstimatorEntry(
             task="regression",
+            family="linear",
             build=linear_regression,
             default_grid={},
             handles_missing=False,
@@ -139,6 +144,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "ridge": EstimatorEntry(
             task="regression",
+            family="linear",
             build=ridge,
             default_grid={"alpha": (0.1, 1.0, 10.0, 100.0)},
             handles_missing=False,
@@ -147,6 +153,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "random_forest_regressor": EstimatorEntry(
             task="regression",
+            family="random_forest",
             build=random_forest_regressor,
             default_grid=_grid_rf,
             handles_missing=True,
@@ -155,6 +162,7 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
         ),
         "hist_gb_regressor": EstimatorEntry(
             task="regression",
+            family="hist_gradient_boosting",
             build=hist_gb_regressor,
             default_grid=_grid_hgb,
             handles_missing=True,

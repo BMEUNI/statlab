@@ -6,7 +6,9 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**26 of 41 chunks complete, plus revisions 09r and 20r. B8 accepted and committed 2026-10-04.**
+**28 of 41 chunks implemented, plus revisions 09r and 20r. B9 reviewed with static-only acceptance 2026-10-04.**
+B9 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
+batch with full behavioral/coverage acceptance. [B9 receipt](./receipts/B9.md) records this limit.
 B7 committed at `1e9fe6a`; B6 committed at `de2aa83`. Phases A/B and M7b complete.
 
 Accepted B8: **2428 passed, one designed skip; 100% line/branch; full mypy/Ruff/format exit 0**.
@@ -19,21 +21,26 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; concrete domain decisions/full agent execution remain B9–B11.
 
-## Next: batch B9 (chunks 27a nodes 1–4 + 27b nodes 5–6)
+## Next: batch B10 (chunk 28, candidate nodes 7–11)
 
-Draft bounded 27a from PLAN's normative spine and relevant D12/D16/D27/D32/D33d/D34d/D35
-decisions: intake, problem definition, profiling, splitting and typed decision schemas.
-Reuse accepted tools/clients, declared engine, role routing, skill policy and memory context.
-After its terminal focused handoff, detail 27b's experiment design and inference, registry/family
-cap, contract row-drop consistency and initial candidate shortlist integration with the B8 engine.
-Keep dependent stages sequential. Main owns architecture/review/acceptance; implementers own
-source/tests. Reuse the committed B8 receipt and exact accepted product inputs.
+Write a bounded detailed chunk-28 spec after reading its dependency row and relevant PLAN
+D12/D27/D32/D34/D36 decisions. Implement preprocessing, feature engineering, training,
+validation evaluation and interpretation through accepted fit/apply tools. Reuse B9's
+DomainRuntime, ProblemSpec, approved CandidateSet, verified split refs and TABULAR_TRAVERSAL;
+extend the currently shared-only runtime narrowly for candidate identity. Initial planner
+creates wave 1 only; candidate retunes and later-wave proposals belong to 28. Nodes 12–13,
+full-agent/API assembly and persistent gate handlers remain later batches.
+Keep stages sequential. Main owns architecture/review/acceptance; implementers own source/tests.
+User authorizes automatic local commits after finished work (2026-10-04); never push.
+Test execution remains stopped by user; preserve this constraint and disclose runtime gaps.
 
 ## Accepted seams and next-stage hazards
 
 - `RunState.branches`, `TraversalPlan`, `RunLoop`, `NodeInvocation` and `ToolBoundary` are
   generic; domain code supplies spine/overlap/design/training/evaluation declarations and
-  callbacks. Initial shortlist is caller-supplied; concrete domain assembly belongs to B9/B10.
+  callbacks. B9 can bootstrap the approved initial shortlist through the existing planner,
+  deterministic candidate IDs, SQL ensure and checkpoint before candidate launch. This new
+  path is reviewed/static-clean but runtime-unverified; no initial-budget launch when exhausted.
   Shared inference receives no candidate-local progress; completed siblings merge durably.
 - Restart cursor/checkpoint remains authority, including repeated design and branch gates.
   `RestartReconciler` prepares a full scan before scheduling; caller owns returned tasks.
@@ -47,7 +54,7 @@ source/tests. Reuse the committed B8 receipt and exact accepted product inputs.
   User-authorized modelling policy now fills all 26 Heuristics/Pitfalls sections (D12);
   all role defaults use V4.1-Flash (D16). [Policy/model receipt](./receipts/modelling-skill-2026-10-04.md):
   18 focused skill checks passed; full acceptance timed out; further tests stopped by user.
-  This adjunct task does not complete any B9 domain implementation.
+  B9 now provides callable shared nodes 1–6; this policy adjunct remains separate evidence.
 - Initialize one immutable `PromptContext` from project memory. `remember` is append-only;
   later writes affect future contexts/runs. Q&A routing uses current node role.
 - Startup must validate selected role models and explicit skill model literals and preserve
@@ -60,8 +67,8 @@ source/tests. Reuse the committed B8 receipt and exact accepted product inputs.
 
 | Responsibility | Owner |
 |---|---|
-| Estimator registry, ≤2 per family, `max_candidates`, row-drop contract consistency | 27b |
-| Concrete candidate executors and initial shortlist assembly | 27b / 28 |
+| Concrete candidate executors, retunes and later-wave proposals | 28 |
+| Candidate runtime binding and full domain assembly | 28 / 29 |
 | Final reporting, skill hash manifest and eventual automatic memory extraction | 29 |
 | Control handlers, resume, gate answers and callable recovery API boot wiring | 30–33 |
 | Remaining table repositories | First real caller's chunk |

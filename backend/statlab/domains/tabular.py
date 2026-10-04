@@ -1,0 +1,91 @@
+"""Normative tabular spine; deferred declarations are never executable here."""
+
+from pathlib import Path
+
+from statlab_contracts.contract import DataContract
+
+from statlab.domains.base import Domain, NodeSpec
+from statlab.domains.decisions import (
+    DesignDecision,
+    InferenceDecision,
+    IntakeDecision,
+    ProblemDecision,
+    ProfileDecision,
+    SplitDecision,
+    UnavailableDecision,
+)
+from statlab.graph.candidates import TraversalPlan
+
+TABULAR_SPINE = (
+    NodeSpec("intake", "SHARED", False, IntakeDecision, ("intake",), "always"),
+    NodeSpec("problem_definition", "SHARED", False, ProblemDecision, (), "always"),
+    NodeSpec(
+        "data_profiling", "SHARED", True, ProfileDecision, ("profiling", "cleaning"), "always"
+    ),
+    NodeSpec("data_splitting", "SHARED", False, SplitDecision, ("cleaning", "splitting"), "always"),
+    NodeSpec("experiment_design", "SHARED", False, DesignDecision, ("training",), "always"),
+    NodeSpec(
+        "inferential_analysis",
+        "SHARED",
+        True,
+        InferenceDecision,
+        ("inference_matrix", "inference"),
+        "always",
+    ),
+    NodeSpec(
+        "preprocessing", "PER_CANDIDATE", True, UnavailableDecision, ("cleaning",), "exception"
+    ),
+    NodeSpec(
+        "feature_engineering",
+        "PER_CANDIDATE",
+        True,
+        UnavailableDecision,
+        ("encoding", "features"),
+        "exception",
+    ),
+    NodeSpec(
+        "model_training", "PER_CANDIDATE", False, UnavailableDecision, ("training",), "exception"
+    ),
+    NodeSpec(
+        "model_evaluation",
+        "PER_CANDIDATE",
+        False,
+        UnavailableDecision,
+        ("evaluation",),
+        "exception",
+    ),
+    NodeSpec(
+        "model_interpretation",
+        "PER_CANDIDATE",
+        True,
+        UnavailableDecision,
+        ("interpretation",),
+        "exception",
+    ),
+    NodeSpec(
+        "champion_selection",
+        "SHARED",
+        False,
+        UnavailableDecision,
+        ("champion", "evaluation", "reporting"),
+        "always",
+    ),
+    NodeSpec(
+        "artifact_persistence", "SHARED", False, UnavailableDecision, ("artifacts",), "always"
+    ),
+)
+
+TABULAR_TRAVERSAL = TraversalPlan(
+    overlap_shared="inferential_analysis",
+    design_node="experiment_design",
+    training_node="model_training",
+    evaluation_node="model_evaluation",
+)
+
+TABULAR_DOMAIN = Domain(
+    name="tabular_supervised",
+    contract_model=DataContract,
+    skill_file=Path("skills/modelling.md"),
+    tool_phases=tuple(dict.fromkeys(phase for node in TABULAR_SPINE for phase in node.tool_phases)),
+    nodes=TABULAR_SPINE,
+)

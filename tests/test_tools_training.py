@@ -109,6 +109,15 @@ def test_list_estimators_all_and_filtered() -> None:
     assert entry["supports_proba"] is True
     reg = _dict(list_estimators(task="regression").summary["estimators"])
     assert _dict(reg["linear_regression"])["supports_proba"] is False
+    assert {name: _dict(value)["family"] for name, value in allo.items()} == {
+        "logistic_regression": "linear",
+        "linear_regression": "linear",
+        "ridge": "linear",
+        "random_forest_classifier": "random_forest",
+        "random_forest_regressor": "random_forest",
+        "hist_gb_classifier": "hist_gradient_boosting",
+        "hist_gb_regressor": "hist_gradient_boosting",
+    }
 
 
 # --- train & predict -----------------------------------------------------------------------------

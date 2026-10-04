@@ -129,10 +129,10 @@ Candidate specifications and rationale.
 ## inferential_analysis
 
 ### Purpose
-Fit the declared inferential analysis on training data.
+Fit the declared inferential analysis once on train+valid, never test.
 
 ### Heuristics
-- Use the shared train-only inference matrix with median/mode imputation and explicit reference levels; remove collinearity only, without predictive scaling or selection.
+- Use the shared train+valid inference matrix with median/mode imputation and explicit reference levels; remove collinearity only, without predictive scaling or selection.
 - Match model to target: OLS for continuous, Logit for binary, MNLogit for multiclass and Poisson GLM for counts.
 - Review convergence, VIF, residual and influence diagnostics; report assumption limits and overdispersion.
 - Use coefficient_table's joint tests for predeclared goals; compare its Holm-adjusted p-value (raw p-value for a single test) with goal alpha, and report p-values, effects and intervals.

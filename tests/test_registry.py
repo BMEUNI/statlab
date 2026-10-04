@@ -37,6 +37,15 @@ def test_exactly_the_six_d25_names_with_tasks() -> None:
     assert tasks["ridge"] == "regression"
     assert tasks["random_forest_regressor"] == "regression"
     assert tasks["hist_gb_regressor"] == "regression"
+    assert {name: entry.family for name, entry in reg.items()} == {
+        "logistic_regression": "linear",
+        "linear_regression": "linear",
+        "ridge": "linear",
+        "random_forest_classifier": "random_forest",
+        "random_forest_regressor": "random_forest",
+        "hist_gb_classifier": "hist_gradient_boosting",
+        "hist_gb_regressor": "hist_gradient_boosting",
+    }
 
 
 def test_every_default_grid_key_is_a_real_param() -> None:

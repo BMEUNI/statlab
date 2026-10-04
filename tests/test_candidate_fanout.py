@@ -24,6 +24,7 @@ from statlab.graph import (
     RunTracker,
     TraversalPlan,
 )
+from statlab.graph.state import BoundaryResult
 from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import get_run, list_node_executions
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
@@ -810,3 +811,180 @@ async def test_planner_empty_or_pause(world: World, pause: bool) -> None:
     assert ("tail" in seen) != pause
     assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 3
     assert runner.checkpointer.load(spine_id="synthetic", spine=result.spine) == result
+
+
+@pytest.mark.asyncio
+async def test_initial_planner_after_design_commits_branches_before_launch(world: World) -> None:
+    nodes = (node("design"), node("companion"), node("fit", candidate=True), node("tail"))
+    traversal = TraversalPlan(design_node="design", overlap_shared="companion")
+    seen: list[str] = []
+    proposals: list[int] = []
+    runner: RunLoop
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        seen.append(inv.spec.name)
+        if inv.spec.name in ("companion", "fit"):
+            saved = runner.checkpointer.load(spine_id="synthetic", spine=inv.state.spine)
+            assert saved is not None and [b.public_id for b in saved.branches] == ["c_01", "c_02"]
+            assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 2
+        return NodeResult(status="completed", summary={"approved": True})
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        assert [boundary.node_name for boundary in state.shared_results] == ["design"]
+        assert not state.branches and seen == ["design"]
+        proposals.append(wave)
+        return specs(2)
+
+    runner = loop(
+        world, nodes, execute, traversal=traversal, constraints=Constraints(max_search_waves=1)
+    )
+    runner.candidate_planner = planner
+    result = await runner.run(initial(world, nodes, 0))
+    assert result.status == "completed" and proposals == [1]
+    assert [branch.public_id for branch in result.branches] == ["c_01", "c_02"]
+    assert all(branch.wave == 1 and branch.status == "completed" for branch in result.branches)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "awaiting_user"])
+async def test_initial_failed_or_guided_prefix_never_plans(world: World, status: str) -> None:
+    nodes = (node("design"), node("fit", candidate=True))
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        assert inv.spec.name == "design"
+        return (
+            NodeResult(status="failed", error=Failure(error_class="data", message="refused"))
+            if status == "failed"
+            else NodeResult(status="awaiting_user")
+        )
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        pytest.fail("halted prefix must not plan")
+
+    runner = loop(world, nodes, execute, traversal=TraversalPlan(design_node="design"))
+    runner.candidate_planner = planner
+    result = await runner.run(initial(world, nodes, 0))
+    assert result.status == status and not result.branches
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["empty", "max", "invalid", "pause"])
+async def test_initial_proposal_refusal_and_control(world: World, case: str) -> None:
+    nodes = (node("design"), node("fit", candidate=True))
+    control = RunControl()
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        assert inv.spec.name == "design"
+        return NodeResult(status="completed")
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        assert wave == 1
+        if case == "pause":
+            control.request_pause()
+        return (
+            ()
+            if case == "empty"
+            else specs(3)
+            if case == "max"
+            else specs(1, 1)
+            if case == "invalid"
+            else specs(1)
+        )
+
+    runner = loop(
+        world,
+        nodes,
+        execute,
+        traversal=TraversalPlan(design_node="design"),
+        constraints=Constraints(max_candidates=2),
+        control=control,
+    )
+    runner.candidate_planner = planner
+    if case == "pause":
+        assert (await runner.run(initial(world, nodes, 0))).status == "paused"
+    else:
+        with pytest.raises(EngineError):
+            await runner.run(initial(world, nodes, 0))
+    assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_branches", [False, True])
+async def test_initial_restart_uses_saved_design_without_reexecution(
+    world: World, saved_branches: bool
+) -> None:
+    nodes = (node("design"), node("fit", candidate=True), node("tail"))
+    traversal = TraversalPlan(design_node="design")
+    start = initial(world, nodes, 0)
+    saved = RunState(
+        run_id=start.run_id,
+        spine_id=start.spine_id,
+        spine=start.spine,
+        mode=start.mode,
+        status="running",
+        cursor=1,
+        traversal=traversal,
+        branches=initial(world, nodes, 2).branches if saved_branches else (),
+        shared_results=(
+            BoundaryResult(
+                node_name="design",
+                execution_id="saved",
+                result=NodeResult(status="completed", summary={"approved": True}),
+            ),
+        ),
+    )
+    Checkpointer(world.paths).save(saved)
+    calls: list[int] = []
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        assert inv.spec.name != "design"
+        return NodeResult(status="completed")
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        calls.append(wave)
+        assert state.shared_results[0].result.summary == {"approved": True}
+        return specs(2)
+
+    runner = loop(
+        world, nodes, execute, traversal=traversal, constraints=Constraints(max_search_waves=1)
+    )
+    runner.candidate_planner = planner
+    result = await runner.run(start)
+    assert result.status == "completed" and calls == ([] if saved_branches else [1])
+    assert [branch.spec for branch in result.branches] == list(specs(2))
+
+
+@pytest.mark.asyncio
+async def test_initial_bootstrap_requires_successful_declared_design(world: World) -> None:
+    nodes = (node("design", skippable=True), node("fit", candidate=True))
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        return NodeResult(status="skipped", skip_reason="synthetic")
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        pytest.fail("unapproved design must not plan")
+
+    runner = loop(world, nodes, execute, traversal=TraversalPlan(design_node="design"))
+    runner.candidate_planner = planner
+    with pytest.raises(EngineError, match="approved design"):
+        await runner.run(initial(world, nodes, 0))
+
+
+@pytest.mark.asyncio
+async def test_initial_stop_before_prefix_never_calls_planner(world: World) -> None:
+    nodes = (node("design"), node("fit", candidate=True))
+    control = RunControl()
+    control.request_cancel()
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        pytest.fail("stopped run must not execute prefix")
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        pytest.fail("stopped run must not plan")
+
+    runner = loop(
+        world, nodes, execute, traversal=TraversalPlan(design_node="design"), control=control
+    )
+    runner.candidate_planner = planner
+    result = await runner.run(initial(world, nodes, 0))
+    assert result.status == "cancelled" and not result.branches
