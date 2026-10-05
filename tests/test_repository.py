@@ -16,24 +16,33 @@ from statlab.persistence.repository import (
     count_prior_test_scorings,
     create_contract,
     create_dataset,
+    create_node_execution,
     create_project,
     create_run,
     ensure_candidate,
     find_dataset_by_hash,
+    get_champion_model,
     get_contract,
     get_dataset,
+    get_model,
     get_project,
     get_project_by_slug,
     get_run,
     latest_contract,
     list_projects,
     list_runs,
+    record_tool_call,
+    remember_run_outcome,
+    save_champion_model,
     set_test_fingerprint,
     update_candidate_status,
     update_run_status,
 )
+from statlab.storage import create_artifact
+from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.contract import DataContract
+from statlab_contracts.envelope import ToolSuccess
 
 
 @pytest.fixture
@@ -1034,3 +1043,207 @@ def test_candidate_status_sql_failure(closed: bool) -> None:
         assert isinstance(caught.value.cause, sqlite3.Error)
     finally:
         conn.close()
+
+
+# B11: durable champion and deterministic outcome boundaries (not executed).
+def champion_run(
+    conn: sqlite3.Connection, project: ProjectRow, *, parent: RunRow | None = None
+) -> RunRow:
+    contract_row = create_contract(
+        conn,
+        project_id=project.id,
+        path=Path("/c.json"),
+        contract=DataContract.model_validate({"target": {"column": "y"}}),
+    )
+    return create_run(
+        conn,
+        project_id=project.id,
+        contract_id=contract_row.id,
+        mode="autonomous",
+        config_json="{}",
+        forked_from_run_id=parent.id if parent else None,
+    )
+
+
+def fitted_champion_artifact(
+    conn: sqlite3.Connection,
+    run: RunRow,
+    root: Path,
+    *,
+    tainted: bool = False,
+    audited: bool = True,
+) -> tuple[str, CandidateSpec, ArtifactRef]:
+    spec = CandidateSpec(
+        label="fixed model",
+        rationale="Fixed validation-selected candidate",
+        estimator=EstimatorSpec(name="linear_regression"),
+    )
+    candidate_id = f"{len(run.id)}:{run.id}:c_01"
+    ensure_candidate(conn, candidate_id=candidate_id, run_id=run.id, spec=spec)
+    ref = new_artifact_ref()
+    path = root / f"{ref}.joblib"
+    path.write_bytes(b"fitted model fixture")
+    meta = ArtifactMeta(ref=ref, kind="model")
+    create_artifact(
+        conn,
+        ref=ref,
+        run_id=run.id,
+        kind="model",
+        path=path,
+        meta=meta,
+        produced_by="train_estimator",
+        derived_from_test=tainted,
+    )
+    if audited:
+        execution = create_node_execution(
+            conn, run_id=run.id, node_name="model_training", seq=9, candidate_id=candidate_id
+        )
+        record_tool_call(
+            conn,
+            run_id=run.id,
+            node_execution_id=execution.id,
+            tool_name="train_estimator",
+            args_json="{}",
+            result_json=ToolSuccess(artifacts=(meta,)).model_dump_json(),
+            duration_ms=1,
+        )
+    return candidate_id, spec, ref
+
+
+def test_b11_champion_pointer_atomic_idempotent_and_replacement_rejected(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    run = champion_run(migrated_db, project)
+    candidate_id, spec, ref = fitted_champion_artifact(migrated_db, run, tmp_path)
+    model = save_champion_model(
+        migrated_db,
+        run_id=run.id,
+        candidate_id=candidate_id,
+        artifact_id=str(ref),
+        name=spec.estimator.name,
+        parameters={"fit_intercept": True},
+    )
+    assert model.id.startswith("mo_") and get_model(migrated_db, model.id) == model
+    assert get_model(migrated_db, "missing") is None
+    assert get_champion_model(migrated_db, run.id) == model
+    durable_run = get_run(migrated_db, run.id)
+    assert durable_run is not None and durable_run.champion_model_id == model.id
+    assert claim_test_scoring(migrated_db, run.id)
+    assert (
+        save_champion_model(
+            migrated_db,
+            run_id=run.id,
+            candidate_id=candidate_id,
+            artifact_id=str(ref),
+            name=spec.estimator.name,
+            parameters={"fit_intercept": True},
+        )
+        == model
+    )
+    with pytest.raises(PersistenceError, match="replacement"):
+        save_champion_model(
+            migrated_db,
+            run_id=run.id,
+            candidate_id=candidate_id,
+            artifact_id=str(ref),
+            name=spec.estimator.name,
+            parameters={"fit_intercept": False},
+        )
+    assert (
+        migrated_db.execute("SELECT COUNT(*) FROM models WHERE run_id = ?", (run.id,)).fetchone()[0]
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid", ["tainted", "unaudited", "missing", "estimator", "claimed", "foreign_candidate"]
+)
+def test_b11_model_identity_failure_does_not_publish_pointer(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path, invalid: str
+) -> None:
+    run = champion_run(migrated_db, project)
+    candidate_id, spec, ref = fitted_champion_artifact(
+        migrated_db, run, tmp_path, tainted=invalid == "tainted", audited=invalid != "unaudited"
+    )
+    if invalid == "missing":
+        (tmp_path / f"{ref}.joblib").unlink()
+    if invalid == "claimed":
+        assert claim_test_scoring(migrated_db, run.id)
+    if invalid == "foreign_candidate":
+        foreign = champion_run(migrated_db, project)
+        candidate_id, _, _ = fitted_champion_artifact(migrated_db, foreign, tmp_path)
+    with pytest.raises(PersistenceError):
+        save_champion_model(
+            migrated_db,
+            run_id=run.id,
+            candidate_id=candidate_id,
+            artifact_id=str(ref),
+            name="ridge" if invalid == "estimator" else spec.estimator.name,
+            parameters={},
+        )
+    durable = get_run(migrated_db, run.id)
+    assert durable is not None and durable.champion_model_id is None
+    assert (
+        migrated_db.execute("SELECT COUNT(*) FROM models WHERE run_id = ?", (run.id,)).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.parametrize("ancestor", [True, False])
+def test_b11_parent_artifact_allowed_only_on_verified_fork_ancestry(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path, ancestor: bool
+) -> None:
+    parent = champion_run(migrated_db, project)
+    _, spec, ref = fitted_champion_artifact(migrated_db, parent, tmp_path)
+    child = champion_run(migrated_db, project, parent=parent if ancestor else None)
+    candidate_id = f"{len(child.id)}:{child.id}:c_01"
+    ensure_candidate(migrated_db, candidate_id=candidate_id, run_id=child.id, spec=spec)
+    if ancestor:
+        model = save_champion_model(
+            migrated_db,
+            run_id=child.id,
+            candidate_id=candidate_id,
+            artifact_id=str(ref),
+            name=spec.estimator.name,
+            parameters={},
+        )
+        assert model.run_id == child.id and model.candidate_id == candidate_id
+        assert get_champion_model(migrated_db, child.id) == model
+    else:
+        with pytest.raises(PersistenceError, match="fork lineage"):
+            save_champion_model(
+                migrated_db,
+                run_id=child.id,
+                candidate_id=candidate_id,
+                artifact_id=str(ref),
+                name=spec.estimator.name,
+                parameters={},
+            )
+
+
+def test_b11_outcome_memory_exact_retry_conflict_and_provenance(
+    migrated_db: sqlite3.Connection, project: ProjectRow
+) -> None:
+    run = champion_run(migrated_db, project)
+    memory = remember_run_outcome(
+        migrated_db,
+        project_id=project.id,
+        run_id=run.id,
+        value={"task": "regression", "selection_bias": "validation selection is optimistic"},
+    )
+    assert (
+        remember_run_outcome(
+            migrated_db,
+            project_id=project.id,
+            run_id=run.id,
+            value={"selection_bias": "validation selection is optimistic", "task": "regression"},
+        )
+        == memory
+    )
+    with pytest.raises(PersistenceError, match="conflicting"):
+        remember_run_outcome(
+            migrated_db, project_id=project.id, run_id=run.id, value={"task": "classification"}
+        )
+    other = create_project(migrated_db, slug="other-outcome", name="Other")
+    with pytest.raises(PersistenceError, match="provenance"):
+        remember_run_outcome(migrated_db, project_id=other.id, run_id=run.id, value={})

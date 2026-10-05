@@ -185,6 +185,19 @@ class ArtifactRow(BaseModel):
             ) from exc
 
 
+class ModelRow(BaseModel):
+    """A registered fitted model selected for one run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: str
+    run_id: str
+    candidate_id: str | None
+    name: str
+    params_json: str
+    artifact_id: str
+    created_at: str
+
+
 class NodeExecutionRow(BaseModel):
     """A node attempt to which every dispatched tool call is attributed."""
 

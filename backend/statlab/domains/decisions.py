@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from statlab_contracts.artifacts import ArtifactRef
 from statlab_contracts.candidate import CandidateSet, CandidateSpec
 from statlab_contracts.contract import InferenceGoal, Objective
+from statlab_contracts.reporting import ReportSection
 from statlab_contracts.vocabulary import (
     METRICS_FOR_TASK,
     TASK_FOR_TARGET_TYPE,
@@ -24,6 +25,16 @@ MetricRule = Literal["explicit", "classification_auto", "regression_auto", "over
 class Decision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     rationale: str = Field(min_length=1)
+
+
+class ChampionChoice(Decision):
+    candidate_id: str = Field(pattern=r"^c_[0-9]{2,}\z")
+    rationale: str = Field(min_length=1, max_length=2000)
+    sections: tuple[ReportSection, ...] = Field(default=(), max_length=6)
+
+
+class PersistenceDecision(Decision):
+    preserve: Literal[True] = True
 
 
 class IntakeDecision(Decision):

@@ -61,7 +61,7 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B8 | 24 candidate fan-out + 26 routing/skills | completed; accepted and committed 2026-10-04; M8a / M8b ✅; [receipt](./receipts/B8.md) |
 | B9 | 27a nodes 1–4 + 27b nodes 5–6 | implemented/reviewed; static acceptance 2026-10-04, exit 0; tests stopped by user, runtime/coverage unproved; [receipt](./receipts/B9.md) |
 | B10 | 28 nodes 7–11 (alone: the largest) | Implemented/reviewed 2026-10-04; static-only acceptance, runtime/coverage outstanding under user test stop. [Receipt](./receipts/B10.md). |
-| B11 | 29 nodes 12–13 + 30 control router | M9 |
+| B11 | 29 nodes 12–13 + 30 control router | implemented/reviewed; static acceptance 2026-10-05, exit0; runtime/coverage outstanding under user test stop. [Receipt](./receipts/B11.md). |
 | B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11 |
 | B13 | 33 API projects + 34 API runs | |
 | B14 | 35 SSE + 36 frontend scaffold | M12 |
@@ -120,13 +120,13 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 27a | [`27a_nodes_shared_foundation.md`](./27a_nodes_shared_foundation.md) — nodes 1–4: intake, problem_definition (incl. the PR-AUC default under imbalance, D33d, and pre-registered inference goals, D35), data_profiling, data_splitting + their decision schemas | completed (static only; tests stopped) | 08, 09, 10, 22, 24, 26 |
 | 27b | [`27b_nodes_design_inference.md`](./27b_nodes_design_inference.md) — nodes 5–6: experiment_design (registry check, ≤2-per-family cap, `max_candidates`, chunk 04's deferred checks; reject a candidate whose `preprocessing.missing.drop_rows_above` differs from the contract's, since row drops are shared and pre-split, D34d) and inferential_analysis (D31, D35) + their decision schemas. Split from 27 in review: six nodes in one chunk was the largest chunk in the plan | completed (static only; tests stopped) | 13, 15, 27a |
 | 28 | `28_nodes_per_candidate.md` — nodes 7–11: preprocessing, feature_engineering, model_training, model_evaluation, model_interpretation | implemented (static-only; runtime/coverage outstanding) | 11, 12, 13, 14, 17, 18, 27b |
-| 29 | `29_nodes_champion.md` — nodes 12–13: champion_selection (selection-bias labelling, CIs, cross-run test-exposure disclosure — D32c/D33; `select_champion` is called once and the backend refuses a second call once test is scored; `assemble_report` gets `prior_test_scorings` (`count_prior_test_scorings`) and `n_waves`; node 13 passes the run's tool log as `LoggedCall`s to `export_pipeline_script` (with `target` = the champion's test score table) and `snapshot_run`, and adds the LLM model name to the manifest; scoring test = replay the champion's node 7–8 calls whose tool is `transform_only`, in order, with the same non-frame arguments and `frame=test`, then predict and one `score_*` — chunk 17 D-a) and artifact_persistence | untouched | 19, 20, 28 |
+| 29 | `29_nodes_champion.md` — nodes 12–13: champion_selection (selection-bias labelling, CIs, cross-run test-exposure disclosure — D32c/D33; `select_champion` is called once and the backend refuses a second call once test is scored; `assemble_report` gets `prior_test_scorings` (`count_prior_test_scorings`) and `n_waves`; node 13 passes the run's tool log as `LoggedCall`s to `export_pipeline_script` (with `target` = the champion's test score table) and `snapshot_run`, and adds the LLM model name to the manifest; scoring test = replay the champion's node 7–8 calls whose tool is `transform_only`, in order, with the same non-frame arguments and `frame=test`, then predict and one `score_*` — chunk 17 D-a) and artifact_persistence | implemented (static-only; runtime/coverage outstanding) | 19, 20, 28 |
 
 ## Phase E — Control layer (30–32)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 30 | `30_control_router.md` — interrupt router classifier, out-of-band Q&A, status explainer | untouched | 22, 26 |
+| 30 | `30_control_router.md` — interrupt router classifier, out-of-band Q&A, status explainer | implemented (static-only; runtime/coverage outstanding) | 22, 26 |
 | 31 | `31_control_recovery.md` — recovery/retry by `error_class`, cancel/pause/resume lifecycle; rewind handler: forks keep the parent's artifact refs and create no rows (D11); listing follows `forked_from_run_id` | untouched | 22, 30 |
 | 32 | `32_control_gates_rewind.md` — HITL gates (7 actions), guided mode `gate_policy`, fork-based rewind with hard-linking | untouched | 24, 31 |
 

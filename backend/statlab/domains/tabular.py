@@ -6,18 +6,19 @@ from statlab_contracts.contract import DataContract
 
 from statlab.domains.base import Domain, NodeSpec
 from statlab.domains.decisions import (
+    ChampionChoice,
     DesignDecision,
     EvaluationDecision,
     FeatureDecision,
     InferenceDecision,
     IntakeDecision,
     InterpretationDecision,
+    PersistenceDecision,
     PreprocessingDecision,
     ProblemDecision,
     ProfileDecision,
     SplitDecision,
     TrainingDecision,
-    UnavailableDecision,
 )
 from statlab.graph.candidates import TraversalPlan
 
@@ -71,12 +72,12 @@ TABULAR_SPINE = (
         "champion_selection",
         "SHARED",
         False,
-        UnavailableDecision,
+        ChampionChoice,
         ("champion", "evaluation", "reporting"),
         "always",
     ),
     NodeSpec(
-        "artifact_persistence", "SHARED", False, UnavailableDecision, ("artifacts",), "always"
+        "artifact_persistence", "SHARED", False, PersistenceDecision, ("artifacts",), "always"
     ),
 )
 

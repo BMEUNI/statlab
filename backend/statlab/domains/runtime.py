@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel, JsonValue
 from statlab_contracts.contract import DataContract
@@ -20,6 +21,7 @@ from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import SkillPolicy
 from statlab.mcp_client import CallContext
 from statlab.persistence.models import MemoryRow
+from statlab.persistence.repository import get_champion_model
 
 Approval = Callable[[NodeInvocation, BaseModel, tuple[JsonValue, ...]], Awaitable[BaseModel | None]]
 
@@ -36,6 +38,7 @@ class DomainRuntime:
     router: ModelRouter
     memory: tuple[MemoryRow, ...] = ()
     approval: Approval | None = None
+    lockfile_path: Path | None = None
 
     def context(self, invocation: NodeInvocation) -> CallContext:
         if (
@@ -61,6 +64,8 @@ class DomainRuntime:
             allowed=self.skill.node(invocation.spec.name).allowed,
             contract=self.contract,
             dataset=self.dataset,
+            champion_selected=invocation.spec.name == "champion_selection"
+            and get_champion_model(self.conn, self.paths.run_id) is not None,
         )
 
     async def decide[T: BaseModel](
@@ -126,6 +131,11 @@ class DomainRuntime:
         return type(decision).model_validate(approved.model_dump(mode="json"))
 
     async def call(
-        self, invocation: NodeInvocation, tool: str, params: dict[str, JsonValue]
+        self,
+        invocation: NodeInvocation,
+        tool: str,
+        params: dict[str, JsonValue],
+        *,
+        trusted: Mapping[str, JsonValue] | None = None,
     ) -> ToolSuccess:
-        return await self.tools.call(self.context(invocation), tool, params)
+        return await self.tools.call(self.context(invocation), tool, params, trusted=trusted)

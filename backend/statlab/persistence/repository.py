@@ -32,7 +32,7 @@ from pathlib import Path
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from statlab_contracts.candidate import CandidateSpec
 from statlab_contracts.contract import DataContract
-from statlab_contracts.envelope import Failure
+from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, Failure
 
 from statlab.domains.base import NodeResult
 from statlab.errors import PersistenceError
@@ -45,6 +45,7 @@ from statlab.persistence.models import (
     GateRow,
     LlmCallRow,
     MemoryRow,
+    ModelRow,
     NodeExecutionRow,
     ProjectRow,
     RunMode,
@@ -668,3 +669,154 @@ def list_memory(conn: sqlite3.Connection, project_id: str) -> tuple[MemoryRow, .
         return tuple(MemoryRow.model_validate(dict(row)) for row in rows)
     except sqlite3.Error, ValidationError:
         raise PersistenceError("could not read project memory") from None
+
+
+def get_model(conn: sqlite3.Connection, model_id: str) -> ModelRow | None:
+    try:
+        row = conn.execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
+        return ModelRow.model_validate(dict(row)) if row is not None else None
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read model", cause=exc) from exc
+
+
+def get_champion_model(conn: sqlite3.Connection, run_id: str) -> ModelRow | None:
+    """Resolve a pointer only when its model, candidate and fitted artifact agree."""
+    try:
+        run = get_run(conn, run_id)
+        if run is None:
+            raise PersistenceError("champion run does not exist")
+        if run.champion_model_id is None:
+            return None
+        model = get_model(conn, run.champion_model_id)
+        if model is None or model.run_id != run_id or model.candidate_id is None:
+            raise PersistenceError("invalid champion model ownership")
+        _check_model_identity(conn, run_id, model.candidate_id, model.artifact_id, model.name)
+        return model
+    except (sqlite3.Error, ValidationError, OSError) as exc:
+        raise PersistenceError("cannot resolve champion", cause=exc) from exc
+
+
+def _check_model_identity(
+    conn: sqlite3.Connection, run_id: str, candidate_id: str, artifact_id: str, name: str
+) -> None:
+    candidate = conn.execute("SELECT * FROM candidates WHERE id = ?", (candidate_id,)).fetchone()
+    artifact = conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+    if candidate is None or candidate["run_id"] != run_id:
+        raise PersistenceError("model candidate ownership mismatch")
+    spec = CandidateSpec.model_validate_json(candidate["spec_json"])
+    if spec.estimator.name != name:
+        raise PersistenceError("model estimator differs from candidate")
+    if (
+        artifact is None
+        or artifact["kind"] != "model"
+        or artifact["derived_from_test"]
+        or artifact["pruned_at"] is not None
+        or not Path(artifact["path"]).is_file()
+    ):
+        raise PersistenceError("model requires an available fitted artifact")
+    current = get_run(conn, run_id)
+    if current is None:
+        raise PersistenceError("champion run does not exist")
+    ancestor = current
+    visited: set[str] = set()
+    while ancestor.id != artifact["run_id"]:
+        if ancestor.id in visited or ancestor.forked_from_run_id is None:
+            raise PersistenceError("model artifact is outside run fork lineage")
+        visited.add(ancestor.id)
+        parent = get_run(conn, ancestor.forked_from_run_id)
+        if parent is None or parent.project_id != current.project_id:
+            raise PersistenceError("model fork ancestry crosses projects or is missing")
+        ancestor = parent
+    rows = conn.execute(
+        "SELECT tc.result_json, c.id, c.spec_json FROM tool_calls tc JOIN node_executions ne "
+        "ON ne.id = tc.node_execution_id JOIN candidates c ON c.id = ne.candidate_id "
+        "WHERE tc.run_id = ? AND tc.tool_name = 'train_estimator'",
+        (ancestor.id,),
+    ).fetchall()
+    for row in rows:
+        if ancestor.id == run_id:
+            matches = row["id"] == candidate_id
+        else:
+            matches = (
+                CandidateSpec.model_validate_json(row["spec_json"]).spec_hash == spec.spec_hash
+            )
+        result = TOOL_RESULT_ADAPTER.validate_json(row["result_json"])
+        if matches and result.ok and artifact_id in {str(meta.ref) for meta in result.artifacts}:
+            return
+    raise PersistenceError("fitted artifact lacks matching candidate training audit")
+
+
+def save_champion_model(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    candidate_id: str,
+    artifact_id: str,
+    name: str,
+    parameters: dict[str, JsonValue],
+) -> ModelRow:
+    """Publish model and champion pointer atomically; an identical selection is idempotent."""
+    try:
+        serialized = json.dumps(parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        with transaction(conn):
+            _check_model_identity(conn, run_id, candidate_id, artifact_id, name)
+            run = get_run(conn, run_id)
+            if run is None:
+                raise PersistenceError("champion run does not exist")
+            previous = get_champion_model(conn, run_id)
+            if previous is not None:
+                if (
+                    previous.candidate_id,
+                    previous.artifact_id,
+                    previous.name,
+                    previous.params_json,
+                ) != (candidate_id, artifact_id, name, serialized):
+                    raise PersistenceError("champion replacement is forbidden")
+                return previous
+            if run.test_scored_at is not None:
+                raise PersistenceError("new selection after test claim is forbidden")
+            model_id = new_id("mo")
+            conn.execute(
+                "INSERT INTO models "
+                "(id, run_id, candidate_id, name, params_json, artifact_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (model_id, run_id, candidate_id, name, serialized, artifact_id, utc_now()),
+            )
+            conn.execute("UPDATE runs SET champion_model_id = ? WHERE id = ?", (model_id, run_id))
+            row = conn.execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
+        return ModelRow.model_validate(dict(row))
+    except (sqlite3.Error, ValueError, TypeError, OSError) as exc:
+        raise PersistenceError("cannot preserve champion model", cause=exc) from exc
+
+
+def remember_run_outcome(
+    conn: sqlite3.Connection, *, project_id: str, run_id: str, value: dict[str, JsonValue]
+) -> MemoryRow:
+    """Append one deterministic outcome per source run, rejecting conflicting retries."""
+    key = "run_outcome"
+    try:
+        serialized = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        with transaction(conn):
+            source = get_run(conn, run_id)
+            if source is None or source.project_id != project_id:
+                raise PersistenceError("memory provenance must belong to destination project")
+            rows = conn.execute(
+                "SELECT * FROM memory WHERE project_id = ? AND source_run_id = ? AND key = ?",
+                (project_id, run_id, key),
+            ).fetchall()
+            if rows:
+                if len(rows) != 1 or rows[0]["value_json"] != serialized:
+                    raise PersistenceError("conflicting same-run outcome memory")
+                return MemoryRow.model_validate(dict(rows[0]))
+            memory_id = new_id("mem")
+            conn.execute(
+                "INSERT INTO memory (id, project_id, key, value_json, source_run_id, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (memory_id, project_id, key, serialized, run_id, utc_now()),
+            )
+            row = conn.execute("SELECT * FROM memory WHERE id = ?", (memory_id,)).fetchone()
+        return MemoryRow.model_validate(dict(row))
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        raise PersistenceError("cannot preserve run outcome memory", cause=exc) from exc
