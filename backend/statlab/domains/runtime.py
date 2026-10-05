@@ -42,9 +42,18 @@ class DomainRuntime:
             invocation.state.run_id != self.paths.run_id
             or invocation.execution.run_id != self.paths.run_id
             or invocation.execution.node_name != invocation.spec.name
-            or invocation.candidate is not None
         ):
-            raise EngineError("foundation invocation identity mismatch")
+            raise EngineError("domain invocation identity mismatch")
+        candidate = invocation.candidate
+        if candidate is None:
+            if invocation.spec.kind != "SHARED" or invocation.execution.candidate_id is not None:
+                raise EngineError("shared invocation identity mismatch")
+        elif (
+            invocation.spec.kind != "PER_CANDIDATE"
+            or invocation.execution.candidate_id != candidate.database_id(self.paths.run_id)
+            or candidate not in invocation.state.branches
+        ):
+            raise EngineError("candidate invocation identity mismatch")
         return CallContext(
             paths=self.paths,
             node=invocation.spec.name,
@@ -76,6 +85,25 @@ class DomainRuntime:
                     "boundaries": [
                         boundary.model_dump(mode="json")
                         for boundary in invocation.state.shared_results
+                    ],
+                    "candidate": invocation.candidate.model_dump(mode="json")
+                    if invocation.candidate is not None
+                    else None,
+                    "checkpointed_candidates": [
+                        branch.spec.model_dump(mode="json") for branch in invocation.state.branches
+                    ],
+                    "sibling_validation": [
+                        {
+                            "candidate": branch.public_id,
+                            "wave": branch.wave,
+                            "summary": boundary.result.summary,
+                        }
+                        for branch in invocation.state.branches
+                        if invocation.candidate is None
+                        or branch.public_id != invocation.candidate.public_id
+                        for boundary in branch.results
+                        if boundary.node_name == "model_evaluation"
+                        and boundary.result.status == "completed"
                     ],
                 },
                 recent_tool_results=evidence,

@@ -75,7 +75,12 @@ _BOOLEAN_FALSE: Final = frozenset({"false", "f", "no", "n", "0"})
 # a tool may run in, D34d's three groups) while keeping each list in one obvious place.
 _CAST_PHASES: Final = ("data_profiling", "data_splitting")
 _APPLY_PHASES: Final = ("preprocessing", "champion_selection")
-_DROP_COLUMNS_PHASES: Final = ("data_splitting", "preprocessing", "champion_selection")
+_DROP_COLUMNS_PHASES: Final = (
+    "data_splitting",
+    "preprocessing",
+    "feature_engineering",
+    "champion_selection",
+)
 
 _NO_ROLES: Final[dict[str, ColumnRole]] = {}
 _NO_PER_COLUMN: Final[dict[str, ImputationStrategy]] = {}

@@ -7,11 +7,16 @@ from statlab_contracts.contract import DataContract
 from statlab.domains.base import Domain, NodeSpec
 from statlab.domains.decisions import (
     DesignDecision,
+    EvaluationDecision,
+    FeatureDecision,
     InferenceDecision,
     IntakeDecision,
+    InterpretationDecision,
+    PreprocessingDecision,
     ProblemDecision,
     ProfileDecision,
     SplitDecision,
+    TrainingDecision,
     UnavailableDecision,
 )
 from statlab.graph.candidates import TraversalPlan
@@ -33,24 +38,24 @@ TABULAR_SPINE = (
         "always",
     ),
     NodeSpec(
-        "preprocessing", "PER_CANDIDATE", True, UnavailableDecision, ("cleaning",), "exception"
+        "preprocessing", "PER_CANDIDATE", True, PreprocessingDecision, ("cleaning",), "exception"
     ),
     NodeSpec(
         "feature_engineering",
         "PER_CANDIDATE",
         True,
-        UnavailableDecision,
+        FeatureDecision,
         ("encoding", "features"),
         "exception",
     ),
     NodeSpec(
-        "model_training", "PER_CANDIDATE", False, UnavailableDecision, ("training",), "exception"
+        "model_training", "PER_CANDIDATE", False, TrainingDecision, ("training",), "exception"
     ),
     NodeSpec(
         "model_evaluation",
         "PER_CANDIDATE",
         False,
-        UnavailableDecision,
+        EvaluationDecision,
         ("evaluation",),
         "exception",
     ),
@@ -58,7 +63,7 @@ TABULAR_SPINE = (
         "model_interpretation",
         "PER_CANDIDATE",
         True,
-        UnavailableDecision,
+        InterpretationDecision,
         ("interpretation",),
         "exception",
     ),

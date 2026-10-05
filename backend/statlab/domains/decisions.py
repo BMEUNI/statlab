@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from statlab_contracts.candidate import CandidateSet
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from statlab_contracts.artifacts import ArtifactRef
+from statlab_contracts.candidate import CandidateSet, CandidateSpec
 from statlab_contracts.contract import InferenceGoal, Objective
 from statlab_contracts.vocabulary import (
     METRICS_FOR_TASK,
     TASK_FOR_TARGET_TYPE,
     Metric,
+    ParamValue,
     SplitStrategy,
     TargetType,
     Task,
@@ -136,3 +138,75 @@ class InferenceDecision(Decision):
     predictors: tuple[str, ...] = Field(min_length=1)
     reference_levels: dict[str, str] = Field(default_factory=dict)
     residual_plot: bool = False
+
+
+class CandidateDecision(Decision):
+    material_exceptions: tuple[str, ...] = ()
+
+
+class PreprocessingDecision(CandidateDecision):
+    drop_constant: bool = True
+    high_missing_threshold: float | None = Field(default=None, gt=0, le=1)
+
+
+class FeatureDecision(CandidateDecision):
+    skip_reason: str | None = Field(default=None, min_length=1)
+
+
+class TrainingDecision(CandidateDecision):
+    method: Literal["direct", "grid"] = "direct"
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    param_grid: dict[str, tuple[ParamValue, ...]] | None = None
+
+
+class EvaluationActions(CandidateDecision):
+    curves: tuple[Literal["confusion", "roc", "pr", "calibration"], ...] = ()
+    threshold_objective: Literal["f1", "target_recall", "min_cost"] | None = None
+    target_recall: float = Field(default=0.8, gt=0, le=1)
+    cost_fn_to_fp: float = Field(default=1, gt=0)
+    cross_validation: bool = False
+    learning_curve: bool = False
+
+
+class ValidationConclusion(CandidateDecision):
+    retune: bool = False
+    retune_reason: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _retune_reason(self) -> ValidationConclusion:
+        if self.retune and (self.retune_reason is None or not self.retune_reason.strip()):
+            raise ValueError("retune requires a nonblank reason")
+        return self
+
+
+class EvaluationDecision(EvaluationActions, ValidationConclusion):
+    """Durable actions plus the conclusion drawn after their observed validation results."""
+
+
+class InterpretationDecision(CandidateDecision):
+    skip_reason: str | None = Field(default=None, min_length=1)
+    coefficients: bool = False
+    partial_dependence: tuple[str, ...] = ()
+    error_by: tuple[str, ...] = ()
+
+
+class SearchDecision(Decision):
+    candidates: tuple[CandidateSpec, ...] = ()
+    family_justifications: dict[str, str] = Field(default_factory=dict)
+
+
+class ReplayStep(BaseModel):
+    """A held-out transform; frame is bound by the replay caller, never saved here."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    tool: str = Field(min_length=1)
+    parameters: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class PipelineState(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    train: ArtifactRef
+    valid: ArtifactRef
+    replay: tuple[ReplayStep, ...] = ()
+    feature_manifest: dict[str, JsonValue] = Field(default_factory=dict)
+    methodology: CandidateSpec

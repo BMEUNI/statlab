@@ -14,14 +14,19 @@ from pydantic import BaseModel, JsonValue, ValidationError
 from statlab.domains.base import NodeResult
 from statlab.domains.decisions import (
     DesignDecision,
+    EvaluationDecision,
+    FeatureDecision,
     InferenceDecision,
     IntakeDecision,
+    InterpretationDecision,
+    PreprocessingDecision,
     ProblemDecision,
     ProblemSpec,
     ProfileDecision,
     ProfileFindings,
     ProfilePlot,
     SplitDecision,
+    TrainingDecision,
     UnavailableDecision,
 )
 from statlab.domains.foundation import (
@@ -366,7 +371,14 @@ def test_declared_spine_and_deferred_schema() -> None:
     )
     assert TABULAR_SPINE[4].decision_schema is DesignDecision
     assert TABULAR_SPINE[5].decision_schema is InferenceDecision
-    assert all(spec.decision_schema is UnavailableDecision for spec in TABULAR_SPINE[6:])
+    assert tuple(spec.decision_schema for spec in TABULAR_SPINE[6:11]) == (
+        PreprocessingDecision,
+        FeatureDecision,
+        TrainingDecision,
+        EvaluationDecision,
+        InterpretationDecision,
+    )
+    assert all(spec.decision_schema is UnavailableDecision for spec in TABULAR_SPINE[11:])
     assert not TABULAR_SPINE[0].skippable and TABULAR_SPINE[2].skippable
 
 

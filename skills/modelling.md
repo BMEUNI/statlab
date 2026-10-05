@@ -212,6 +212,7 @@ fit_binner
 apply_binner
 select_by_variance
 select_by_mutual_info
+drop_columns
 
 ### Outputs
 Fitted feature transforms and candidate feature frames.

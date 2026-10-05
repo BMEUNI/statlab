@@ -87,12 +87,14 @@ class DesignInferenceExecutor:
             columns &= set(rules.include)
         return columns - {target, *rules.exclude, *rules.id_columns}
 
-    def _validate_design(
+    def validate_design(
         self,
         invocation: NodeInvocation,
         decision: DesignDecision,
         registry: dict[str, JsonValue],
         problem: ProblemSpec,
+        *,
+        require_saved: bool = True,
     ) -> None:
         contract = self.runtime.contract
         candidates = decision.candidate_set.candidates
@@ -158,9 +160,12 @@ class DesignInferenceExecutor:
         for family, count in families.items():
             if count > 2 and not decision.family_justifications.get(family, "").strip():
                 raise _RefusalError("more than two candidates in a family need justification")
-        if invocation.state.branches and tuple(
-            branch.spec.model_dump(mode="json") for branch in invocation.state.branches
-        ) != tuple(candidate.model_dump(mode="json") for candidate in candidates):
+        if (
+            require_saved
+            and invocation.state.branches
+            and tuple(branch.spec.model_dump(mode="json") for branch in invocation.state.branches)
+            != tuple(candidate.model_dump(mode="json") for candidate in candidates)
+        ):
             raise _RefusalError("approved shortlist must match existing candidate specifications")
 
     async def _design(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
@@ -173,9 +178,11 @@ class DesignInferenceExecutor:
             question="Use actual profiling, problem and memory to propose normally 3-5 reasoned "
             "candidates within max_candidates. Include an interpretable linear baseline, vary "
             "recorded dimensions and justify families above two. Respect explicit contract "
-            "choices and shared pre-split row threshold. Do not fit or probe parameters.",
+            "choices and shared pre-split row threshold. If checkpointed candidates exist, "
+            "confirm that exact cumulative set, preserving every specification. "
+            "Do not fit or probe parameters.",
         )
-        self._validate_design(invocation, decision, registry.summary, problem)
+        self.validate_design(invocation, decision, registry.summary, problem)
         summary: dict[str, JsonValue] = {
             "decision": decision.model_dump(mode="json"),
             "candidate_set": decision.candidate_set.model_dump(mode="json"),
@@ -184,7 +191,7 @@ class DesignInferenceExecutor:
         approved = await self.runtime.approve(invocation, decision, tuple(evidence.tools))
         if approved is None:
             return evidence.result("awaiting_user", summary)
-        self._validate_design(invocation, approved, registry.summary, problem)
+        self.validate_design(invocation, approved, registry.summary, problem)
         summary.update(
             decision=approved.model_dump(mode="json"),
             candidate_set=approved.candidate_set.model_dump(mode="json"),

@@ -457,6 +457,12 @@ async def test_mcp_fit_then_apply_imputer_round_trips(
         allow_in = {t.name: t.meta["allow_in"] for t in listed.tools if t.meta is not None}
         assert allow_in["cast_dtypes"] == ["data_profiling", "data_splitting"]  # pre-split group
         assert allow_in["fit_imputer"] == ["preprocessing"]  # decide-on-train group
+        assert allow_in["drop_columns"] == [
+            "data_splitting",
+            "preprocessing",
+            "feature_engineering",
+            "champion_selection",
+        ]
         assert allow_in["apply_imputer"] == ["preprocessing", "champion_selection"]  # apply group
 
         fit_result = await session.call_tool(
