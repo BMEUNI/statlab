@@ -7,9 +7,9 @@ workspace_dependencies = false
 
 [agents]
 enabled = true
-max_concurrent_threads_per_session = 3
+max_concurrent_threads_per_session = 1
 default_subagent_model = "gpt-6-luna"
-default_subagent_reasoning_effort = "medium"
+default_subagent_reasoning_effort = "low"
 
 [mcp_servers.idea]
 enabled = false

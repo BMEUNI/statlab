@@ -23,41 +23,91 @@ Trust accepted evidence when candidate inputs match, including docs-only descend
 baseline tests. If state is uncertain, check affected files and focused evidence first. Missing
 temporary logs alone do not invalidate an accepted durable receipt. Missing/unverified source does.
 
-## Roles and implementation loop
+## Roles: planner/reviewer and mechanical implementer
 
-Main owns architecture, bounded specs, review, acceptance and plan/status updates. Main MUST NOT edit
-application source, tests, implementation configuration, or temporary mutation/probe source. Delegate
-all implementation and source mutation/restoration to an implementer. Main may edit workflow policy
-and plans and run read-only gates. Do not delegate a policy-only edit merely for ceremony.
+Main is the sole planner and reviewer. Main owns investigation, architecture, all design decisions,
+detailed implementation plans, review, acceptance and plan/status updates. Main MUST NOT write or edit
+a single line of application code, tests, implementation configuration, generated code, or temporary
+mutation/probe code, including through scripts, formatters, autofix, generators or restoration commands.
+Do not put executable implementation code or ready-to-apply source patches in plans or messages.
+Describe exact implementation steps in prose, signatures, data definitions and non-executable
+pseudocode. All code writing and source mutation/restoration belongs to the implementer, including
+one-line fixes and review corrections. No complexity, urgency or failed-worker exception.
 
-1. Follow index execution-batch order, not chunk numbers. Freeze exact owned files, behavior/API,
-   relevant decisions, focused selectors and stop conditions in the chunk's house-format spec.
-   Write the next dependent stage's detailed spec after its prerequisite handoff. Use existing
-   contracts; no speculative architecture. Test counts are estimates, never quotas.
-2. Spawn one writer with `fork_turns="none"` and a self-contained bounded assignment: task, owned
-   files, relevant spec/decision locations, prior stage's concise report, checks and stop conditions.
-   Do not copy full parent history. Tell worker it is not alone and must preserve others' edits.
-3. Use Luna `implementer` for narrow routine work. Use Sol `implementer_strong` for complex boundary,
-   async/concurrency or cross-module work, or after two unsuccessful focused correction rounds.
-   Both are implementation roles; main does not take over. Routine reasoning: medium; raise effort
-   for a named unresolved decision. Fresh worker per stage; reuse it for related corrections.
-   No dependent stages in parallel. Parallel agents require independent work, non-overlapping
-   ownership and explicit authorization.
-4. Worker implements -> focused tests -> fixes -> focused tests. Reports concise results, changed
-   files, candidate identity, commands/selectors, genuine exit codes, log paths and next-stage hazards.
-   Stop at focused green handoff. No worker commits, plan rewrites or architecture changes.
-5. Check terminal stage handoff for dependency/API blockers, then advance dependency-ready work.
-   Consolidate full batch review into one pass; send one concrete correction list where practical.
-   Before demanding a new defensive guard/test, identify a reachable failure and check existing
-   SDK/Pydantic guarantees. Do not bypass validators to manufacture unreachable coverage paths.
-   Re-review changed behavior/invariants; do not restart whole review after each fix.
-6. After stable review, main owns one final acceptance execution. Update chunk frontmatter,
-   index rows and the single Next heading only after acceptance. Commit only with user/workflow
-   authorization, stage exact files, never `git add .`, destructive reset, or push.
+Main may edit project workflow instructions, Codex agent settings, plans and acceptance receipts.
+Main may read source/diffs and run read-only inspection and validation commands. Do not delegate
+a policy-only edit merely for ceremony. Skills and old specs do not grant either role extra authority.
 
-Specs retain frontmatter (`status`, `dependencies`, `completion_date`, `implementation_notes`), goal,
-prerequisites/reuse, owned files, frozen behavior, tests, DoD/stop conditions. Record actual review
-corrections in a short addendum; do not copy global gates into every spec.
+The implementer only translates the planner's resolved plan into code and runs the specified checks.
+It has no independent design authority: no choosing algorithms, APIs, defaults, error policies,
+abstractions, dependencies, test cases or scope. Mechanical syntax/import/formatting work is allowed
+only to express the specified design. Missing decisions, contradictory instructions, unavailable
+helpers or unexpected failures return to main before any workaround or behavioral change.
+
+### Required plan before delegation
+
+Follow index execution-batch order, not chunk numbers. Main reads the affected source, every relevant
+caller and existing helpers before freezing the plan. Resolve design and SDK/Pydantic guarantees
+on main; do not ask the implementer to investigate, decide, infer intent or design a solution.
+Write the next dependent stage's detailed spec only after its prerequisite terminal handoff.
+
+Each stage spec retains frontmatter (`status`, `dependencies`, `completion_date`,
+`implementation_notes`) and the house format. Before spawning, it must contain:
+
+1. Goal, explicit non-goals, prerequisites, relevant PLAN decisions and accepted evidence to reuse.
+2. Exact owned files and symbols to add/change/remove; existing callers and integration seams.
+   Name the existing helpers/contracts to reuse with their locations. No unspecified file discovery.
+3. Exact public/private signatures, field types, defaults, return values and compatibility behavior
+   for affected interfaces. Spell out validation, error mapping and cancellation behavior.
+4. An ordered, per-file edit recipe. For each non-trivial function, give the algorithm/control flow,
+   branch conditions and outcomes, data transformations, operation ordering and side effects.
+   Specify state transitions, persistence/transaction boundaries and concurrency ownership when
+   applicable. The worker must not fill gaps with its own design.
+5. Boundary and edge-case decisions with concrete inputs and expected outputs/errors. State which
+   reachable invariants must remain preserved and how existing guarantees satisfy them.
+6. Exact tests to add/change, fixture/setup data, actions and assertions; exact focused selectors
+   and static-check commands. Include required mutation/replay recipes and restoration checks.
+   Honor active user restrictions on test execution. Test counts are estimates, never quotas.
+7. Acceptance/stop conditions, receipt fields and known dependency hazards. No unresolved design
+   questions, TBDs, alternatives for the worker to choose, or instructions such as "handle edge
+   cases", "choose a suitable design" or "fix as needed" without a resolved recipe.
+
+If a plan cannot provide these details, main continues read-only investigation and planning before
+delegating. A behavior summary or file list alone is not an implementation-ready plan.
+
+### Implementation and review loop
+
+1. Spawn one writer with `agent_type="implementer"` and `fork_turns="none"`. Only `gpt-6-luna`
+   with low reasoning is authorized for subagents. Never spawn Sol, `implementer_strong`, generic
+   workers, explorers, reviewers or other roles; never escalate model/effort after failures.
+   Check the available role configuration before source work: if it pins another model/effort,
+   report the runtime mismatch and require a fresh session rather than silently substituting.
+   No dependent stages in parallel. Additional independent implementers require explicit user
+   authorization and non-overlapping ownership. Implementers must never spawn subagents.
+2. Give a self-contained bounded assignment containing the detailed spec path, exact owned files,
+   relevant decision locations, prerequisite receipt, ordered recipe, checks and stop conditions.
+   Tell the implementer it is not alone and must preserve others' edits. Do not copy full history.
+   Use a fresh implementer per stage; reuse it for that stage's explicit correction plans.
+3. Implementer transcribes the plan and runs only specified, currently permitted focused checks.
+   On an unresolved decision or unexpected failure, it stops affected work and reports the exact
+   gap/failure, commands, exits and partial diff. It must not diagnose/design a fix independently,
+   weaken tests/validators, expand ownership or claim a failed check passed.
+4. Main diagnoses reported gaps read-only, updates the spec with a resolved correction recipe and
+   exact affected checks, then sends it to the same implementer. Main never applies the correction.
+   Repeated failures require a clearer/smaller plan, not Sol escalation or main implementation.
+5. Wait for the terminal stage receipt; inspect the complete diff against the plan and invariants,
+   focused evidence and dependency/API blockers. Advance only dependency-ready work. Consolidate
+   batch review into one pass and send one concrete correction plan where practical. Identify a
+   reachable failure and existing SDK/Pydantic guarantees before requiring a guard/test. Never
+   bypass validators to manufacture unreachable coverage paths. Re-review changed behavior only.
+6. After stable review, main owns one final acceptance execution under the validation policy and
+   active user test restrictions. Update chunk frontmatter, index rows and the single Next heading
+   only after acceptance. Commit only with user/workflow authorization; stage exact files, never
+   `git add .`, destructive reset, or push. No worker commits, plan rewrites or architecture changes.
+
+Record resolved review corrections in a short spec addendum before delegating them. Do not copy
+global gates into every spec. Worker receipts include changed files, candidate identity,
+commands/selectors, genuine exits, results, log paths, plan deviations and next-stage hazards.
 
 ## Waiting and runtime recovery
 
@@ -69,9 +119,9 @@ while meeting its communication requirements. Avoid reflex polling, repeated log
 
 If blocked without progress, inspect worker's pending command/approval/runtime state. Do not
 blindly kill processes or replace healthy workers. For FAILED/ERRORED/CANCELLED, report failure,
-preserve outputs, and retry only unfinished scope through an implementer. COMPLETED with unavailable
-result is an orchestration error: recover receipt, do not silently redo work. Runtime/configuration
-failure is distinct from a product defect; more reasoning will not fix it.
+preserve outputs, and retry only unfinished scope through an implementer with a resolved recovery plan.
+COMPLETED with unavailable result is an orchestration error: recover receipt, do not silently redo
+work. Runtime/configuration failure is distinct from a product defect; more reasoning will not fix it.
 
 ## Engineering invariants
 
@@ -95,8 +145,9 @@ failure is distinct from a product defect; more reasoning will not fix it.
 
 ### Tier 1 — implementation and corrections
 
-Only affected node IDs/modules or smallest relevant regression group, without coverage. Broaden
-when changed shared boundaries justify it. Targeted Ruff check/format; scoped mypy when useful.
+Main specifies affected node IDs/modules or the smallest relevant regression group, without coverage.
+Main broadens selectors only when changed shared boundaries justify it. Specify targeted Ruff
+check/format and scoped mypy when useful; implementer runs the exact planned commands.
 No full suite/global coverage/startup gates in the correction loop. Every normal pytest process
 uses the explicit 900-second subprocess timeout, including standalone replays through pytest:
 
@@ -120,9 +171,9 @@ Main runs `make check` once: equivalent to these four gates (no preceding full p
 .venv/bin/python -m ruff format --check .
 ```
 
-One actor owns expensive final execution. If explicitly delegated, inspect receipt rather than
-repeat it. Read actual exits, final pytest summary, coverage TOTAL, static summaries and relevant
-failures. Redirect large outputs to unique logs; do not infer success from grep/tail.
+Main alone owns expensive final execution; do not delegate global gates to the implementer or
+repeat them without changed inputs. Read actual exits, final pytest summary, coverage TOTAL, static
+summaries and relevant failures. Redirect large outputs to unique logs; do not infer success from grep/tail.
 
 ### Evidence reuse and retention
 
@@ -150,6 +201,7 @@ standalone replay is extra only when current spec requires it.
 
 Implementer owns mutations: 300-second subprocess timeout, asserted replacement counts, intended
 guard failure, restoration in `finally`, original-diff/hash comparison. Timeout/import failure is
-not a kill. Main reviews recipe and failure/restoration receipts. Repeat only changed properties.
+not a kill. Main specifies the exact recipe and reviews failure/restoration receipts. Repeat only
+changed properties.
 For required artifacts, main reads `report.md` and `pipeline.py` fully and inspects standalone replay
 receipt. Persist decisive facts so another session can reuse acceptance.

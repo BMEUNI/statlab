@@ -1,14 +1,41 @@
-# Codex workflow audit and setup — 2026-10-03
+# Codex workflow setup and historical audit
 
 Human reference; not startup reading. Execution/validation policy lives only in [AGENTS.md](../AGENTS.md).
 
-## Diagnosis
+## Current role policy — 2026-10-05
+
+Main is the sole planner/reviewer. Main investigates existing code read-only, resolves every design
+decision and writes a detailed implementation-ready stage spec before delegation. The spec names
+exact files/symbols, signatures/types/defaults, existing helpers, per-file algorithms and branches,
+ordering/state/concurrency/error behavior, concrete edge cases, test setup/assertions, commands and
+stop conditions. Follow [the required plan checklist](../AGENTS.md#required-plan-before-delegation).
+Main writes no application, test, generated or probe code, including corrections or restoration.
+Workflow policy, agent settings, plans and acceptance receipts are the permitted main edits.
+
+Only the `implementer` role may be spawned, with `fork_turns="none"`: `gpt-6-luna`, low reasoning,
+one writer. The implementer transcribes the resolved recipe and runs its specified permitted checks.
+It makes no design decisions or independent failure fixes. Gaps/failures return to main; main updates
+the plan before the implementer changes behavior. Complexity and failed corrections do not authorize
+Sol escalation. The project `implementer_strong` profile is removed. No nested subagents; the
+implementer profile sets `[agents].enabled = false`. Main owns review and final acceptance.
+
+Project [settings](../.codex/config.toml) retain Sol/high for main, set Luna/low worker defaults and
+cap spawned threads at one. The [implementer profile](../.codex/agents/implementer.toml) also pins
+Luna/low. Low reasoning is a model setting, not a guarantee of zero internal reasoning; the policy
+removes independent design authority. Official [OpenAI Docs on subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
+describe custom role configuration layers and model/effort defaults. Do not assume a running session
+has reloaded edited files; inspect its available role model/effort and start fresh if mismatched.
+
+The audit below records earlier evidence. Its historical model choices are superseded by this policy;
+accepted product receipts and engineering/validation requirements remain unchanged.
+
+## Historical diagnosis — 2026-10-03
 
 The planner/implementer split is reasonable. This session shows recovery overhead, large context,
 review churn and expensive evidence preparation. It does not isolate GPT versus Claude performance,
 and cannot establish that changing CLI alone makes equivalent work faster.
 
-Reviewed supplied [session export](../codex-session-01a0fd72-6a3d-7532-b1af-f1ed031e5ad2.md), its matching
+Reviewed supplied session export `codex-session-01a0fd72-6a3d-7532-b1af-f1ed031e5ad2.md`, its matching
 local rollout and three child rollouts; root AGENTS, all 27 existing plan Markdown files by procedural
 inventory/search and relevant sections; project/global Codex settings, agent definitions, hook config,
 Makefile and pyproject validation settings. This is a workflow audit, not a fresh product-code audit.
@@ -33,7 +60,7 @@ no Cave Score, money savings or analyzer-derived claims are available.
 Raw timing source: local `~/.codex/sessions/2026/10/02/rollout-2026-10-02T18-28-49-01a0fd72-6a3d-7532-b1af-f1ed031e5ad2.jsonl`
 and child rollouts identified by parent thread ID. No comparable Kiro session was provided.
 
-### Changes applied
+### Changes applied on 2026-10-03 (historical)
 
 - Shortened root AGENTS and made full-history worker forks opt-in rather than default.
 - Live state moved from 93,354 to 3,359 UTF-8 bytes. Previous continuation text retained verbatim
@@ -46,8 +73,9 @@ and child rollouts identified by parent thread ID. No comparable Kiro session wa
   full-suite-per-milestone wording in PLAN; corrected stale 86-tool / 31-decision summaries.
 - Preserved main/implementer separation, security, lineage, strict typing, 100% coverage and one
   final gate. Added durable receipt policy so temporary log expiry alone cannot restart acceptance.
-- Project uses Sol/medium for main, Luna/medium for routine implementer, and Sol/medium
-  `implementer_strong` for complex work or failed corrections. Worker escalation is explicit.
+- The audit originally set Sol/medium for main, Luna/medium for routine implementation and
+  Sol/medium `implementer_strong` for complex work or failed corrections. This model/escalation
+  policy is superseded by the 2026-10-05 role policy above.
 - Removed forced context capacity; automatic compaction now starts at 120,000 tokens. This is a
   starting experiment, not an official optimal value. If summaries lose relevant state, improve
   concise handoffs or adjust based on measured batches; do not restore 850k automatically.
@@ -55,7 +83,7 @@ and child rollouts identified by parent thread ID. No comparable Kiro session wa
   They add irrelevant tools or competing workflow directions here. PyCharm, RTK and other global
   tools remain available. No measured latency attribution to any disabled integration is claimed.
 
-### Starting the next batch
+## Starting the next batch
 
 Open a fresh CLI session from repository root, after current workers finish:
 
@@ -69,22 +97,19 @@ changed. Start fresh for these defaults. Check `/agent` for the worker's actual 
 
 Suggested prompt:
 
-> Continue B7 from plan/WHATS_NEXT.md. Follow root AGENTS. Specify chunk 22, then delegate implementation
-> to implementer_strong with fork_turns="none" and bounded inputs. Reuse accepted B6 evidence. Complete
-> dependency-ready B7 stages, consolidated review and one final acceptance gate. No commit or push.
+> Continue B13 from plan/WHATS_NEXT.md. Main plans and reviews only; write no code. Read chunk33's
+> dependencies and existing seams, then write its detailed resolved per-file recipe under root AGENTS.
+> Delegate only to implementer with fork_turns="none", Luna/low. Return missing decisions/failures to
+> main for explicit correction plans. After33's terminal handoff, specify34; keep stages sequential.
+> Preserve accepted evidence and the current user stop on runtime tests. Follow current commit authority;
+> never push.
 
-Routine narrow task: Luna/medium worker. Complex engine, restart, cancellation or audit boundary:
-Sol/medium worker from the start. Reserve high reasoning for a named design or review uncertainty:
+All implementation, including complex engine/restart/cancellation boundaries, uses Luna/low.
+Main does the complex reasoning before delegation. When a plan fails, main diagnoses the failure
+read-only and supplies a smaller or clearer correction recipe. Never raise worker model/effort or
+take over code writing. A CLI/session override must not silently bypass this project role policy.
 
-```sh
-codex -m gpt-6.1-sol -c 'model_reasoning_effort="high"'
-```
-
-The CLI override outranks project defaults. Avoid setting all workers to a weak model just because
-per-token price is lower; correction time matters. Conversely, high/max reasoning everywhere is not
-required to preserve quality. Compare outcomes on similarly scoped tasks.
-
-### Optional CLI choices
+## Optional CLI choices
 
 - `/fast` trades higher usage for lower latency on supported models/accounts. Not enabled here.
   Current docs: included limits consumed at 2.5x Standard; purchased credits/PAYG at 2x. These are
@@ -92,23 +117,23 @@ required to preserve quality. Compare outcomes on similarly scoped tasks.
 - If runtime repeatedly fails to load workspace requirements, finish/stop affected workers, run
   `codex doctor --summary`, then try a fresh `codex --no-daemon` session to isolate shared-daemon state.
   This is diagnosis, not a proven fix. Do not keep resubmitting product work into a broken runtime.
-- Keep one writer for dependent stages. More concurrency does not shorten a serial dependency chain.
-  Use separate agents for independent read-only audits only when useful and explicitly authorized.
+- Keep one implementer for dependent stages. Main performs investigation and reviews itself;
+  additional independent implementers require explicit user authorization and non-overlapping ownership.
 - Keep useful integrations; disable others per project. No need to uninstall global plugins or loosen
   approval/sandbox/network policy for speed. RTK reduces output volume; it does not accelerate inference.
 - Current CLI 0.160.0 uses separate profile files (`~/.codex/<name>.config.toml`). Old `[profiles.name]`
   recipes are obsolete since 0.134.0. Project settings override profile settings; use `-c` for a deliberate
   one-off override here. See [Advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced).
 
-### Measure next two comparable batches
+## Measure next two comparable batches
 
 Record start/end and interruptions separately; first focused green time; correction rounds; final
 acceptance duration; parent/worker model+effort and final input size. Success means less elapsed
 active work while all acceptance requirements pass, not fewer tests or a smaller token bill alone.
-If Luna needs repeated corrections, compare the next comparable task with Sol as implementer.
+If Luna needs repeated corrections, inspect which plan details were missing and improve the next recipe.
 No six-hour-to-X-minute promise follows from this one interrupted session.
 
-## Validation and reversibility
+## Historical validation and reversibility — 2026-10-03
 
 Only workflow/planning/Codex files changed. No product gates rerun: B6 source/test/runtime-test config
 remain untouched. Worker TOML/settings assertions exited 0. Main inspected config diff and doctor

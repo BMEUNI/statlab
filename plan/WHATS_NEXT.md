@@ -32,7 +32,10 @@ lifecycle/GateService/ForkService, revision callback and tabular retained-report
 API caller owns registry, execution/continuation tasks and shutdown drain; use real same-run
 audit_anchor for inbound controls. Install gate reconciliation before restart scans. Supply
 durable request IDs for retried direct forks. Do not replace services with classification alone.
-Keep dependent stages sequential. Main owns architecture/review/acceptance; implementers own source.
+Keep dependent stages sequential. Main owns all design decisions, detailed per-file recipes,
+review and acceptance; main writes no code. Delegate only implementation-ready plans to the Luna/low
+`implementer`. Missing decisions/failures return to main for a resolved correction plan. No Sol workers
+or model escalation. Follow [role and plan requirements](../AGENTS.md#roles-plannerreviewer-and-mechanical-implementer).
 User authorizes automatic local commits after finished work; never push. Runtime tests remain
 stopped by user; use focused statics and one final global static gate, disclose runtime gaps.
 
