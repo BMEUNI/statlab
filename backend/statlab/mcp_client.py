@@ -16,7 +16,7 @@ import httpx2
 from jsonschema import Draft202012Validator, SchemaError
 from pydantic import JsonValue, ValidationError
 from statlab_contracts.artifacts import ARTIFACT_ID_PATTERN, ArtifactMeta, ArtifactRef
-from statlab_contracts.contract import DataContract
+from statlab_contracts.contract import DataContract, DatasetOptions
 from statlab_contracts.envelope import (
     ORCHESTRATOR_SUPPLIED,
     TOOL_RESULT_ADAPTER,
@@ -191,6 +191,110 @@ class McpClient:
             for name, spec in self.tools.items()
             if node in spec.allow_in or spec.allow_in == ("*",)
         )
+
+    async def setup_dataset(
+        self,
+        *,
+        project: str,
+        dataset: str,
+        options: DatasetOptions,
+        contract: DataContract | None = None,
+    ) -> ToolSuccess:
+        """Dispatch the one fixed pre-run setup tool without run-scoped accounting."""
+        if self._session is None:
+            raise EngineError("MCP client is not entered")
+        if get_project_by_slug(self.conn, project) is None:
+            raise EngineError("setup project does not exist")
+        spec = self.tools.get("setup_dataset")
+        if (
+            spec is None
+            or spec.phase != "setup"
+            or spec.allow_in != ("setup",)
+            or spec.heavy
+            or spec.transform_only
+        ):
+            raise EngineError("setup_dataset registry metadata is invalid")
+        arguments: dict[str, JsonValue] = {
+            "project": project,
+            "dataset": dataset,
+            "options": options.model_dump(mode="json"),
+        }
+        if contract is not None:
+            arguments["contract"] = contract.model_dump(mode="json")
+        try:
+            json.dumps(arguments, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ToolCallError(
+                "setup_dataset",
+                Failure(
+                    error_class="tool_param",
+                    message="tool parameters must be strict JSON",
+                    field_errors={"params": "parameter values must be finite JSON values"},
+                ),
+                cause=exc,
+            ) from exc
+        errors = self._schema_errors(spec, arguments)
+        if errors:
+            raise ToolCallError(
+                "setup_dataset",
+                Failure(
+                    error_class="tool_param",
+                    message="tool parameters do not match served schema",
+                    field_errors=errors,
+                ),
+            )
+        try:
+            result = await cast("ClientSession", self._session).call_tool(
+                "setup_dataset", arguments, read_timeout_seconds=900
+            )
+        except asyncio.CancelledError:
+            raise
+        except (httpx2.HTTPError, OSError, TimeoutError) as exc:
+            raise ToolCallError(
+                "setup_dataset",
+                ToolFailure(error_class="transient", message="MCP dispatch failed"),
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            from mcp.shared.exceptions import MCPError
+            from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
+
+            transient = isinstance(exc, MCPError) and exc.code in (
+                REQUEST_TIMEOUT,
+                CONNECTION_CLOSED,
+            )
+            raise ToolCallError(
+                "setup_dataset",
+                ToolFailure(
+                    error_class="transient" if transient else "bug",
+                    message="MCP dispatch failed",
+                ),
+                cause=exc,
+            ) from exc
+        from mcp.types import CallToolResult
+
+        if not isinstance(result, CallToolResult) or result.structured_content is None:
+            raise ToolCallError(
+                "setup_dataset", Failure(error_class="bug", message="malformed MCP tool result")
+            )
+        structured = result.structured_content
+        raw = structured.get("result") if isinstance(structured, Mapping) else None
+        try:
+            validated = TOOL_RESULT_ADAPTER.validate_python(raw)
+        except Exception as exc:
+            raise ToolCallError(
+                "setup_dataset",
+                Failure(error_class="bug", message="malformed tool envelope"),
+                cause=exc,
+            ) from exc
+        if isinstance(validated, ToolFailure):
+            raise ToolCallError("setup_dataset", validated)
+        if validated.artifacts:
+            raise ToolCallError(
+                "setup_dataset",
+                Failure(error_class="bug", message="setup tool returned unexpected artifacts"),
+            )
+        return validated
 
     async def call(
         self,

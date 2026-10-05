@@ -25,6 +25,7 @@ from statlab.persistence.models import ProjectRow, RunRow, RunStatus
 from statlab.persistence.repository import (
     claim_test_scoring,
     create_node_execution,
+    create_project,
     ensure_candidate,
     finish_node_execution,
     get_run,
@@ -742,3 +743,201 @@ async def test_malformed_interrupted_summary_fails_before_dispatch(engine_world:
     with pytest.raises(PersistenceError, match="preparation"):
         await recover(service(engine_world, nodes), engine_world)
     assert len(list_node_executions(engine_world.conn, initial.run_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_projects_prepares_all_projects_and_enforces_capacity(
+    engine_world: World,
+    project: ProjectRow,
+    minimal_contract: DataContract,
+    tmp_path: Path,
+) -> None:
+    nodes = (node(),)
+    second_project = create_project(engine_world.conn, slug="second-recovery", name="Second")
+    second = new_world(
+        engine_world.conn,
+        second_project,
+        minimal_contract,
+        tmp_path / "second",
+        data_dir=engine_world.paths.data_dir,
+    )
+    worlds = (engine_world, second)
+    original_attempt_ids: list[str] = []
+    for world in worlds:
+        initial = world.initial(nodes)
+        Checkpointer(world.paths).save(initial)
+        update_run_status(world.conn, initial.run_id, status="running")
+        attempt = create_node_execution(
+            world.conn, run_id=initial.run_id, node_name=nodes[0].name, seq=1
+        )
+        original_attempt_ids.append(attempt.id)
+
+    entered: list[str] = []
+    tracker = RunTracker()
+
+    async def executor(invocation: NodeInvocation) -> NodeResult:
+        rows = tuple(
+            row
+            for world in worlds
+            for row in list_node_executions(world.conn, world.paths.run_id)
+            if row.id in original_attempt_ids
+        )
+        assert len(rows) == 2
+        assert all(
+            row.status == "failed"
+            and row.ended_at is not None
+            and row.error is not None
+            and "process terminated" in row.error
+            for row in rows
+        )
+        entered.append(invocation.state.run_id)
+        return await complete(invocation)
+
+    bindings: dict[str, RecoveryBinding] = {}
+    for world in worlds:
+        lifecycle = RunLifecycle(world.loop(nodes, executor, tracker), world.initial(nodes))
+        bindings[world.paths.run_id] = RecoveryBinding(lifecycle.loop, lifecycle.initial, lifecycle)
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        return bindings[row.id]
+
+    reconciler = RestartReconciler(conn=engine_world.conn, resolver=resolve, tracker=tracker)
+    with pytest.raises(EngineError):
+        await reconciler.reconcile_projects((project.id, second_project.id), max_concurrent_runs=1)
+    assert entered == []
+    batch = await reconciler.reconcile_projects((project.id, project.id, second_project.id))
+    assert len(batch.tasks) == 2
+    assert {task.get_name() for task in batch.tasks} == {
+        "statlab-run:" + world.paths.run_id for world in worlds
+    }
+    assert {state.run_id for state in await asyncio.gather(*batch.tasks)} == set(bindings)
+    assert set(entered) == set(bindings)
+    assert all(
+        [row.attempt for row in list_node_executions(world.conn, world.paths.run_id)] == [1, 2]
+        for world in worlds
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_projects_negative_cap_prepares_nothing(engine_world: World) -> None:
+    calls: list[str] = []
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        calls.append(row.id)
+        raise AssertionError("negative capacity must be rejected before preparation")
+
+    reconciler = RestartReconciler(conn=engine_world.conn, resolver=resolve, tracker=RunTracker())
+    row = get_run(engine_world.conn, engine_world.paths.run_id)
+    assert row is not None
+    update_run_status(engine_world.conn, row.id, status="running")
+    with pytest.raises(EngineError):
+        await reconciler.reconcile_projects((row.project_id,), max_concurrent_runs=-1)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_projects_corrupt_second_run_starts_no_first_run(
+    engine_world: World,
+    project: ProjectRow,
+    minimal_contract: DataContract,
+    tmp_path: Path,
+) -> None:
+    nodes = (node(),)
+    second_project = create_project(engine_world.conn, slug="corrupt-second", name="Second")
+    second = new_world(
+        engine_world.conn,
+        second_project,
+        minimal_contract,
+        tmp_path / "second",
+        data_dir=engine_world.paths.data_dir,
+    )
+    worlds = (engine_world, second)
+    tracker = RunTracker()
+    bindings: dict[str, RecoveryBinding] = {}
+    for world in worlds:
+        initial = world.initial(nodes)
+        Checkpointer(world.paths).save(initial)
+        lifecycle = RunLifecycle(world.loop(nodes, complete, tracker), initial)
+        bindings[initial.run_id] = RecoveryBinding(lifecycle.loop, initial, lifecycle)
+    second.paths.state_json.write_text("corrupt", encoding="utf-8")
+    resolved: list[str] = []
+    entered: list[str] = []
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        resolved.append(row.id)
+        return bindings[row.id]
+
+    async def executor(invocation: NodeInvocation) -> NodeResult:
+        entered.append(invocation.state.run_id)
+        return await complete(invocation)
+
+    for binding in bindings.values():
+        binding.loop.executor = executor
+    reconciler = RestartReconciler(conn=engine_world.conn, resolver=resolve, tracker=tracker)
+    with pytest.raises(PersistenceError):
+        await reconciler.reconcile_projects((project.id, second_project.id))
+    assert set(resolved) == set(bindings)
+    assert entered == []
+    assert all(not list_node_executions(world.conn, world.paths.run_id) for world in worlds)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_projects_discovers_child_created_during_scan(
+    engine_world: World,
+    project: ProjectRow,
+    minimal_contract: DataContract,
+    tmp_path: Path,
+) -> None:
+    nodes = (node(),)
+    original = engine_world
+    initial = original.initial(nodes)
+    Checkpointer(original.paths).save(initial)
+    tracker = RunTracker()
+    bindings: dict[str, RecoveryBinding] = {}
+    original_lifecycle = RunLifecycle(original.loop(nodes, complete, tracker), initial)
+    bindings[initial.run_id] = RecoveryBinding(original_lifecycle.loop, initial, original_lifecycle)
+    created: list[str] = []
+    resolved: list[str] = []
+    entered: list[str] = []
+    expected: set[str] = set()
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        resolved.append(row.id)
+        return bindings[row.id]
+
+    async def executor(invocation: NodeInvocation) -> NodeResult:
+        assert set(resolved) == expected
+        entered.append(invocation.state.run_id)
+        return await complete(invocation)
+
+    async def gate_reconciler(state: RunState) -> RunState:
+        if not created:
+            child = new_world(
+                original.conn,
+                project,
+                minimal_contract,
+                tmp_path / "child",
+                data_dir=original.paths.data_dir,
+            )
+            child_state = child.initial(nodes)
+            Checkpointer(child.paths).save(child_state)
+            child_lifecycle = RunLifecycle(child.loop(nodes, executor, tracker), child_state)
+            bindings[child_state.run_id] = RecoveryBinding(
+                child_lifecycle.loop, child_state, child_lifecycle
+            )
+            created.append(child_state.run_id)
+        return state
+
+    original_lifecycle.loop.gate_reconciler = gate_reconciler
+
+    original_lifecycle.loop.executor = executor
+    reconciler = RestartReconciler(conn=original.conn, resolver=resolve, tracker=tracker)
+    batch = await reconciler.reconcile_projects((project.id,))
+    expected = set(bindings)
+    assert len(batch.tasks) == 2
+    assert {task.get_name() for task in batch.tasks} == {
+        "statlab-run:" + run_id for run_id in expected
+    }
+    assert {state.run_id for state in await asyncio.gather(*batch.tasks)} == expected
+    assert set(resolved) == expected
+    assert set(entered) == expected

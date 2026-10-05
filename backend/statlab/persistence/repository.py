@@ -46,14 +46,100 @@ from statlab.persistence.models import (
     GateRow,
     LlmCallRow,
     MemoryRow,
+    MessageRole,
+    MessageRow,
     ModelRow,
     NodeExecutionRow,
     ProjectRow,
     RunMode,
     RunRow,
     RunStatus,
+    SessionRow,
     ToolCallRow,
 )
+
+
+def create_session(conn: sqlite3.Connection, *, project_id: str, title: str) -> SessionRow:
+    if not title.strip() or len(title) > 200:
+        raise PersistenceError("invalid session title")
+    session_id, created_at = new_id("s"), utc_now()
+    try:
+        with transaction(conn):
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, title, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, project_id, title, created_at),
+            )
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return SessionRow.model_validate(dict(row))
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot create session", cause=exc) from exc
+
+
+def get_session(conn: sqlite3.Connection, session_id: str) -> SessionRow | None:
+    try:
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return SessionRow.model_validate(dict(row)) if row is not None else None
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read session", cause=exc) from exc
+
+
+def create_message(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    run_id: str,
+    role: MessageRole,
+    content: str,
+    meta: dict[str, JsonValue] | None = None,
+) -> MessageRow:
+    if not content.strip() or len(content) > 8000:
+        raise PersistenceError("invalid message content")
+    try:
+        meta_json = json.dumps(meta or {}, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        TypeAdapter(dict[str, JsonValue]).validate_json(meta_json, strict=True)
+        message_id, ts = new_id("msg"), utc_now()
+        with transaction(conn):
+            owner = conn.execute(
+                "SELECT s.project_id AS project_id FROM sessions s "
+                "JOIN runs r ON r.id = ? WHERE s.id = ? AND s.project_id = r.project_id",
+                (run_id, session_id),
+            ).fetchone()
+            if owner is None:
+                raise PersistenceError("message session/run ownership mismatch")
+            conn.execute(
+                "INSERT INTO messages (id, session_id, run_id, role, content, meta_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (message_id, session_id, run_id, role, content, meta_json, ts),
+            )
+            row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return MessageRow.model_validate(dict(row))
+    except PersistenceError:
+        raise
+    except (sqlite3.Error, ValidationError, ValueError, TypeError) as exc:
+        raise PersistenceError("cannot create message", cause=exc) from exc
+
+
+def list_messages(
+    conn: sqlite3.Connection, session_id: str, *, limit: int = 20
+) -> tuple[MessageRow, ...]:
+    if not 1 <= limit <= 20:
+        raise PersistenceError("invalid message limit")
+    try:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY rowid DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        return tuple(MessageRow.model_validate(dict(row)) for row in reversed(rows))
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot list messages", cause=exc) from exc
+
+
+def get_message(conn: sqlite3.Connection, message_id: str) -> MessageRow | None:
+    try:
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return MessageRow.model_validate(dict(row)) if row is not None else None
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read message", cause=exc) from exc
 
 
 def _wrap_integrity_error(exc: sqlite3.IntegrityError, *, constraint: str) -> PersistenceError:

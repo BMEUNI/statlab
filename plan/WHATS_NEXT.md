@@ -6,10 +6,11 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**33 of 41 chunks implemented, plus revisions 09r and 20r. B12 reviewed with static-only acceptance 2026-10-05.**
-B9–B12 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
+**35 of 41 chunks implemented, plus revisions 09r and 20r. B13 reviewed with static-only acceptance 2026-10-05.**
+B9–B13 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
 batch with full behavioral/coverage acceptance. [B9 receipt](./receipts/B9.md),
-[B10 receipt](./receipts/B10.md), [B11 receipt](./receipts/B11.md) and [B12 receipt](./receipts/B12.md)
+[B10 receipt](./receipts/B10.md), [B11 receipt](./receipts/B11.md), [B12 receipt](./receipts/B12.md)
+and [B13 receipt](./receipts/B13.md)
 record this limit. B9 committed at `31bdf67`.
 B7 committed at `1e9fe6a`; B6 committed at `de2aa83`. Phases A/B and M7b complete.
 
@@ -23,15 +24,14 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B13 (chunks33–34, API projects then API runs)
+## Next: batch B14 (chunks35–36, SSE then frontend scaffold; not started)
 
-Write chunk33's bounded detailed spec from its dependency rows and relevant PLAN decisions:
-project persistence, bounded dataset upload and contract validate/propose using existing seams.
-After33's terminal handoff, write34's detailed run API spec. Bind fresh per-run runtime/loop/
-lifecycle/GateService/ForkService, revision callback and tabular retained-report publisher.
-API caller owns registry, execution/continuation tasks and shutdown drain; use real same-run
-audit_anchor for inbound controls. Install gate reconciliation before restart scans. Supply
-durable request IDs for retried direct forks. Do not replace services with classification alone.
+Read B14 dependency rows and relevant PLAN decisions before its bounded detailed specs.
+B13 is finished; B14 has no new spec or delegation in this batch. Preserve B13's fresh per-run
+runtime/loop/lifecycle/GateService/ForkService, revision callback and tabular retained-report
+publisher. API caller owns registry, execution/continuation tasks and shutdown drain; inbound
+controls use real same-run audit_anchor. Gate reconciliation precedes restart scans. Retried
+direct forks require durable request IDs; real service callbacks perform control actions.
 Keep dependent stages sequential. Main owns all design decisions, detailed per-file recipes,
 review and acceptance; main writes no code. Delegate only implementation-ready plans to the Luna/low
 `implementer`. Missing decisions/failures return to main for a resolved correction plan. No Sol workers
@@ -58,8 +58,10 @@ stopped by user; use focused statics and one final global static gate, disclose 
 - Restart cursor/checkpoint remains authority, including repeated design and branch gates.
   `RestartReconciler` prepares a full scan before scheduling; caller owns returned tasks.
   Interrupted attempts retain audit/test claims and artifacts; paused/awaiting remain dormant.
-  B12 supplies callable lifecycle, gate reconciliation and fork services. Boot/API wiring,
-  registry and continuation scheduling remain33–34; behavior is runtime-unverified.
+  B12 supplies callable lifecycle, gate reconciliation and fork services. B13 supplies boot/API
+  wiring, registry and continuation scheduling; all-project preparation precedes admission.
+  Capacity-denied accepted gates/forks remain durable; retries do not duplicate children/tasks.
+  Shutdown drains admitted HTTP and execution work before MCP/SQL close; behavior is runtime-unverified.
 - Domain tool calls must use `ToolBoundary` with the entered B6 client and unchanged allowed
   context. Heavy budget is SQL-audited admission; admitted concurrent fits may overshoot.
   Explicit controls drain calls; ordinary cancellation retains identity. No thread preemption.
@@ -88,7 +90,6 @@ stopped by user; use focused statics and one final global static gate, disclose 
 
 | Responsibility | Owner |
 |---|---|
-| API service binding, lifecycle/gate continuation tasks and restart boot wiring | 33–34 |
 | SSE delivery and browser shell | B14 |
 | Chat workspace | B15 / 38 |
 | Remaining table repositories | First real caller's chunk |

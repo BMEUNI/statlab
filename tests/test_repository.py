@@ -8,7 +8,7 @@ from unittest.mock import patch as mock_patch
 
 import pytest
 from statlab.errors import PersistenceError
-from statlab.persistence.db import connect
+from statlab.persistence.db import connect, transaction
 from statlab.persistence.ids import new_id, parse_ts
 from statlab.persistence.models import ProjectRow, RunRow
 from statlab.persistence.repository import (
@@ -16,19 +16,24 @@ from statlab.persistence.repository import (
     count_prior_test_scorings,
     create_contract,
     create_dataset,
+    create_message,
     create_node_execution,
     create_project,
     create_run,
+    create_session,
     ensure_candidate,
     find_dataset_by_hash,
     get_champion_model,
     get_contract,
     get_dataset,
+    get_message,
     get_model,
     get_project,
     get_project_by_slug,
     get_run,
+    get_session,
     latest_contract,
+    list_messages,
     list_projects,
     list_runs,
     record_tool_call,
@@ -1247,3 +1252,131 @@ def test_b11_outcome_memory_exact_retry_conflict_and_provenance(
     other = create_project(migrated_db, slug="other-outcome", name="Other")
     with pytest.raises(PersistenceError, match="provenance"):
         remember_run_outcome(migrated_db, project_id=other.id, run_id=run.id, value={})
+
+
+def test_session_message_round_trip_limits_ownership_and_strict_metadata(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    contract: DataContract,
+    tmp_path: Path,
+) -> None:
+    from statlab.persistence.repository import get_run
+
+    contract_row = create_contract(
+        migrated_db, project_id=project.id, path=tmp_path / "contract.json", contract=contract
+    )
+    run = create_run(
+        migrated_db,
+        project_id=project.id,
+        contract_id=contract_row.id,
+        mode="guided",
+        config_json="{}",
+    )
+    session = create_session(migrated_db, project_id=project.id, title="Demo")
+    assert get_session(migrated_db, session.id) == session
+    assert get_session(migrated_db, "s_missing") is None
+    assert session.created_at
+    user = create_message(
+        migrated_db,
+        session_id=session.id,
+        run_id=run.id,
+        role="user",
+        content=" hello ",
+        meta={"category": "status"},
+    )
+    assistant = create_message(
+        migrated_db,
+        session_id=session.id,
+        run_id=run.id,
+        role="assistant",
+        content="Status.",
+    )
+    assert user.metadata() == {"category": "status"}
+    assert assistant.metadata() == {}
+    assert user.ts and assistant.ts
+    assert user.content == " hello "
+    assert list_messages(migrated_db, session.id) == (user, assistant)
+    assert get_message(migrated_db, user.id) == user
+    assert get_message(migrated_db, "msg_missing") is None
+
+    inserted: list[str] = []
+    for index in range(23):
+        inserted.append(
+            create_message(
+                migrated_db,
+                session_id=session.id,
+                run_id=run.id,
+                role="user",
+                content=f"message {index}",
+            ).id
+        )
+    with transaction(migrated_db):
+        migrated_db.execute(
+            "UPDATE messages SET ts = ? WHERE session_id = ?", ("same-time", session.id)
+        )
+    assert tuple(row.id for row in list_messages(migrated_db, session.id)) == tuple(inserted[-20:])
+    for limit in (0, 21):
+        with pytest.raises(PersistenceError):
+            list_messages(migrated_db, session.id, limit=limit)
+
+    other = create_project(migrated_db, slug="other-session", name="Other")
+    other_session = create_session(migrated_db, project_id=other.id, title="Other")
+    before_sessions = migrated_db.execute("SELECT count(*) FROM sessions").fetchone()[0]
+    before_messages = migrated_db.execute("SELECT count(*) FROM messages").fetchone()[0]
+    with pytest.raises(PersistenceError):
+        create_message(
+            migrated_db, session_id=other_session.id, run_id=run.id, role="user", content="x"
+        )
+    with pytest.raises(PersistenceError):
+        create_message(
+            migrated_db, session_id=session.id, run_id="r_missing", role="user", content="x"
+        )
+    with pytest.raises(PersistenceError):
+        create_message(migrated_db, session_id="s_missing", run_id=run.id, role="user", content="x")
+    for title in ("", " ", "x" * 201):
+        with pytest.raises(PersistenceError):
+            create_session(migrated_db, project_id=project.id, title=title)
+    for content in ("", " ", "x" * 8001):
+        with pytest.raises(PersistenceError):
+            create_message(
+                migrated_db, session_id=session.id, run_id=run.id, role="user", content=content
+            )
+    with pytest.raises(PersistenceError):
+        create_message(
+            migrated_db,
+            session_id=session.id,
+            run_id=run.id,
+            role="user",
+            content="x",
+            meta={"bad": float("nan")},
+        )
+    assert migrated_db.execute("SELECT count(*) FROM sessions").fetchone()[0] == before_sessions
+    assert migrated_db.execute("SELECT count(*) FROM messages").fetchone()[0] == before_messages
+    with transaction(migrated_db):
+        migrated_db.execute(
+            "UPDATE messages SET meta_json = ? WHERE id = ?", ('{"bad":NaN}', user.id)
+        )
+    corrupted = get_message(migrated_db, user.id)
+    assert corrupted is not None
+    with pytest.raises(PersistenceError):
+        corrupted.metadata()
+    assert get_run(migrated_db, run.id) == run
+
+
+def test_session_message_wrap_closed_connection(
+    migrated_db: sqlite3.Connection, project: ProjectRow
+) -> None:
+    from statlab.persistence.repository import get_message
+
+    closed = sqlite3.connect(":memory:")
+    closed.close()
+    with pytest.raises(PersistenceError):
+        get_session(closed, "s_missing")
+    with pytest.raises(PersistenceError):
+        get_message(closed, "msg_missing")
+    with pytest.raises(PersistenceError):
+        list_messages(closed, "s_missing")
+    with pytest.raises(PersistenceError):
+        create_session(closed, project_id=project.id, title="Demo")
+    with pytest.raises(PersistenceError):
+        create_message(closed, session_id="s_missing", run_id="r_missing", role="user", content="x")

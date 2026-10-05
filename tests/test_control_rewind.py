@@ -489,3 +489,36 @@ async def test_fork_after_champion_keeps_score_provenance_and_independent_report
     assert child_report.read_bytes() == report
     child_report.write_bytes(b"child report publication")
     assert (engine_world.paths.report / "report.md").read_bytes() == report
+
+
+@pytest.mark.asyncio
+async def test_fork_retry_rejects_a_different_target_without_side_effects(
+    engine_world: World,
+) -> None:
+    nodes = (node("first"), node("second"))
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    await lifecycle.start()
+    immutable_inputs(engine_world)
+    forks = service_for(engine_world, lifecycle, nodes)
+    parent = get_run(engine_world.conn, lifecycle.initial.run_id)
+    assert parent is not None
+    original = await forks.fork("first", request_id="retry")
+    retried = await forks.fork("first", request_id="retry")
+    assert retried.new_run_id == original.new_run_id
+    runs_root = engine_world.paths.root.parent
+    rows = list_runs(engine_world.conn, parent.project_id)
+    executions = list_node_executions(engine_world.conn, lifecycle.initial.run_id)
+    checkpoint = engine_world.paths.state_json.read_bytes()
+    events = await lifecycle.loop.events.replay()
+    entries = tuple(sorted(path.relative_to(runs_root).as_posix() for path in runs_root.rglob("*")))
+    assert sum(row.forked_from_run_id == parent.id for row in rows) == 1
+    with pytest.raises(EngineError, match="target"):
+        await forks.fork("second", request_id="retry")
+    assert list_runs(engine_world.conn, parent.project_id) == rows
+    assert list_node_executions(engine_world.conn, lifecycle.initial.run_id) == executions
+    assert engine_world.paths.state_json.read_bytes() == checkpoint
+    assert await lifecycle.loop.events.replay() == events
+    assert (
+        tuple(sorted(path.relative_to(runs_root).as_posix() for path in runs_root.rglob("*")))
+        == entries
+    )

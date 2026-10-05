@@ -152,7 +152,7 @@ class ForkService:
         self.parent, self.resolver, self.publish_domain = parent, resolver, publish_domain
         self.conn, self.paths = parent.loop.conn, parent.loop.checkpointer.paths
 
-    def _existing(self, request_id: str) -> ForkResult | None:
+    def _existing(self, request_id: str, *, target: str) -> ForkResult | None:
         parent_row = get_run(self.conn, self.paths.run_id)
         if parent_row is None:
             raise PersistenceError("fork parent does not exist")
@@ -166,6 +166,8 @@ class ForkService:
                 and fork.get("request_id") == request_id
                 and fork.get("published") is True
             ):
+                if fork.get("target") != target:
+                    raise EngineError("fork request target differs")
                 paths = RunPaths(self.paths.data_dir, self.paths.slug, row.id)
                 state = Checkpointer(paths).load(
                     spine_id=self.parent.initial.spine_id, spine=self.parent.initial.spine
@@ -195,7 +197,7 @@ class ForkService:
         await self.parent.halt_for_fork()
         async with self.parent.exclusive():
             if request_id is not None:
-                existing = self._existing(request_id)
+                existing = self._existing(request_id, target=target)
                 if existing is not None:
                     await self._finish_parent(
                         await self.parent.state(),
@@ -321,7 +323,12 @@ class ForkService:
         return (await self.fork(target, request_id=request_id)).new_run_id
 
     async def handle(
-        self, message: str, classified: InterruptClass, context: ControlContext
+        self,
+        message: str,
+        classified: InterruptClass,
+        context: ControlContext,
+        *,
+        request_id: str | None = None,
     ) -> ControlResponse:
         if (
             classified.category != "change"
@@ -347,7 +354,7 @@ class ForkService:
             ),
             recovery=context.recovery,
         )
-        fork = await self.fork(intent.target)
+        fork = await self.fork(intent.target, request_id=request_id)
         return ControlResponse(
             category="change",
             text=(

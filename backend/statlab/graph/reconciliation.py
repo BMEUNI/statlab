@@ -55,62 +55,87 @@ class RestartReconciler:
         self.conn, self.resolver, self.tracker = conn, resolver, tracker
 
     async def reconcile(self, project_id: str) -> RecoveryBatch:
-        """Prepare the complete scan before creating even the first execution task."""
+        return await self.reconcile_projects((project_id,))
+
+    async def reconcile_projects(
+        self, project_ids: tuple[str, ...], *, max_concurrent_runs: int = 0
+    ) -> RecoveryBatch:
+        """Prepare every supplied project before creating any execution task."""
+        if max_concurrent_runs < 0:
+            raise EngineError("run capacity must not be negative")
         runnable: list[RecoveryBinding] = []
         dormant: list[RunState] = []
+        seen: set[str] = set()
+        projects = tuple(dict.fromkeys(project_ids))
         try:
-            for row in list_runs(self.conn, project_id):
-                if row.status in ("completed", "failed", "cancelled", "superseded") and not any(
-                    gate.status in ("answered", "prepared", "applied")
-                    for gate in list_gates(self.conn, row.id)
-                ):
-                    continue
-                binding = self.resolver(row)
-                loop = binding.loop
-                if loop.tracker is not self.tracker:
-                    raise EngineError("recovery requires shared run tracker")
-                state = await loop.load_state(binding.initial, row)
-                if loop.gate_reconciler is not None:
-                    state = await loop.gate_reconciler(state)
-                    # Accepted answers may have prepared state before SQL/event repair.
-                    row = get_run(self.conn, row.id) or row
-                if row.status in ("paused", "cancelled", "superseded"):
-                    # Validate projection rather than bypassing RunState's pending-result rules.
-                    state = RunState.model_validate({**state.model_dump(), "status": row.status})
-                await self._repair_boundaries(loop, state)
-                if row.status == "running":
-                    await self._interrupt(loop, state)
-                if state.status not in ("pending", "running"):
-                    loop.checkpointer.save(state)
-                    if row.status != state.status:
-                        await loop._status(
-                            state,
-                            state.spine[state.cursor].name
-                            if state.cursor < len(state.spine)
-                            else None,
-                        )
-                    if state.status == "awaiting_user":
-                        # RunState validates the awaiting boundary before this point.
-                        pending_boundaries = (
-                            state.pending_result,
-                            *(
-                                branch.pending_result
-                                for branch in state.branches
-                                if branch.status == "awaiting_user"
-                            ),
-                        )
-                        for pending in pending_boundaries:
-                            if pending is not None:
-                                await self._gates(loop, state.run_id, pending.execution_id)
-                    dormant.append(state)
-                else:
-                    runnable.append(RecoveryBinding(loop, state, binding.lifecycle))
+            while True:
+                found_unseen = False
+                for project_id in projects:
+                    for row in list_runs(self.conn, project_id):
+                        if row.id in seen:
+                            continue
+                        found_unseen = True
+                        seen.add(row.id)
+                        if row.status in (
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "superseded",
+                        ) and not any(
+                            gate.status in ("answered", "prepared", "applied")
+                            for gate in list_gates(self.conn, row.id)
+                        ):
+                            continue
+                        binding = self.resolver(row)
+                        loop = binding.loop
+                        if loop.tracker is not self.tracker:
+                            raise EngineError("recovery requires shared run tracker")
+                        state = await loop.load_state(binding.initial, row)
+                        if loop.gate_reconciler is not None:
+                            state = await loop.gate_reconciler(state)
+                            row = get_run(self.conn, row.id) or row
+                        if row.status in ("paused", "cancelled", "superseded"):
+                            state = RunState.model_validate(
+                                {**state.model_dump(), "status": row.status}
+                            )
+                        await self._repair_boundaries(loop, state)
+                        if row.status == "running":
+                            await self._interrupt(loop, state)
+                        if state.status not in ("pending", "running"):
+                            loop.checkpointer.save(state)
+                            if row.status != state.status:
+                                await loop._status(
+                                    state,
+                                    state.spine[state.cursor].name
+                                    if state.cursor < len(state.spine)
+                                    else None,
+                                )
+                            if state.status == "awaiting_user":
+                                pending_boundaries = (
+                                    state.pending_result,
+                                    *(
+                                        branch.pending_result
+                                        for branch in state.branches
+                                        if branch.status == "awaiting_user"
+                                    ),
+                                )
+                                for pending in pending_boundaries:
+                                    if pending is not None:
+                                        await self._gates(loop, state.run_id, pending.execution_id)
+                            dormant.append(state)
+                        else:
+                            runnable.append(RecoveryBinding(loop, state, binding.lifecycle))
+                if not found_unseen:
+                    break
         except (sqlite3.Error, OSError, ValueError) as exc:
             raise PersistenceError("restart preparation failed", cause=exc) from exc
+        if max_concurrent_runs and len(runnable) > max_concurrent_runs:
+            raise EngineError("run capacity exhausted")
         return RecoveryBatch(
             tasks=tuple(
                 asyncio.create_task(
-                    (binding.lifecycle or RunLifecycle(binding.loop, binding.initial)).start()
+                    (binding.lifecycle or RunLifecycle(binding.loop, binding.initial)).start(),
+                    name="statlab-run:" + binding.initial.run_id,
                 )
                 for binding in runnable
             ),

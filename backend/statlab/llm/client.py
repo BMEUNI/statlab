@@ -87,6 +87,52 @@ class LlmClient:
         if execution is None or execution["run_id"] != run_id:
             raise PersistenceError("LLM call execution does not belong to run")
 
+        return await self._complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=node_execution_id,
+            model=model,
+            messages=messages,
+            output=output,
+            reasoning=reasoning,
+            example=example,
+            recovery=recovery,
+        )
+
+    async def complete_setup[T: BaseModel](
+        self,
+        *,
+        model: str,
+        messages: Sequence[dict[str, str]],
+        output: type[T],
+        reasoning: bool = False,
+        example: dict[str, JsonValue] | None = None,
+    ) -> T:
+        return await self._complete(
+            None,
+            run_id="",
+            node_execution_id="",
+            model=model,
+            messages=messages,
+            output=output,
+            reasoning=reasoning,
+            example=example,
+            recovery=None,
+        )
+
+    async def _complete[T: BaseModel](
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        run_id: str,
+        node_execution_id: str,
+        model: str,
+        messages: Sequence[dict[str, str]],
+        output: type[T],
+        reasoning: bool,
+        example: dict[str, JsonValue] | None,
+        recovery: CallRecovery | None,
+    ) -> T:
         tier = _capability_tier(model)
         base_messages = [message.copy() for message in messages]
         if tier != "schema":
@@ -143,7 +189,7 @@ class LlmClient:
 
     async def _request(
         self,
-        conn: sqlite3.Connection,
+        conn: sqlite3.Connection | None,
         *,
         run_id: str,
         node_execution_id: str,
@@ -355,7 +401,7 @@ def _duration(started: float) -> int:
 
 
 def _record(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     *,
     run_id: str,
     node_execution_id: str,
@@ -363,6 +409,8 @@ def _record(
     model: str,
     duration_ms: int,
 ) -> None:
+    if conn is None:
+        return
     record_llm_call(
         conn,
         run_id=run_id,
@@ -378,7 +426,7 @@ def _record(
 
 
 def _record_response(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     response: ModelResponse,
     *,
     run_id: str,
@@ -407,18 +455,19 @@ def _record_response(
     if cached_tokens > prompt_tokens:
         raise LlmCallError(Failure(error_class="bug", message="LLM returned invalid token usage"))
     cost = _cost(response, model, prompt_tokens, completion_tokens, cached_tokens)
-    record_llm_call(
-        conn,
-        run_id=run_id,
-        node_execution_id=node_execution_id,
-        signature=signature,
-        model=model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_tokens=cached_tokens,
-        cost_usd=cost,
-        duration_ms=duration_ms,
-    )
+    if conn is not None:
+        record_llm_call(
+            conn,
+            run_id=run_id,
+            node_execution_id=node_execution_id,
+            signature=signature,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            cost_usd=cost,
+            duration_ms=duration_ms,
+        )
 
 
 def _token_count(value: object) -> int:

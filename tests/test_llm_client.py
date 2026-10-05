@@ -135,6 +135,161 @@ def _rows(conn: sqlite3.Connection) -> list[tuple[object, ...]]:
 
 
 @pytest.mark.asyncio
+async def test_setup_completion_repairs_once_without_run_accounting(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, _, _ = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    calls: list[dict[str, object]] = []
+    answers = iter([_response("{bad"), _response('{"value":"fixed"}')])
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return next(answers)
+
+    client = LlmClient(_settings(tmp_path), acompletion=fake)
+    before = _rows(conn)
+    result = await client.complete_setup(
+        model="deepseek/deepseek-flash",
+        messages=[{"role": "user", "content": "setup"}],
+        output=Result,
+    )
+    assert result == Result(value="fixed")
+    assert len(calls) == 2
+    assert all(call["num_retries"] == 0 and call["timeout"] == 60 for call in calls)
+    assert _rows(conn) == before
+
+
+@pytest.mark.asyncio
+async def test_setup_completion_rejects_two_invalid_answers_without_audit(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, _, _ = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    calls = 0
+
+    async def fake(**kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return _response("{bad")
+
+    before = _rows(conn)
+    with pytest.raises(LlmOutputError):
+        await LlmClient(_settings(tmp_path), acompletion=fake).complete_setup(
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "setup"}],
+            output=Result,
+        )
+    assert calls == 2 and _rows(conn) == before
+
+
+@pytest.mark.asyncio
+async def test_setup_completion_cancellation_propagates(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, _, _ = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    entered = asyncio.Event()
+
+    async def fake(**kwargs: object) -> object:
+        del kwargs
+        entered.set()
+        await asyncio.Event().wait()
+        return _response('{"value":"never"}')
+
+    before = _rows(conn)
+    task = asyncio.create_task(
+        LlmClient(_settings(tmp_path), acompletion=fake).complete_setup(
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "setup"}],
+            output=Result,
+        )
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _rows(conn) == before
+
+
+@pytest.mark.asyncio
+async def test_setup_completion_rejects_invalid_usage_without_audit(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, _, _ = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+
+    async def fake(**kwargs: object) -> object:
+        del kwargs
+        return _response('{"value":"ok"}', prompt=2, cached=3)
+
+    before = _rows(conn)
+    with pytest.raises(LlmCallError):
+        await LlmClient(_settings(tmp_path), acompletion=fake).complete_setup(
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "setup"}],
+            output=Result,
+        )
+    assert _rows(conn) == before
+
+
+@pytest.mark.asyncio
+async def test_run_and_setup_share_one_llm_semaphore(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    entries: list[dict[str, object]] = []
+
+    async def fake(**kwargs: object) -> object:
+        entries.append(kwargs)
+        if len(entries) == 1:
+            first_entered.set()
+            await release_first.wait()
+        return _response('{"value":"ok"}')
+
+    client = LlmClient(_settings(tmp_path, limit=1), acompletion=fake)
+    run_task = asyncio.create_task(
+        client.complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "run"}],
+            output=Result,
+        )
+    )
+    await first_entered.wait()
+    setup_task = asyncio.create_task(
+        client.complete_setup(
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "setup"}],
+            output=Result,
+        )
+    )
+    await asyncio.sleep(0)
+    assert len(entries) == 1
+    release_first.set()
+    assert await run_task == Result(value="ok")
+    assert await setup_task == Result(value="ok")
+    assert len(entries) == 2
+    assert all(item["timeout"] == 60 and item["num_retries"] == 0 for item in entries)
+    assert len(_rows(conn)) == 1
+
+
+@pytest.mark.asyncio
 async def test_json_tier_repairs_once_and_records_cached_flash_cost(
     llm_context: tuple[sqlite3.Connection, str, str],
     tmp_path: Path,

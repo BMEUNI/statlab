@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Final, cast
 
 import pandas as pd
 from pydantic import Field, JsonValue
@@ -30,6 +30,7 @@ from statlab_contracts.layout import SHA256_PATTERN, ProjectPaths, RunPaths
 from statlab_contracts.vocabulary import ColumnRole
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe
+from statlab_tools.settings import get_tool_settings
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import (
     CLASS_TARGET_MAX_LEVELS,
@@ -115,7 +116,7 @@ uniqueness), and the two must be free to diverge."""
 # --- load_csv ------------------------------------------------------------------------------------
 
 
-def _dataset_csv_path(paths: RunPaths, dataset: str) -> Path:
+def _dataset_csv_path(paths: RunPaths | ProjectPaths, dataset: str) -> Path:
     """Resolve `dataset` to a real path under `datasets/`, enforcing containment.
 
     `dataset`'s *shape* is already constrained by the schema (`SHA256_PATTERN`) before this
@@ -125,7 +126,11 @@ def _dataset_csv_path(paths: RunPaths, dataset: str) -> Path:
     schema's unrepresentability guarantee and a filesystem-level escape are different failure
     modes with different fixes.
     """
-    project = ProjectPaths(data_dir=paths.data_dir, slug=paths.slug)
+    project = (
+        ProjectPaths(data_dir=paths.data_dir, slug=paths.slug)
+        if isinstance(paths, RunPaths)
+        else paths
+    )
     resolved = project.dataset_csv(dataset).resolve()
     if not resolved.is_relative_to(project.datasets.resolve()):
         raise ToolParamError(
@@ -196,6 +201,34 @@ def _check_single_column(frame: pd.DataFrame, *, delimiter: str) -> None:
     raise ToolDataError("only one column was read; a target and at least one feature are needed")
 
 
+def _read_csv(path: Path, options: DatasetOptions) -> pd.DataFrame:
+    if not path.is_file():
+        raise ToolDataError(f"dataset {path.stem} not found")
+    try:
+        frame = pd.read_csv(
+            path,
+            sep=options.delimiter,
+            encoding=options.encoding,
+            decimal=options.decimal,
+            na_values=list(options.na_values),
+            keep_default_na=False,
+            header=options.header_row,
+        )
+    except (ValueError, LookupError) as exc:
+        raise _reclassify_read_error(exc, encoding=options.encoding) from exc
+    header = _raw_header_row(
+        path,
+        delimiter=options.delimiter,
+        encoding=options.encoding,
+        header_row=options.header_row,
+    )
+    _check_duplicate_headers(header)
+    _check_single_column(frame, delimiter=options.delimiter)
+    if frame.shape[0] == 0:
+        raise ToolDataError("file has zero data rows")
+    return frame
+
+
 @tool(phase="intake", allow_in=["intake"])
 def load_csv(
     paths: RunPaths,
@@ -244,27 +277,14 @@ def load_csv(
     `infer_column_roles`' job, not this tool's.
     """
     path = _dataset_csv_path(paths, dataset)
-    if not path.is_file():
-        raise ToolDataError(f"dataset {dataset} not found")
-
-    try:
-        frame = pd.read_csv(
-            path,
-            sep=delimiter,
-            encoding=encoding,
-            decimal=decimal,
-            na_values=list(na_values),
-            keep_default_na=False,
-            header=header_row,
-        )
-    except (ValueError, LookupError) as exc:
-        raise _reclassify_read_error(exc, encoding=encoding) from exc
-
-    header = _raw_header_row(path, delimiter=delimiter, encoding=encoding, header_row=header_row)
-    _check_duplicate_headers(header)
-    _check_single_column(frame, delimiter=delimiter)
-    if frame.shape[0] == 0:
-        raise ToolDataError("file has zero data rows")
+    options = DatasetOptions(
+        delimiter=delimiter,
+        encoding=encoding,
+        decimal=decimal,
+        na_values=na_values,
+        header_row=header_row,
+    )
+    frame = _read_csv(path, options)
 
     ref = new_artifact_ref()
     meta = save_dataframe(paths.artifact(ref, "dataframe"), frame, ref=ref, label="raw")
@@ -288,6 +308,80 @@ def load_csv(
         artifacts=(meta,),
         warnings=tuple(warnings),
     )
+
+
+@tool(phase="setup", allow_in=["setup"], needs_run=False, heavy=False)
+def setup_dataset(
+    project: Annotated[
+        str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$", description=ORCHESTRATOR_SUPPLIED)
+    ],
+    dataset: Annotated[str, Field(pattern=SHA256_PATTERN, description=ORCHESTRATOR_SUPPLIED)],
+    options: Annotated[DatasetOptions, Field(description="CSV parsing options.")] = _OPTS,
+    contract: Annotated[
+        DataContract | None, Field(description="Optional contract to validate.")
+    ] = None,
+) -> ToolSuccess:
+    """Profile a project CSV before any run exists; return only aggregate metadata."""
+    data_dir = get_tool_settings().data_dir.resolve()
+    paths = ProjectPaths(data_dir=data_dir, slug=project)
+    root = paths.root.resolve()
+    if not root.is_relative_to(data_dir):
+        raise ToolParamError(
+            "project root resolves outside the data directory",
+            field_errors={"project": "resolves outside the data directory"},
+        )
+    datasets = paths.datasets.resolve()
+    if not datasets.is_relative_to(root):
+        raise ToolParamError(
+            "datasets directory resolves outside the project",
+            field_errors={"project": "datasets directory resolves outside the project"},
+        )
+    path = _dataset_csv_path(paths, dataset)
+    frame = _read_csv(path, options)
+    roles: dict[str, JsonValue] = {}
+    evidence: dict[str, JsonValue] = {}
+    all_null: list[str] = []
+    for column in frame.columns:
+        name = str(column)
+        role = _role_for_column(frame[column])
+        if role is None:
+            all_null.append(name)
+        else:
+            roles[name], evidence[name] = role
+    summary: dict[str, JsonValue] = {
+        "rows": int(frame.shape[0]),
+        "cols": int(frame.shape[1]),
+        "columns": [str(column) for column in frame.columns],
+        "dtypes": {str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+        "null_counts": {str(column): int(value) for column, value in frame.isna().sum().items()},
+        "n_unique": {
+            str(column): int(frame[column].dropna().nunique()) for column in frame.columns
+        },
+        "roles": roles,
+        "role_evidence": evidence,
+        "all_null": cast(JsonValue, all_null),
+    }
+    if contract is not None:
+        column_mismatches, missing_columns = _check_columns_exist(contract, set(frame.columns))
+        mismatches = [
+            *column_mismatches,
+            *_check_target(contract, frame, missing_columns=missing_columns),
+            *_check_roles(contract, frame, missing_columns=missing_columns),
+            *_check_split_time_column(contract, frame, missing_columns=missing_columns),
+        ]
+        summary.update(
+            {
+                "valid": len(mismatches) == 0,
+                "mismatches": cast(JsonValue, mismatches),
+                "checked": len(mismatches),
+            }
+        )
+    warnings: tuple[str, ...] = ()
+    if frame.shape[0] > ROW_WARNING_THRESHOLD:
+        warnings = (
+            f"{frame.shape[0]} rows exceeds {ROW_WARNING_THRESHOLD}; fitting will be slow (D15)",
+        )
+    return ToolSuccess(summary=summary, warnings=warnings)
 
 
 # --- infer_column_roles --------------------------------------------------------------------------

@@ -63,6 +63,39 @@ class ProjectRow(BaseModel):
     created_at: str
 
 
+class SessionRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    project_id: str
+    title: str
+    created_at: str
+
+
+MessageRole = Literal["user", "assistant"]
+
+
+class MessageRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    session_id: str
+    run_id: str
+    role: MessageRole
+    content: str
+    meta_json: str
+    ts: str
+
+    def metadata(self) -> dict[str, JsonValue]:
+        try:
+            parsed = json.loads(self.meta_json, parse_constant=_reject_json_constant)
+            if not isinstance(parsed, dict):
+                raise ValueError("message metadata must be an object")
+            return TypeAdapter(dict[str, JsonValue]).validate_python(parsed, strict=True)
+        except (ValueError, TypeError, ValidationError) as exc:
+            raise PersistenceError("message row holds invalid metadata JSON", cause=exc) from exc
+
+
 class DatasetRow(BaseModel):
     """A `datasets` row."""
 
