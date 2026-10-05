@@ -127,8 +127,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
 | 30 | `30_control_router.md` — interrupt router classifier, out-of-band Q&A, status explainer | implemented (static-only; runtime/coverage outstanding) | 22, 26 |
-| 31 | `31_control_recovery.md` — recovery/retry by `error_class`, cancel/pause/resume lifecycle; rewind handler: forks keep the parent's artifact refs and create no rows (D11); listing follows `forked_from_run_id` | untouched | 22, 30 |
-| 32 | `32_control_gates_rewind.md` — HITL gates (7 actions), guided mode `gate_policy`, fork-based rewind with hard-linking | untouched | 24, 31 |
+| 31 | `31_control_recovery.md` — recovery/retry by `error_class`, cancel/pause/resume lifecycle; verified ancestor artifact/producer audit | implemented; static-only B12, runtime deferred | 22, 30 |
+| 32 | `32_control_gates_rewind.md` — persistent HITL gates (7 actions), guided policy, drained fork rewind and inherited score provenance | implemented; static-only B12, runtime deferred | 24, 31 |
 
 ## Phase F — HTTP API (33–35)
 

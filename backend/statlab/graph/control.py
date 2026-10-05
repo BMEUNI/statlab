@@ -16,7 +16,7 @@ from statlab_contracts.envelope import Failure
 from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.candidates import BudgetState
 from statlab.graph.state import RunState
-from statlab.llm.client import LlmClient
+from statlab.llm.client import CallRecovery, LlmClient
 from statlab.llm.prompts import PromptContext
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
@@ -117,6 +117,7 @@ class ControlContext:
     conversation: tuple[ConversationTurn, ...] = ()
     artifact_summaries: tuple[ArtifactSummary, ...] = ()
     estimated_remaining_seconds: float | None = None
+    recovery: CallRecovery | None = None
     _prompt: PromptContext = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -332,6 +333,7 @@ async def answer_question(message: str, context: ControlContext) -> ControlRespo
             },
             messages[1],
         ),
+        recovery=context.recovery,
     )
     if not set(answer.references) <= context.visible_refs:
         raise LlmOutputError(
@@ -363,6 +365,7 @@ async def explain_status(
                 },
                 {"role": "user", "content": template + "\n\n" + message},
             ),
+            recovery=context.recovery,
         )
         text = result.text
     return ControlResponse(category="status", text=text, facts=facts, template=template)

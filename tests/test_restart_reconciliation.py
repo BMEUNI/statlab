@@ -20,6 +20,7 @@ from statlab.graph import (
     RunTracker,
     TraversalPlan,
 )
+from statlab.graph.lifecycle import RunLifecycle
 from statlab.persistence.models import ProjectRow, RunRow, RunStatus
 from statlab.persistence.repository import (
     claim_test_scoring,
@@ -113,6 +114,22 @@ async def test_pending_start_and_running_without_execution(engine_world: World) 
     batch = await recover(service(engine_world, nodes), engine_world)
     assert not batch.dormant and len(batch.tasks) == 1
     assert (await batch.tasks[0]).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pending_control_anchor_survives_restart_without_extra_attempt(
+    engine_world: World,
+) -> None:
+    nodes = (node(),)
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    anchor = await lifecycle.audit_anchor()
+    assert anchor.status == "pending"
+    batch = await recover(service(engine_world, nodes), engine_world)
+    assert len(batch.tasks) == 1 and not batch.dormant
+    state = await batch.tasks[0]
+    assert state.status == "completed"
+    rows = list_node_executions(engine_world.conn, state.run_id)
+    assert len(rows) == 1 and rows[0].id == anchor.id and rows[0].attempt == 1
 
 
 @pytest.mark.asyncio

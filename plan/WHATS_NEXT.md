@@ -6,10 +6,11 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**31 of 41 chunks implemented, plus revisions 09r and 20r. B11 reviewed with static-only acceptance 2026-10-05.**
-B9–B11 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
+**33 of 41 chunks implemented, plus revisions 09r and 20r. B12 reviewed with static-only acceptance 2026-10-05.**
+B9–B12 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
 batch with full behavioral/coverage acceptance. [B9 receipt](./receipts/B9.md),
-[B10 receipt](./receipts/B10.md) and [B11 receipt](./receipts/B11.md) record this limit. B9 committed at `31bdf67`.
+[B10 receipt](./receipts/B10.md), [B11 receipt](./receipts/B11.md) and [B12 receipt](./receipts/B12.md)
+record this limit. B9 committed at `31bdf67`.
 B7 committed at `1e9fe6a`; B6 committed at `de2aa83`. Phases A/B and M7b complete.
 
 Accepted B8: **2428 passed, one designed skip; 100% line/branch; full mypy/Ruff/format exit 0**.
@@ -22,14 +23,15 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B12 (chunks31–32, recovery/lifecycle then gates/rewind)
+## Next: batch B13 (chunks33–34, API projects then API runs)
 
-Write chunk31's bounded detailed spec from its dependency rows and relevant PLAN decisions, using
-B11's typed control callbacks and accepted engine/reconciliation seams. Implement error-class
-recovery and pause/resume/cancel first. Include verified parent producer-audit composition for
-fork export/snapshot; retained parent refs must not invent artifact rows/history. Establish an
-existing same-run LLM audit anchor for inbound controls before the first execution. After31's
-terminal handoff, write32's detailed spec for seven gate actions, guided policy and fork rewind.
+Write chunk33's bounded detailed spec from its dependency rows and relevant PLAN decisions:
+project persistence, bounded dataset upload and contract validate/propose using existing seams.
+After33's terminal handoff, write34's detailed run API spec. Bind fresh per-run runtime/loop/
+lifecycle/GateService/ForkService, revision callback and tabular retained-report publisher.
+API caller owns registry, execution/continuation tasks and shutdown drain; use real same-run
+audit_anchor for inbound controls. Install gate reconciliation before restart scans. Supply
+durable request IDs for retried direct forks. Do not replace services with classification alone.
 Keep dependent stages sequential. Main owns architecture/review/acceptance; implementers own source.
 User authorizes automatic local commits after finished work; never push. Runtime tests remain
 stopped by user; use focused statics and one final global static gate, disclose runtime gaps.
@@ -53,7 +55,8 @@ stopped by user; use focused statics and one final global static gate, disclose 
 - Restart cursor/checkpoint remains authority, including repeated design and branch gates.
   `RestartReconciler` prepares a full scan before scheduling; caller owns returned tasks.
   Interrupted attempts retain audit/test claims and artifacts; paused/awaiting remain dormant.
-  Boot/API wiring and resume/answer handling remain 31–33.
+  B12 supplies callable lifecycle, gate reconciliation and fork services. Boot/API wiring,
+  registry and continuation scheduling remain33–34; behavior is runtime-unverified.
 - Domain tool calls must use `ToolBoundary` with the entered B6 client and unchanged allowed
   context. Heavy budget is SQL-audited admission; admitted concurrent fits may overshoot.
   Explicit controls drain calls; ordinary cancellation retains identity. No thread preemption.
@@ -67,7 +70,11 @@ stopped by user; use focused statics and one final global static gate, disclose 
   later writes affect future contexts/runs. B11 Q&A routes by current-node role/skill and validates
   visible citations. Status preserves canonical facts and explicitly truncates oversized text.
   `ControlRouter` requires explicit decision/change/lifecycle callbacks and an existing same-run
-  audit anchor; it performs no engine lifecycle work. B12/API owns handlers/delivery/early anchors.
+  audit anchor; it performs no engine lifecycle work. B12 supplies handlers/early anchors;
+  API owns binding and delivery. Seven gate actions retain revisions; post-action approval
+  acknowledges captured results without replay. Forks retain genuine ancestor IDs/artifact
+  hardlinks, consolidate candidate rewinds into wave1, preserve tail histories and original
+  champion score provenance. Partial unpublished children stay cancelled and diagnostic.
 - Startup must validate selected role models and explicit skill model literals and preserve
   effective runtime credentials. The isolated SDK check fails closed for providers with no
   SDK-established credential requirements; additional provider support needs a future decision.
@@ -78,8 +85,9 @@ stopped by user; use focused statics and one final global static gate, disclose 
 
 | Responsibility | Owner |
 |---|---|
-| Verified ancestor producer logs for fork export/snapshot | 31 |
-| Lifecycle/change/gate handlers, resume and callable recovery API boot wiring | 31–34 |
+| API service binding, lifecycle/gate continuation tasks and restart boot wiring | 33–34 |
+| SSE delivery and browser shell | B14 |
+| Chat workspace | B15 / 38 |
 | Remaining table repositories | First real caller's chunk |
 
 ## References on demand

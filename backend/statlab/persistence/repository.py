@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Literal
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from statlab_contracts.candidate import CandidateSpec
@@ -196,6 +197,7 @@ def create_run(
     mode: RunMode,
     config_json: str,
     forked_from_run_id: str | None = None,
+    status: RunStatus = "pending",
 ) -> RunRow:
     run_id = new_id("r")
     started_at = utc_now()
@@ -205,12 +207,13 @@ def create_run(
                 "INSERT INTO runs "
                 "(id, project_id, contract_id, mode, status, current_node, champion_model_id, "
                 "forked_from_run_id, started_at, ended_at, config_json) "
-                "VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL, ?)",
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?)",
                 (
                     run_id,
                     project_id,
                     contract_id,
                     mode,
+                    status,
                     forked_from_run_id,
                     started_at,
                     config_json,
@@ -235,6 +238,28 @@ def list_runs(conn: sqlite3.Connection, project_id: str) -> tuple[RunRow, ...]:
     return tuple(RunRow.model_validate(dict(row)) for row in rows)
 
 
+def run_ancestry(conn: sqlite3.Connection, run_id: str) -> tuple[RunRow, ...]:
+    """Return current run through root, rejecting incomplete or cross-project chains."""
+    lineage: list[RunRow] = []
+    visited: set[str] = set()
+    current: str | None = run_id
+    try:
+        while current is not None:
+            if current in visited:
+                raise PersistenceError("run ancestry contains a cycle")
+            visited.add(current)
+            row = get_run(conn, current)
+            if row is None:
+                raise PersistenceError("run ancestry is incomplete")
+            if lineage and row.project_id != lineage[0].project_id:
+                raise PersistenceError("run ancestry crosses projects")
+            lineage.append(row)
+            current = row.forked_from_run_id
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read run ancestry", cause=exc) from exc
+    return tuple(lineage)
+
+
 def create_node_execution(
     conn: sqlite3.Connection,
     *,
@@ -244,16 +269,39 @@ def create_node_execution(
     candidate_id: str | None = None,
     attempt: int = 1,
     concurrency_at_start: int | None = None,
+    status: Literal["pending", "running"] = "running",
+    reuse_pending: bool = False,
 ) -> NodeExecutionRow:
     """Create an auditable execution row; callers own reuse across repeated calls."""
     execution_id, started_at = new_id("ne"), utc_now()
     try:
         with transaction(conn):
+            if reuse_pending:
+                pending = conn.execute(
+                    "SELECT * FROM node_executions WHERE run_id = ? AND node_name = ? "
+                    "AND candidate_id IS ? AND status = 'pending' ORDER BY rowid",
+                    (run_id, node_name, candidate_id),
+                ).fetchall()
+                if len(pending) > 1:
+                    raise PersistenceError("duplicate pending execution anchors")
+                if pending:
+                    if pending[0]["seq"] != seq:
+                        raise PersistenceError("pending execution topology mismatch")
+                    if status == "running":
+                        conn.execute(
+                            "UPDATE node_executions SET status = 'running', "
+                            "concurrency_at_start = ? WHERE id = ?",
+                            (concurrency_at_start, pending[0]["id"]),
+                        )
+                    reused = conn.execute(
+                        "SELECT * FROM node_executions WHERE id = ?", (pending[0]["id"],)
+                    ).fetchone()
+                    return NodeExecutionRow.model_validate(dict(reused))
             conn.execute(
                 "INSERT INTO node_executions "
                 "(id, run_id, candidate_id, node_name, seq, attempt, status, started_at, "
                 "concurrency_at_start) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     execution_id,
                     run_id,
@@ -261,6 +309,7 @@ def create_node_execution(
                     node_name,
                     seq,
                     attempt,
+                    status,
                     started_at,
                     concurrency_at_start,
                 ),
@@ -475,6 +524,107 @@ def list_pending_gates(
         return gates
     except (sqlite3.Error, ValidationError) as exc:
         raise PersistenceError("cannot read pending gates", cause=exc) from exc
+
+
+def get_gate(conn: sqlite3.Connection, gate_id: str) -> GateRow | None:
+    try:
+        row = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+        return GateRow.model_validate(dict(row)) if row is not None else None
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read gate", cause=exc) from exc
+
+
+def list_gates(conn: sqlite3.Connection, run_id: str) -> tuple[GateRow, ...]:
+    try:
+        return tuple(
+            GateRow.model_validate(dict(row))
+            for row in conn.execute(
+                "SELECT * FROM gates WHERE run_id = ? ORDER BY rowid", (run_id,)
+            )
+        )
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot read gates", cause=exc) from exc
+
+
+def create_gate(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    execution_id: str,
+    question: dict[str, JsonValue],
+) -> GateRow:
+    """One original gate per execution/phase; revisions stay in its JSON transcript."""
+    try:
+        with transaction(conn):
+            execution = conn.execute(
+                "SELECT run_id FROM node_executions WHERE id = ?", (execution_id,)
+            ).fetchone()
+            if execution is None or execution["run_id"] != run_id:
+                raise PersistenceError("gate execution ownership mismatch")
+            rows = conn.execute(
+                "SELECT * FROM gates WHERE run_id = ? AND node_execution_id = ?",
+                (run_id, execution_id),
+            ).fetchall()
+            for existing in rows:
+                gate = GateRow.model_validate(dict(existing))
+                if gate.question().get("phase") == question.get("phase"):
+                    return gate
+            gate_id = new_id("g")
+            conn.execute(
+                "INSERT INTO gates VALUES (?, ?, ?, ?, NULL, 'pending', ?)",
+                (gate_id, run_id, execution_id, json.dumps(question, allow_nan=False), utc_now()),
+            )
+            row = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+        return GateRow.model_validate(dict(row))
+    except (sqlite3.Error, ValueError) as exc:
+        raise PersistenceError("cannot persist gate", cause=exc) from exc
+
+
+def transition_gate(
+    conn: sqlite3.Connection,
+    gate: GateRow,
+    *,
+    status: str,
+    answer_json: str | None,
+    question: dict[str, JsonValue] | None = None,
+) -> GateRow:
+    """Compare the complete durable revision and answer, preventing stale/double writes."""
+    try:
+        with transaction(conn):
+            changed = conn.execute(
+                "UPDATE gates SET status = ?, answer_json = ?, question_json = ? "
+                "WHERE id = ? AND run_id = ? AND node_execution_id = ? "
+                "AND status = ? AND answer_json IS ? AND question_json = ?",
+                (
+                    status,
+                    answer_json,
+                    json.dumps(question, allow_nan=False)
+                    if question is not None
+                    else gate.question_json,
+                    gate.id,
+                    gate.run_id,
+                    gate.node_execution_id,
+                    gate.status,
+                    gate.answer_json,
+                    gate.question_json,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise PersistenceError("gate answer is stale or already applied")
+            row = conn.execute("SELECT * FROM gates WHERE id = ?", (gate.id,)).fetchone()
+        return GateRow.model_validate(dict(row))
+    except (sqlite3.Error, ValueError) as exc:
+        raise PersistenceError("cannot transition gate", cause=exc) from exc
+
+
+def update_run_mode(conn: sqlite3.Connection, run_id: str, mode: RunMode) -> None:
+    try:
+        with transaction(conn):
+            changed = conn.execute("UPDATE runs SET mode = ? WHERE id = ?", (mode, run_id))
+            if changed.rowcount != 1:
+                raise PersistenceError("mode transition run does not exist")
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot transition run mode", cause=exc) from exc
 
 
 def finish_node_execution(

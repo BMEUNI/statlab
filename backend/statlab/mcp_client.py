@@ -45,12 +45,15 @@ from statlab.persistence.repository import (
     get_project_by_slug,
     get_run,
     record_tool_call,
+    run_ancestry,
     set_test_fingerprint,
 )
-from statlab.storage import create_artifact, get_artifact
+from statlab.storage import create_artifact, get_artifact, validate_checkpoint_ownership
 
 if TYPE_CHECKING:
     from mcp import ClientSession
+
+    from statlab.graph.state import RunState
 
 Repair = Callable[[Failure], Awaitable[dict[str, JsonValue]]]
 
@@ -421,15 +424,7 @@ class McpClient:
         current = get_run(self.conn, ctx.paths.run_id)
         if owner is None or current is None or owner.project_id != current.project_id:
             raise ArtifactError(ref, "artifact belongs to another project")
-        ancestor = current
-        while ancestor.id != row.run_id and ancestor.forked_from_run_id is not None:
-            next_run = get_run(self.conn, ancestor.forked_from_run_id)
-            if next_run is None:
-                break
-            if next_run.project_id != current.project_id:
-                raise ArtifactError(ref, "fork ancestry crosses projects")
-            ancestor = next_run
-        if ancestor.id != row.run_id:
+        if row.run_id not in {ancestor.id for ancestor in run_ancestry(self.conn, current.id)}:
             raise ArtifactError(ref, "artifact is outside this run's fork lineage")
         path = ctx.paths.artifact(ArtifactRef(ref), row.kind)
         if not path.is_file():
@@ -473,10 +468,32 @@ class McpClient:
         )
 
 
-def logged_calls(conn: sqlite3.Connection, run_id: str) -> tuple[LoggedCall, ...]:
+def logged_calls(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    fork_aware: bool = False,
+    checkpoint: RunState | None = None,
+) -> tuple[LoggedCall, ...]:
     """Rebuild reproducibility calls from durable rows in dispatch order."""
     try:
-        rows = conn.execute("SELECT * FROM tool_calls WHERE run_id = ? ORDER BY rowid", (run_id,))
+        if fork_aware:
+            if checkpoint is None:
+                raise PersistenceError("fork-aware audit requires a retained checkpoint")
+            retained = validate_checkpoint_ownership(conn, run_id, checkpoint)
+            ancestry = run_ancestry(conn, run_id)
+            ids = tuple(run.id for run in ancestry)
+            rows = conn.execute(
+                "SELECT rowid AS dispatch_order, * FROM tool_calls "
+                "WHERE run_id IN (SELECT value FROM json_each(?)) ORDER BY rowid",
+                (json.dumps(ids),),
+            )
+        else:
+            retained = ()
+            rows = conn.execute(
+                "SELECT rowid AS dispatch_order, * FROM tool_calls WHERE run_id = ? ORDER BY rowid",
+                (run_id,),
+            )
         stored = rows.fetchall()
     except sqlite3.Error as exc:
         raise PersistenceError("cannot read tool call log", cause=exc) from exc
@@ -491,7 +508,64 @@ def logged_calls(conn: sqlite3.Connection, run_id: str) -> tuple[LoggedCall, ...
             raise PersistenceError(
                 f"malformed stored tool call row {row['id']!r}", cause=exc
             ) from exc
-    return tuple(calls)
+    if not fork_aware:
+        return tuple(calls)
+
+    producers: dict[str, int] = {}
+    for index, call in enumerate(calls):
+        for ref in call.outputs:
+            if ref in producers:
+                raise PersistenceError("tool audit has duplicate artifact producers")
+            producers[ref] = index
+    selected: set[int] = set()
+    visiting: set[int] = set()
+
+    def visit(ref: str, before: int) -> None:
+        index = producers.get(ref)
+        if index is None or index >= before:
+            raise PersistenceError("tool audit is missing an earlier artifact producer")
+        if index in visiting:
+            raise PersistenceError("tool audit contains a producer cycle")
+        row, call = stored[index], calls[index]
+        artifact = get_artifact(conn, ref)
+        if (
+            artifact is None
+            or artifact.run_id != row["run_id"]
+            or artifact.produced_by != call.tool
+        ):
+            raise PersistenceError("artifact producer ownership mismatch")
+        execution = conn.execute(
+            "SELECT run_id FROM node_executions WHERE id = ?", (row["node_execution_id"],)
+        ).fetchone()
+        if execution is None or execution["run_id"] != row["run_id"]:
+            raise PersistenceError("producer execution ownership mismatch")
+        if index in selected:
+            return
+        visiting.add(index)
+        for value in call.arguments.values():
+            for dependency in McpClient._refs_in(value):
+                visit(dependency, index)
+        visiting.remove(index)
+        selected.add(index)
+
+    try:
+        for artifact in retained:
+            if artifact.run_id != run_id:
+                visit(artifact.id, len(calls))
+        current: list[int] = []
+        for index, row in enumerate(stored):
+            if row["run_id"] != run_id:
+                continue
+            current.append(index)
+            for value in calls[index].arguments.values():
+                for ref in McpClient._refs_in(value):
+                    visit(ref, index)
+    except (sqlite3.Error, ValidationError) as exc:
+        raise PersistenceError("cannot compose ancestor producer audit", cause=exc) from exc
+    inherited = tuple(
+        calls[index] for index in sorted(selected) if stored[index]["run_id"] != run_id
+    )
+    return (*inherited, *(calls[index] for index in current))
 
 
 __all__ = ["CallContext", "McpClient", "ToolSpec", "check_lineage", "logged_calls"]

@@ -34,6 +34,7 @@ from statlab.persistence.repository import (
     finish_node_execution,
     get_run,
     has_run_history,
+    list_node_executions,
     next_node_attempt,
     update_candidate_status,
     update_run_status,
@@ -66,9 +67,13 @@ class NodeInvocation:
     spec: NodeSpec
     execution: NodeExecutionRow
     candidate: CandidateProgress | None
+    after_action: bool = False
 
 
 type NodeExecutor = Callable[[NodeInvocation], Awaitable[NodeResult]]
+type FailureHook = Callable[[NodeInvocation, NodeResult], Awaitable[NodeResult]]
+type GateReconciler = Callable[[RunState], Awaitable[RunState]]
+type GateBoundaryHook = Callable[[NodeInvocation, NodeResult], Awaitable[None]]
 
 
 class RunLoop:
@@ -88,6 +93,7 @@ class RunLoop:
         candidate_planner: CandidatePlanner | None = None,
         retune_decider: RetuneDecider | None = None,
         control: RunControl | None = None,
+        failure_hook: FailureHook | None = None,
     ) -> None:
         self.conn, self.nodes, self.spine_id = conn, nodes, spine_id
         self.executor, self.checkpointer, self.events = executor, checkpointer, events
@@ -97,6 +103,9 @@ class RunLoop:
         self.traversal = traversal
         self.candidate_planner, self.retune_decider = candidate_planner, retune_decider
         self.control = control or RunControl()
+        self.failure_hook = failure_hook
+        self.gate_reconciler: GateReconciler | None = None
+        self.gate_boundary_hook: GateBoundaryHook | None = None
         self.budget = FitBudget(conn, checkpointer.paths.run_id, self.constraints)
         self._coordinator = asyncio.Lock()
         self._state: RunState
@@ -109,6 +118,7 @@ class RunLoop:
     async def run(self, initial: RunState) -> RunState:
         run_id = self.checkpointer.paths.run_id
         self.tracker.enter(run_id)
+        self._lifecycle_stop = False
         try:
             return await self._run(initial)
         except (sqlite3.Error, OSError) as exc:
@@ -122,7 +132,9 @@ class RunLoop:
             state.run_id,
             status=state.status,
             current_node=current_node,
-            ended_at=utc_now() if state.status in ("completed", "failed") else None,
+            ended_at=utc_now()
+            if state.status in ("completed", "failed", "cancelled", "superseded")
+            else None,
         )
         await self.events.append(
             "run.status", {"status": state.status, "current_node": current_node}
@@ -151,17 +163,165 @@ class RunLoop:
                 raise EngineError("new run requires pending initial state")
             state = initial
         if state.mode != row.mode:
-            raise EngineError("run mode mismatch")
+            if self.gate_reconciler is not None:
+                state = await self.gate_reconciler(state)
+            if state.mode != row.mode:
+                raise EngineError("run mode mismatch")
         return state
+
+    async def ensure_audit_anchor(self, initial: RunState) -> NodeExecutionRow:
+        """Save the input before creating/reusing a real pending node execution."""
+        async with self._coordinator:
+            row = get_run(self.conn, initial.run_id)
+            if row is None:
+                raise PersistenceError("run does not exist")
+            state = await self.load_state(initial, row)
+            self.checkpointer.save(state)
+            executions = list_node_executions(self.conn, state.run_id)
+            if state.status in ("completed", "failed", "cancelled", "superseded"):
+                if not executions:
+                    raise EngineError("run has no declared execution for control audit")
+                return executions[-1]
+            index = state.cursor
+            candidate: CandidateProgress | None = None
+            traversal = self.traversal or state.traversal
+            if traversal is not None:
+                start, end = traversal.region(state.spine)
+                if (
+                    traversal.design_node is not None
+                    and state.wave > 1
+                    and sum(
+                        boundary.node_name == traversal.design_node
+                        for boundary in state.shared_results
+                    )
+                    < state.wave
+                ):
+                    index = next(
+                        i for i, spec in enumerate(self.nodes) if spec.name == traversal.design_node
+                    )
+                if start <= index < end or (
+                    index == start - 1
+                    and traversal.overlap_shared is not None
+                    and any(
+                        boundary.node_name == traversal.overlap_shared
+                        for boundary in state.shared_results
+                    )
+                ):
+                    branch = next(
+                        (
+                            branch
+                            for branch in state.branches
+                            if branch.status not in ("completed", "failed", "budget_exhausted")
+                        ),
+                        None,
+                    )
+                    if branch is not None:
+                        candidate = branch
+                        index = max(start, branch.position)
+                    elif state.branches:
+                        viable = any(
+                            branch.status == "completed"
+                            or (
+                                branch.status == "budget_exhausted"
+                                and any(
+                                    boundary.node_name == traversal.evaluation_node
+                                    for boundary in branch.results
+                                )
+                            )
+                            for branch in state.branches
+                        )
+                        if viable:
+                            index = end
+                        else:
+                            candidate = next(
+                                branch
+                                for branch in state.branches
+                                if branch.pending_result is not None
+                            )
+                            index = max(start, candidate.position)
+            if index >= len(self.nodes):
+                if not executions:
+                    raise EngineError("run has no declared execution for control audit")
+                return executions[-1]
+            spec = self.nodes[index]
+            if spec.kind == "PER_CANDIDATE":
+                candidate = candidate or state.candidate
+                if candidate is None:
+                    raise EngineError("control anchor requires current candidate")
+            candidate_id = candidate.database_id(state.run_id) if candidate else None
+            active = tuple(
+                execution
+                for execution in executions
+                if execution.node_name == spec.name
+                and execution.candidate_id == candidate_id
+                and execution.status in ("pending", "running")
+            )
+            if len(active) > 1:
+                raise PersistenceError("duplicate active execution anchors")
+            if active:
+                return active[0]
+            pending = state.pending_result or (
+                candidate.pending_result if candidate is not None else None
+            )
+            if pending is not None:
+                existing = next(
+                    (execution for execution in executions if execution.id == pending.execution_id),
+                    None,
+                )
+                if existing is not None:
+                    return existing
+                raise PersistenceError("control audit requires a same-run pending execution")
+            if candidate is not None:
+                ensure_candidate(
+                    self.conn,
+                    candidate_id=candidate.database_id(state.run_id),
+                    run_id=state.run_id,
+                    spec=candidate.spec,
+                    wave=candidate.wave,
+                )
+            return create_node_execution(
+                self.conn,
+                run_id=state.run_id,
+                node_name=spec.name,
+                seq=index + 1,
+                candidate_id=candidate_id,
+                attempt=next_node_attempt(
+                    self.conn, run_id=state.run_id, node_name=spec.name, candidate_id=candidate_id
+                ),
+                status="pending",
+                reuse_pending=True,
+            )
+
+    async def _stop_attempt(
+        self, execution: NodeExecutionRow, reason: str, payload: dict[str, JsonValue]
+    ) -> None:
+        result = NodeResult(
+            status="failed",
+            error=Failure(error_class="bug", message="Node interrupted by lifecycle request"),
+            summary={"lifecycle": reason},
+        )
+        finish_node_execution(self.conn, execution.id, result)
+        await self.events.append(
+            "node.failed", {**payload, "result": result.model_dump(mode="json")}
+        )
 
     async def _run(self, initial: RunState) -> RunState:
         row = get_run(self.conn, self.checkpointer.paths.run_id)
         if row is None:
             raise PersistenceError("run does not exist")
         state = await self.load_state(initial, row)
+        self.checkpointer.save(state)
         if row.status not in ("pending", "running") and state.status in ("pending", "running"):
             raise EngineError("SQL run status refuses execution")
         if state.status not in ("pending", "running"):
+            return state
+        requested = self.control.status
+        if requested is not None:
+            state = state.model_copy(update={"status": requested})
+            self.checkpointer.save(state)
+            await self._status(
+                state, self.nodes[state.cursor].name if state.cursor < len(self.nodes) else None
+            )
             return state
         if state.traversal is not None or self._fanout_enabled or len(state.branches) > 1:
             return await self._fanout(state)
@@ -179,6 +339,12 @@ class RunLoop:
         )
         while state.cursor < len(self.nodes):
             spec = self.nodes[state.cursor]
+            requested = self.control.status
+            if requested is not None:
+                state = state.model_copy(update={"status": requested})
+                self.checkpointer.save(state)
+                await self._status(state, spec.name)
+                return state
             candidate = state.candidate if spec.kind == "PER_CANDIDATE" else None
             if spec.kind == "PER_CANDIDATE" and candidate is None:
                 raise EngineError("per-candidate node requires a candidate")
@@ -193,6 +359,7 @@ class RunLoop:
                     self.conn, run_id=state.run_id, node_name=spec.name, candidate_id=candidate_id
                 ),
                 concurrency_at_start=self.tracker.concurrency,
+                reuse_pending=True,
             )
             update_run_status(self.conn, state.run_id, status="running", current_node=spec.name)
             await self.events.append(
@@ -200,6 +367,20 @@ class RunLoop:
             )
             try:
                 result = await self.executor(NodeInvocation(state, spec, execution, candidate))
+            except BoundaryStopError as exc:
+                if exc.reason == "budget_exhausted":
+                    result = NodeResult(
+                        status="failed",
+                        error=Failure(error_class="data", message="Fit budget exhausted"),
+                    )
+                else:
+                    await self._stop_attempt(
+                        execution, exc.reason, {"node": spec.name, "execution_id": execution.id}
+                    )
+                    state = state.model_copy(update={"status": self.control.status or exc.reason})
+                    self.checkpointer.save(state)
+                    await self._status(state, spec.name)
+                    return state
             except (ToolCallError, LlmCallError) as exc:
                 result = NodeResult(status="failed", error=exc.failure)
             except Exception as exc:
@@ -210,6 +391,14 @@ class RunLoop:
                 )
             if result.status == "skipped" and not spec.skippable:
                 raise EngineError("non-skippable node returned skipped")
+            if result.status == "failed" and self.failure_hook is not None:
+                result = await self.failure_hook(
+                    NodeInvocation(state, spec, execution, candidate), result
+                )
+            if self.gate_boundary_hook is not None:
+                await self.gate_boundary_hook(
+                    NodeInvocation(state, spec, execution, candidate), result
+                )
             finish_node_execution(self.conn, execution.id, result)
             boundary = BoundaryResult(node_name=spec.name, execution_id=execution.id, result=result)
             if result.status in ("failed", "awaiting_user"):
@@ -245,6 +434,12 @@ class RunLoop:
                 return state
             if result.status == "completed":
                 self._prune(execution.id, state)
+        requested = self.control.status
+        if requested is not None:
+            state = state.model_copy(update={"status": requested})
+            self.checkpointer.save(state)
+            await self._status(state, None)
+            return state
         state = state.model_copy(update={"status": "completed"})
         self.checkpointer.save(state)
         await self._status(state, None)
@@ -320,6 +515,7 @@ class RunLoop:
                     candidate_id=candidate_id,
                 ),
                 concurrency_at_start=self.tracker.concurrency,
+                reuse_pending=True,
             )
             update_run_status(self.conn, snapshot.run_id, status="running", current_node=spec.name)
             payload: dict[str, JsonValue] = {"node": spec.name, "execution_id": execution.id}
@@ -329,7 +525,6 @@ class RunLoop:
         stop: BoundaryStopError | None = None
         try:
             result = await self.executor(NodeInvocation(snapshot, spec, execution, candidate))
-            self.control.check()
         except BoundaryStopError as exc:
             stop = exc
         except (ToolCallError, LlmCallError) as exc:
@@ -338,6 +533,14 @@ class RunLoop:
             self.last_error = EngineError("node executor failed", cause=exc)
             result = NodeResult(
                 status="failed", error=Failure(error_class="bug", message="Node execution failed")
+            )
+        if stop is None and result.status == "failed" and self.failure_hook is not None:
+            result = await self.failure_hook(
+                NodeInvocation(snapshot, spec, execution, candidate), result
+            )
+        if stop is None and self.gate_boundary_hook is not None:
+            await self.gate_boundary_hook(
+                NodeInvocation(snapshot, spec, execution, candidate), result
             )
         async with self._coordinator:
             if stop is not None:
@@ -367,6 +570,7 @@ class RunLoop:
                         "node.failed", {**payload, "result": result.model_dump(mode="json")}
                     )
                 else:
+                    await self._stop_attempt(execution, stop.reason, payload)
                     self._lifecycle_stop = True
                 self._save_latest()
                 return False

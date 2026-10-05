@@ -86,7 +86,9 @@ async def exception_approval[T: CandidateDecision](
         *evidence.tools,
         {"warnings": list(evidence.warnings)},
     )
-    approved = await runtime.approve(invocation, decision, approval_evidence)
+    approved = await runtime.approve(
+        invocation, decision, approval_evidence, after_action=after_action
+    )
     if after_action and approved is not None and approved != decision:
         raise _RefusalError("completed actions cannot be changed by exception acknowledgment")
     return approved

@@ -44,7 +44,7 @@ from statlab.errors import EngineError, ToolCallError
 from statlab.graph.candidates import ToolBoundary
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
-from statlab.llm.client import LlmClient
+from statlab.llm.client import CallRecovery, LlmClient
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.mcp_client import CallContext, Repair
@@ -187,6 +187,7 @@ class OfflineLlm(LlmClient):
         output: type[T],
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
+        recovery: CallRecovery | None = None,
     ) -> T:
         assert run_id and node_execution_id and model
         assert example is None

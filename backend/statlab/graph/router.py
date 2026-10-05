@@ -67,6 +67,7 @@ class ControlRouter:
                 },
                 {"role": "user", "content": message},
             ),
+            recovery=context.recovery,
         )
 
     async def handle(self, message: str, context: ControlContext) -> ControlResponse:

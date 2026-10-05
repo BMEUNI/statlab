@@ -22,11 +22,12 @@ from statlab.domains.foundation import (
     problem_from_state,
     shared_result,
 )
+from statlab.domains.rewind import champion_provenance
 from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.mcp_client import logged_calls
-from statlab.persistence.repository import get_champion_model, get_run, remember_run_outcome
+from statlab.persistence.repository import get_run, remember_run_outcome
 
 
 def _digest(path: Path) -> str:
@@ -76,8 +77,8 @@ class PersistenceExecutor:
         target = _ref(champion, "test_score")
         problem = problem_from_state(invocation.state)
         run = get_run(runtime.conn, runtime.paths.run_id)
-        model = get_champion_model(runtime.conn, runtime.paths.run_id)
-        if run is None or model is None or run.test_scored_at is None:
+        provenance, model = champion_provenance(runtime.conn, invocation.state)
+        if run is None:
             raise _RefusalError("persistence requires durable champion and completed test score")
         if model.id != champion.get("model_id") or model.artifact_id != champion.get("model"):
             raise _RefusalError("completed champion disagrees with durable model")
@@ -99,7 +100,9 @@ class PersistenceExecutor:
         report_hash = _digest(report_path)
         if report.get("sha256") != report_hash:
             raise PersistenceError("preserved report differs from completed champion report")
-        calls = logged_calls(runtime.conn, runtime.paths.run_id)
+        calls = logged_calls(
+            runtime.conn, runtime.paths.run_id, fork_aware=True, checkpoint=invocation.state
+        )
         if str(target) not in {ref for call in calls for ref in call.outputs}:
             raise _RefusalError("champion test score is absent from real tool audit")
         decision = PersistenceDecision(
@@ -143,7 +146,9 @@ class PersistenceExecutor:
             },
         )
         evidence.add("export_pipeline_script", exported)
-        snapshot_calls = logged_calls(runtime.conn, runtime.paths.run_id)
+        snapshot_calls = logged_calls(
+            runtime.conn, runtime.paths.run_id, fork_aware=True, checkpoint=invocation.state
+        )
         snapshot = await runtime.call(
             invocation,
             "snapshot_run",
@@ -166,6 +171,10 @@ class PersistenceExecutor:
             (runtime.paths.run_id,),
         ).fetchall()
         manifest["preservation"] = {
+            "score_run_id": provenance.id,
+            "inherited_score": provenance.id != run.id,
+            "test_scored_at": provenance.test_scored_at,
+            "fork": invocation.state.fork_metadata,
             "skill_sha256": runtime.skill.sha256,
             "lockfile_sha256": hashlib.sha256(lock_bytes).hexdigest(),
             "node_models": {

@@ -21,7 +21,7 @@ from statlab.graph.control import (
 )
 from statlab.graph.router import ControlRouter, InterruptClass
 from statlab.graph.state import RunState
-from statlab.llm.client import LlmClient
+from statlab.llm.client import CallRecovery, LlmClient
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.persistence.repository import (
@@ -55,6 +55,7 @@ class FakeClient(LlmClient):
         output: type[T],
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
+        recovery: CallRecovery | None = None,
     ) -> T:
         self.calls.append((model, reasoning, tuple(messages)))
         if self.entered is not None:

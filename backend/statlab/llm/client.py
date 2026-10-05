@@ -10,6 +10,7 @@ import os
 import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
 from time import monotonic
+from typing import Protocol
 
 from pydantic import BaseModel, JsonValue, ValidationError
 
@@ -46,6 +47,10 @@ _TRANSIENT_ERRORS = (
 )
 
 
+class CallRecovery(Protocol):
+    def __call__[T](self, call: Callable[[], Awaitable[T]]) -> Awaitable[T]: ...
+
+
 class LlmClient:
     """One configured request semaphore shared by all calls made through this client."""
 
@@ -70,6 +75,7 @@ class LlmClient:
         output: type[T],
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
+        recovery: CallRecovery | None = None,
     ) -> T:
         """Return a validated model, repairing one invalid response exactly once."""
         try:
@@ -96,16 +102,22 @@ class LlmClient:
                 if repaired
                 else base_messages
             )
-            response = await self._request(
-                conn,
-                run_id=run_id,
-                node_execution_id=node_execution_id,
-                model=model,
-                output=output,
-                messages=request_messages,
-                tier=tier,
-                reasoning=reasoning,
-            )
+
+            async def request(
+                sent_messages: list[dict[str, str]] = request_messages,
+            ) -> ModelResponse:
+                return await self._request(
+                    conn,
+                    run_id=run_id,
+                    node_execution_id=node_execution_id,
+                    model=model,
+                    output=output,
+                    messages=sent_messages,
+                    tier=tier,
+                    reasoning=reasoning,
+                )
+
+            response = await request() if recovery is None else await recovery(request)
             prior_content = _content(response)
             try:
                 if not prior_content:

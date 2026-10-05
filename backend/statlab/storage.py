@@ -10,7 +10,9 @@ import os
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
@@ -20,6 +22,10 @@ from statlab.errors import ArtifactError, PersistenceError
 from statlab.persistence.db import transaction
 from statlab.persistence.ids import utc_now
 from statlab.persistence.models import ArtifactRow
+from statlab.persistence.repository import run_ancestry
+
+if TYPE_CHECKING:
+    from statlab.graph.state import RunState
 
 
 def ensure_run_layout(paths: RunPaths) -> None:
@@ -102,7 +108,11 @@ def get_artifact(conn: sqlite3.Connection, artifact_id: str) -> ArtifactRow | No
 
 
 def list_artifacts(
-    conn: sqlite3.Connection, run_id: str, *, include_pruned: bool = False
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    include_pruned: bool = False,
+    checkpoint: RunState | None = None,
 ) -> tuple[ArtifactRow, ...]:
     if include_pruned:
         rows = conn.execute(
@@ -113,7 +123,71 @@ def list_artifacts(
             "SELECT * FROM artifacts WHERE run_id = ? AND pruned_at IS NULL ORDER BY ts",
             (run_id,),
         ).fetchall()
-    return tuple(_artifact_row_from(row) for row in rows)
+    own = tuple(_artifact_row_from(row) for row in rows)
+    if checkpoint is None:
+        return own
+    owners = validate_checkpoint_ownership(conn, run_id, checkpoint)
+    inherited = tuple(
+        row for row in owners if row.run_id != run_id and (include_pruned or row.pruned_at is None)
+    )
+    return tuple(sorted((*own, *inherited), key=lambda row: (row.ts, row.id)))
+
+
+def validate_checkpoint_ownership(
+    conn: sqlite3.Connection, run_id: str, checkpoint: RunState
+) -> tuple[ArtifactRow, ...]:
+    """Validate retained boundaries/refs against genuine same-project ancestor rows."""
+    ancestry = run_ancestry(conn, run_id)
+    lineage = {row.id for row in ancestry}
+    if checkpoint.run_id != run_id:
+        raise PersistenceError("checkpoint run ownership mismatch")
+    try:
+        boundaries = (
+            *((boundary, None) for boundary in checkpoint.shared_results),
+            *((boundary, branch) for branch in checkpoint.branches for boundary in branch.results),
+            *(
+                (branch.pending_result, branch)
+                for branch in checkpoint.branches
+                if branch.status in ("failed", "budget_exhausted")
+                and branch.pending_result is not None
+            ),
+        )
+        for boundary, branch in boundaries:
+            execution = conn.execute(
+                "SELECT * FROM node_executions WHERE id = ?", (boundary.execution_id,)
+            ).fetchone()
+            seq = next(
+                i + 1
+                for i, entry in enumerate(checkpoint.spine)
+                if entry.name == boundary.node_name
+            )
+            if (
+                execution is None
+                or execution["run_id"] not in lineage
+                or execution["node_name"] != boundary.node_name
+                or execution["seq"] != seq
+                or execution["status"] != boundary.result.status
+                or execution["candidate_id"]
+                != (branch.database_id(execution["run_id"]) if branch is not None else None)
+            ):
+                raise PersistenceError("checkpoint execution ownership mismatch")
+            if branch is not None:
+                candidate = conn.execute(
+                    "SELECT run_id, spec_json FROM candidates WHERE id = ?",
+                    (execution["candidate_id"],),
+                ).fetchone()
+                if (
+                    candidate is None
+                    or candidate["run_id"] != execution["run_id"]
+                    or candidate["spec_json"] != branch.spec.model_dump_json()
+                ):
+                    raise PersistenceError("checkpoint candidate ownership mismatch")
+        retained = tuple(get_artifact(conn, str(ref)) for ref in sorted(checkpoint.retained_refs))
+        if any(row is None or row.run_id not in lineage for row in retained):
+            raise PersistenceError("checkpoint artifact ownership mismatch")
+        return tuple(row for row in retained if row is not None)
+    except (sqlite3.Error, ValidationError, StopIteration) as exc:
+        raise PersistenceError("cannot validate checkpoint ownership", cause=exc) from exc
 
 
 def mark_pruned(conn: sqlite3.Connection, refs: Sequence[ArtifactRef]) -> int:

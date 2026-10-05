@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
+from pydantic import JsonValue
 from statlab.errors import PersistenceError
 from statlab.persistence.ids import parse_ts
 from statlab.persistence.models import ArtifactRow, ProjectRow, RunRow
@@ -757,3 +759,136 @@ def test_forked_test_artifact_keeps_split_and_derived_from_test(
 
     # No child rows are created: a fork links files, it does not register artifacts.
     assert list_artifacts(migrated_db, child_run.id) == ()
+
+
+def test_fork_visibility_and_real_pruned_producer_closure(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    from statlab.domains.base import NodeResult
+    from statlab.graph.state import BoundaryResult, RunState
+    from statlab.mcp_client import logged_calls
+    from statlab.persistence.repository import (
+        create_node_execution,
+        finish_node_execution,
+        record_tool_call,
+        run_ancestry,
+    )
+    from statlab_contracts.envelope import ToolSuccess
+
+    from tests.test_graph_state import node
+
+    conn = migrated_db
+    nodes = (node(), node("beta"))
+    execution = create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1)
+    refs = tuple(ArtifactRef(f"a_000000000000001{i}") for i in range(4))
+    metas = tuple(ArtifactMeta(ref=ref, kind="dataframe") for ref in refs)
+    arguments: tuple[dict[str, JsonValue], ...] = (
+        {"dataset": "original-dataset", "project": "original-project", "run": run.id},
+        {"df": str(refs[0])},
+        {"df": str(refs[1])},
+    )
+    for meta, tool, args in zip(
+        metas[:3], ("load_csv", "transform", "abandoned"), arguments, strict=True
+    ):
+        create_artifact(
+            conn,
+            ref=meta.ref,
+            run_id=run.id,
+            kind=meta.kind,
+            path=run_paths.artifact(meta.ref, meta.kind),
+            meta=meta,
+            produced_by=tool,
+        )
+        record_tool_call(
+            conn,
+            run_id=run.id,
+            node_execution_id=execution.id,
+            tool_name=tool,
+            args_json=json.dumps(args),
+            result_json=ToolSuccess(artifacts=(meta,)).model_dump_json(),
+            duration_ms=1,
+        )
+    result = NodeResult(status="completed", artifacts=(refs[1],))
+    finish_node_execution(conn, execution.id, result)
+    mark_pruned(conn, (refs[0],))
+    child = create_run(
+        conn,
+        project_id=run.project_id,
+        contract_id=run.contract_id,
+        mode="autonomous",
+        config_json="{}",
+        forked_from_run_id=run.id,
+    )
+    checkpoint = RunState(
+        run_id=child.id,
+        spine_id="synthetic",
+        spine=RunState.initial(
+            run_id=child.id, spine_id="synthetic", nodes=nodes, mode="autonomous"
+        ).spine,
+        mode="autonomous",
+        cursor=1,
+        shared_results=(
+            BoundaryResult(node_name="alpha", execution_id=execution.id, result=result),
+        ),
+    )
+    current = create_node_execution(conn, run_id=child.id, node_name="beta", seq=2)
+    create_artifact(
+        conn,
+        ref=refs[3],
+        run_id=child.id,
+        kind="dataframe",
+        path=run_paths.artifact(refs[3], "dataframe"),
+        meta=metas[3],
+        produced_by="child_transform",
+    )
+    record_tool_call(
+        conn,
+        run_id=child.id,
+        node_execution_id=current.id,
+        tool_name="child_transform",
+        args_json=json.dumps({"df": str(refs[1])}),
+        result_json=ToolSuccess(artifacts=(metas[3],)).model_dump_json(),
+        duration_ms=1,
+    )
+    assert [ancestor.id for ancestor in run_ancestry(conn, child.id)] == [child.id, run.id]
+    assert {row.id for row in list_artifacts(conn, child.id, checkpoint=checkpoint)} == {
+        str(refs[1]),
+        str(refs[3]),
+    }
+    assert [call.tool for call in logged_calls(conn, child.id)] == ["child_transform"]
+    calls = logged_calls(conn, child.id, fork_aware=True, checkpoint=checkpoint)
+    assert [call.tool for call in calls] == ["load_csv", "transform", "child_transform"]
+    assert calls[0].arguments == arguments[0]
+    assert calls[0].outputs == (str(refs[0]),)
+    retained_row = get_artifact(conn, str(refs[1]))
+    assert retained_row is not None and retained_row.run_id == run.id
+    with pytest.raises(PersistenceError, match="requires a retained checkpoint"):
+        logged_calls(conn, child.id, fork_aware=True)
+    with pytest.raises(PersistenceError, match="ownership"):
+        list_artifacts(conn, run.id, checkpoint=checkpoint)
+    conn.execute("UPDATE runs SET forked_from_run_id = ? WHERE id = ?", (child.id, run.id))
+    with pytest.raises(PersistenceError, match="cycle"):
+        run_ancestry(conn, child.id)
+
+
+def test_ancestry_missing_and_cross_project_are_domain_errors(
+    migrated_db: sqlite3.Connection, run: RunRow, tmp_path: Path
+) -> None:
+    from statlab.persistence.repository import create_project, run_ancestry
+
+    with pytest.raises(PersistenceError, match="incomplete"):
+        run_ancestry(migrated_db, "r_missing")
+    foreign = create_project(migrated_db, slug="foreign-ancestor", name="foreign")
+    contract = create_contract(
+        migrated_db, project_id=foreign.id, path=tmp_path / "foreign.json", contract=_CONTRACT
+    )
+    child = create_run(
+        migrated_db,
+        project_id=foreign.id,
+        contract_id=contract.id,
+        mode="autonomous",
+        config_json="{}",
+        forked_from_run_id=run.id,
+    )
+    with pytest.raises(PersistenceError, match="crosses projects"):
+        run_ancestry(migrated_db, child.id)

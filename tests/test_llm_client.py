@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from litellm.types.utils import Choices, Message
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from statlab.config import Settings
 from statlab.errors import LlmCallError, LlmOutputError, PersistenceError
+from statlab.graph.recovery import recover_call
 from statlab.llm import LlmClient
 from statlab.persistence.repository import (
     create_contract,
@@ -1347,3 +1349,39 @@ def test_import_sets_local_cost_map_before_litellm_without_socket_attempts(tmp_p
         timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.asyncio
+async def test_request_recovery_does_not_restart_output_repair(
+    llm_context: tuple[sqlite3.Connection, str, str], tmp_path: Path
+) -> None:
+    conn, run_id, execution_id = llm_context
+    calls: list[dict[str, object]] = []
+    delays: list[float] = []
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        if len(calls) == 2:
+            raise APIConnectionError(message="offline transient", llm_provider="fixture", model="x")
+        return _response("{invalid")
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async def recovery[T](call: Callable[[], Awaitable[T]]) -> T:
+        return await recover_call(call, sleep=sleep)
+
+    with pytest.raises(LlmOutputError):
+        await LlmClient(_settings(tmp_path), acompletion=fake).complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "offline"}],
+            output=Result,
+            recovery=recovery,
+        )
+    assert len(calls) == 3 and delays == [1.0]
+    assert calls[1]["messages"] == calls[2]["messages"]
+    assert calls[0]["messages"] != calls[1]["messages"]
+    assert len(_rows(conn)) == 3

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import BaseModel, JsonValue
@@ -15,6 +15,7 @@ from statlab_contracts.layout import RunPaths
 from statlab.errors import EngineError
 from statlab.graph.candidates import ToolBoundary
 from statlab.graph.engine import NodeInvocation
+from statlab.graph.recovery import recover_call
 from statlab.llm.client import LlmClient
 from statlab.llm.prompts import PromptContext
 from statlab.llm.routing import ModelRouter, Role
@@ -24,6 +25,7 @@ from statlab.persistence.models import MemoryRow
 from statlab.persistence.repository import get_champion_model
 
 Approval = Callable[[NodeInvocation, BaseModel, tuple[JsonValue, ...]], Awaitable[BaseModel | None]]
+DecisionOverride = Callable[[NodeInvocation, type[BaseModel]], Awaitable[BaseModel | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,7 @@ class DomainRuntime:
     memory: tuple[MemoryRow, ...] = ()
     approval: Approval | None = None
     lockfile_path: Path | None = None
+    decision_override: DecisionOverride | None = None
 
     def context(self, invocation: NodeInvocation) -> CallContext:
         if (
@@ -77,8 +80,27 @@ class DomainRuntime:
         question: str,
     ) -> T:
         context = self.context(invocation)
+        if self.decision_override is not None:
+            approved = await self.decision_override(invocation, output)
+            if approved is not None:
+                return output.model_validate(approved.model_dump(mode="json"))
         skill = self.skill.node(context.node)
         prompt = PromptContext(self.skill.preamble, skill, self.contract, self.memory)
+
+        async def recovery[U](call: Callable[[], Awaitable[U]]) -> U:
+            async def request() -> U:
+                self.tools.control.check()
+                return await call()
+
+            def can_retry() -> bool:
+                self.tools.control.check()
+                return True
+
+            if self.tools.sleep is None:
+                return await recover_call(request, can_retry=can_retry)
+            return await recover_call(request, sleep=self.tools.sleep, can_retry=can_retry)
+
+        self.tools.control.check()
         return await self.llm.complete(
             self.conn,
             run_id=context.paths.run_id,
@@ -116,16 +138,24 @@ class DomainRuntime:
             ),
             output=output,
             reasoning=self.router.role_for(context.node) == Role.REASONING,
+            recovery=recovery,
         )
 
     async def approve[T: BaseModel](
-        self, invocation: NodeInvocation, decision: T, evidence: tuple[JsonValue, ...]
+        self,
+        invocation: NodeInvocation,
+        decision: T,
+        evidence: tuple[JsonValue, ...],
+        *,
+        after_action: bool = False,
     ) -> T | None:
-        if invocation.state.mode == "autonomous":
+        if invocation.state.mode == "autonomous" or invocation.spec.gate_policy == "never":
             return decision
         if self.approval is None:
             return None
-        approved = await self.approval(invocation, decision, evidence)
+        approved = await self.approval(
+            replace(invocation, after_action=after_action), decision, evidence
+        )
         if approved is None:
             return None
         return type(decision).model_validate(approved.model_dump(mode="json"))

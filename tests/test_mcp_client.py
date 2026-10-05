@@ -26,6 +26,7 @@ from statlab.errors import (
 )
 from statlab.mcp_client import CallContext, McpClient, logged_calls
 from statlab.persistence.db import connect
+from statlab.persistence.models import RunRow
 from statlab.persistence.repository import (
     claim_test_scoring,
     create_contract,
@@ -1099,7 +1100,7 @@ async def test_cross_project_intermediate_fork_ancestor_is_rejected(
     }
     session = FakeSession((served_tool("echo", schema),))
     async with McpClient(settings(child_paths, tmp_path), conn, session=session) as client:
-        with pytest.raises(ArtifactError, match="ancestry crosses projects"):
+        with pytest.raises(PersistenceError, match="ancestry crosses projects"):
             await client.call(
                 context(child_paths, contract, execution.id), "echo", {"frame": str(ref)}
             )
@@ -1141,17 +1142,13 @@ async def test_missing_fork_ancestor_row_is_rejected(
     child_paths = RunPaths(parent_paths.data_dir, parent_paths.slug, child.id)
     ensure_run_layout(child_paths)
     execution = create_node_execution(conn, run_id=child.id, node_name="intake", seq=0)
-    parent_lookups = 0
 
-    def vanished_ancestor(conn_arg: sqlite3.Connection, run_id: str) -> object:
-        nonlocal parent_lookups
+    def vanished_ancestor(conn_arg: sqlite3.Connection, run_id: str) -> RunRow | None:
         if run_id == parent.id:
-            parent_lookups += 1
-            if parent_lookups > 1:
-                return None
+            return None
         return original_get_run(conn_arg, run_id)
 
-    monkeypatch.setattr("statlab.mcp_client.get_run", vanished_ancestor)
+    monkeypatch.setattr("statlab.persistence.repository.get_run", vanished_ancestor)
     schema: dict[str, object] = {
         "type": "object",
         "properties": {"frame": {"type": "string"}},
@@ -1159,7 +1156,7 @@ async def test_missing_fork_ancestor_row_is_rejected(
     }
     session = FakeSession((served_tool("echo", schema),))
     async with McpClient(settings(child_paths, tmp_path), conn, session=session) as client:
-        with pytest.raises(ArtifactError, match="outside this run's fork lineage"):
+        with pytest.raises(PersistenceError, match="ancestry is incomplete"):
             await client.call(
                 context(child_paths, contract, execution.id), "echo", {"frame": str(ref)}
             )

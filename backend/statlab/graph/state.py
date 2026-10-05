@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -85,6 +86,7 @@ class RunState(BaseModel):
     wave: int = Field(default=1, ge=1)
     budget: BudgetState | None = None
     pending_result: BoundaryResult | None = None
+    fork_metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("branches", mode="before")
     @classmethod
@@ -259,7 +261,14 @@ class RunState(BaseModel):
 
     @property
     def retained_refs(self) -> frozenset[ArtifactRef]:
-        results = self.shared_results + tuple(
-            item for branch in self.branches for item in branch.results
+        results = (
+            self.shared_results
+            + tuple(item for branch in self.branches for item in branch.results)
+            + tuple(
+                branch.pending_result
+                for branch in self.branches
+                if branch.status in ("failed", "budget_exhausted")
+                and branch.pending_result is not None
+            )
         )
         return frozenset(ref for boundary in results for ref in boundary.result.artifacts)

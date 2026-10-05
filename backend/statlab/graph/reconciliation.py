@@ -15,22 +15,28 @@ from statlab.domains.base import NodeResult
 from statlab.errors import EngineError, PersistenceError
 from statlab.events import Event
 from statlab.graph.engine import RunLoop, RunTracker
+from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.state import BoundaryResult, RunState
 from statlab.persistence.models import NodeExecutionRow, RunRow
 from statlab.persistence.repository import (
+    ensure_candidate,
     finish_node_execution,
+    get_run,
     interrupt_node_execution,
+    list_gates,
     list_node_executions,
     list_pending_gates,
     list_runs,
     update_candidate_status,
 )
+from statlab.storage import validate_checkpoint_ownership
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryBinding:
     loop: RunLoop
     initial: RunState
+    lifecycle: RunLifecycle | None = None
 
 
 type BindingResolver = Callable[[RunRow], RecoveryBinding]
@@ -54,14 +60,21 @@ class RestartReconciler:
         dormant: list[RunState] = []
         try:
             for row in list_runs(self.conn, project_id):
-                if row.status in ("completed", "failed", "cancelled", "superseded"):
+                if row.status in ("completed", "failed", "cancelled", "superseded") and not any(
+                    gate.status in ("answered", "prepared", "applied")
+                    for gate in list_gates(self.conn, row.id)
+                ):
                     continue
                 binding = self.resolver(row)
                 loop = binding.loop
                 if loop.tracker is not self.tracker:
                     raise EngineError("recovery requires shared run tracker")
                 state = await loop.load_state(binding.initial, row)
-                if row.status in ("paused", "awaiting_user"):
+                if loop.gate_reconciler is not None:
+                    state = await loop.gate_reconciler(state)
+                    # Accepted answers may have prepared state before SQL/event repair.
+                    row = get_run(self.conn, row.id) or row
+                if row.status in ("paused", "cancelled", "superseded"):
                     # Validate projection rather than bypassing RunState's pending-result rules.
                     state = RunState.model_validate({**state.model_dump(), "status": row.status})
                 await self._repair_boundaries(loop, state)
@@ -91,12 +104,15 @@ class RestartReconciler:
                                 await self._gates(loop, state.run_id, pending.execution_id)
                     dormant.append(state)
                 else:
-                    runnable.append(binding)
+                    runnable.append(RecoveryBinding(loop, state, binding.lifecycle))
         except (sqlite3.Error, OSError, ValueError) as exc:
             raise PersistenceError("restart preparation failed", cause=exc) from exc
         return RecoveryBatch(
             tasks=tuple(
-                asyncio.create_task(binding.loop.run(binding.initial)) for binding in runnable
+                asyncio.create_task(
+                    (binding.lifecycle or RunLifecycle(binding.loop, binding.initial)).start()
+                )
+                for binding in runnable
             ),
             dormant=tuple(dormant),
         )
@@ -134,6 +150,13 @@ class RestartReconciler:
 
     async def _repair_boundaries(self, loop: RunLoop, state: RunState) -> None:
         for branch in state.branches:
+            ensure_candidate(
+                self.conn,
+                candidate_id=branch.database_id(state.run_id),
+                run_id=state.run_id,
+                spec=branch.spec,
+                wave=branch.wave,
+            )
             candidate = self.conn.execute(
                 "SELECT run_id, spec_json, wave FROM candidates WHERE id = ?",
                 (branch.database_id(state.run_id),),
@@ -160,6 +183,20 @@ class RestartReconciler:
         events = await loop.events.replay()
         for boundary in boundaries:
             row = rows.get(boundary.execution_id)
+            if row is None:
+                # Only verified immutable ancestor boundaries can bypass same-run repair.
+                validate_checkpoint_ownership(self.conn, state.run_id, state)
+                inherited = self.conn.execute(
+                    "SELECT run_id, status FROM node_executions WHERE id = ?",
+                    (boundary.execution_id,),
+                ).fetchone()
+                if (
+                    inherited is None
+                    or inherited["run_id"] == state.run_id
+                    or boundary.result.status not in ("completed", "skipped", "failed")
+                ):
+                    raise PersistenceError("checkpoint execution ownership mismatch")
+                continue
             seq = next(
                 i + 1 for i, entry in enumerate(state.spine) if entry.name == boundary.node_name
             )
@@ -243,6 +280,14 @@ class RestartReconciler:
         gates = list_pending_gates(self.conn, run_id=run_id, execution_id=execution_id)
         questions = tuple(gate.question() for gate in gates)
         for gate, question in zip(gates, questions, strict=True):
+            if any(
+                event.type == "gate.opened"
+                and event.payload.get("gate_id") == gate.id
+                and isinstance(opened := event.payload.get("question"), dict)
+                and opened.get("revision") == question.get("revision")
+                for event in await loop.events.replay()
+            ):
+                continue
             await loop.events.append(
                 "gate.opened",
                 {

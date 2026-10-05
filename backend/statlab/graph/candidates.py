@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from statlab_contracts.candidate import CandidateSpec
 from statlab_contracts.contract import Constraints
-from statlab_contracts.envelope import Failure, ToolSuccess
+from statlab_contracts.envelope import Failure, ToolSuccess, retry_budget
 
-from statlab.errors import EngineError, PersistenceError
+from statlab.errors import EngineError, PersistenceError, ToolCallError
+from statlab.graph.recovery import Sleep, recover_call
 from statlab.mcp_client import CallContext, McpClient, Repair
+from statlab.persistence.repository import get_run
 
 if TYPE_CHECKING:
     from statlab.graph.state import CandidateProgress, RunState, SpineEntry
@@ -67,7 +69,7 @@ type RetuneDecider = Callable[[RunState, CandidateProgress], Awaitable[bool]]
 type StopReason = Literal["paused", "cancelled", "budget_exhausted"]
 
 
-class BoundaryStopError(Exception):
+class BoundaryStopError(EngineError):
     """Internal lifecycle/admission signal; never a node failure."""
 
     def __init__(self, reason: StopReason) -> None:
@@ -85,6 +87,11 @@ class RunControl:
 
     def request_cancel(self) -> None:
         self._cancel = True
+
+    def resume(self) -> None:
+        if self._cancel:
+            raise EngineError("cancelled control cannot resume")
+        self._pause = False
 
     @property
     def status(self) -> Literal["paused", "cancelled"] | None:
@@ -141,8 +148,16 @@ class FitBudget:
 class ToolBoundary:
     """Use one already-entered client; preserve its dispatch and repair contract."""
 
-    def __init__(self, client: McpClient, control: RunControl, budget: FitBudget) -> None:
+    def __init__(
+        self,
+        client: McpClient,
+        control: RunControl,
+        budget: FitBudget,
+        *,
+        sleep: Sleep | None = None,
+    ) -> None:
         self.client, self.control, self.budget = client, control, budget
+        self.sleep = sleep
         budget.discover(client)
 
     async def call(
@@ -154,37 +169,54 @@ class ToolBoundary:
         trusted: Mapping[str, JsonValue] | None = None,
         repair: Repair | None = None,
     ) -> ToolSuccess:
-        self.control.check()
         spec = self.client.tools.get(tool)
-        if spec is not None and spec.heavy:
-            self.budget.admit()
 
         guarded: Repair | None = None
+        repaired = False
+        attempts = 0
         if repair is not None:
             callback = repair
 
             async def guarded_repair(failure: Failure) -> dict[str, JsonValue]:
+                nonlocal repaired, attempts
+                repaired = True
                 self.control.check()
+                if attempts >= retry_budget("transient"):
+                    raise ToolCallError(tool, failure)
                 if spec is not None and spec.heavy:
                     self.budget.admit()
                 corrected = await callback(failure)
                 self.control.check()
                 if spec is not None and spec.heavy:
                     self.budget.admit()
+                attempts += 1
                 return corrected
 
             guarded = guarded_repair
 
-        try:
-            result = await self.client.call(
+        async def dispatch() -> ToolSuccess:
+            nonlocal attempts
+            self.control.check()
+            if spec is not None and spec.heavy:
+                self.budget.admit()
+            attempts += 1
+            return await self.client.call(
                 ctx,
                 tool,
                 params,
                 trusted=trusted,
                 repair=guarded,
             )
-        except Exception:
+
+        def can_retry() -> bool:
             self.control.check()
-            raise
-        self.control.check()
-        return result
+            run = get_run(self.client.conn, ctx.paths.run_id)
+            if run is None:
+                raise PersistenceError("run does not exist")
+            return not repaired and not (tool.startswith("score_") and run.test_scored_at)
+
+        # Return successful calls to the node so it can retain the result. The next
+        # admission stops an incomplete node; the engine commits a completed node.
+        if self.sleep is None:
+            return await recover_call(dispatch, can_retry=can_retry)
+        return await recover_call(dispatch, sleep=self.sleep, can_retry=can_retry)
