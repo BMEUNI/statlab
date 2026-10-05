@@ -8,11 +8,12 @@ import logging
 import math
 import os
 import sqlite3
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic_core import from_json
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
@@ -24,6 +25,8 @@ from litellm.exceptions import (
     ServiceUnavailableError,
     Timeout,
 )
+from litellm.main import stream_chunk_builder
+from litellm.types.utils import Choices, Message, ModelResponseStream, Usage
 from statlab_contracts.envelope import ErrorClass, Failure
 
 from statlab.config import Settings
@@ -44,7 +47,17 @@ _TRANSIENT_ERRORS = (
     Timeout,
     APIConnectionError,
     ServiceUnavailableError,
+    TimeoutError,
 )
+
+type ProseSink = Callable[[str, bool], Awaitable[None]]
+
+
+@runtime_checkable
+class _ProseStream(Protocol):
+    def __aiter__(self) -> AsyncIterator[ModelResponseStream]: ...
+
+    def aclose(self) -> Awaitable[None]: ...
 
 
 class CallRecovery(Protocol):
@@ -78,14 +91,7 @@ class LlmClient:
         recovery: CallRecovery | None = None,
     ) -> T:
         """Return a validated model, repairing one invalid response exactly once."""
-        try:
-            execution = conn.execute(
-                "SELECT run_id FROM node_executions WHERE id = ?", (node_execution_id,)
-            ).fetchone()
-        except sqlite3.Error as exc:
-            raise PersistenceError("cannot verify LLM call execution", cause=exc) from exc
-        if execution is None or execution["run_id"] != run_id:
-            raise PersistenceError("LLM call execution does not belong to run")
+        _verify_execution(conn, run_id, node_execution_id)
 
         return await self._complete(
             conn,
@@ -97,6 +103,42 @@ class LlmClient:
             reasoning=reasoning,
             example=example,
             recovery=recovery,
+        )
+
+    async def complete_prose[T: BaseModel](
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        node_execution_id: str,
+        model: str,
+        messages: Sequence[dict[str, str]],
+        output: type[T],
+        sink: ProseSink,
+        reasoning: bool = False,
+        example: dict[str, JsonValue] | None = None,
+        recovery: CallRecovery | None = None,
+    ) -> T:
+        _verify_execution(conn, run_id, node_execution_id)
+        try:
+            text_schema = output.model_json_schema()["properties"]["text"]
+            if not isinstance(text_schema, dict) or text_schema.get("type") != "string":
+                raise ValueError
+        except Exception as exc:
+            raise LlmCallError(
+                Failure(error_class="bug", message="prose output has no text field")
+            ) from exc
+        return await self._complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=node_execution_id,
+            model=model,
+            messages=messages,
+            output=output,
+            reasoning=reasoning,
+            example=example,
+            recovery=recovery,
+            sink=sink,
         )
 
     async def complete_setup[T: BaseModel](
@@ -132,6 +174,7 @@ class LlmClient:
         reasoning: bool,
         example: dict[str, JsonValue] | None,
         recovery: CallRecovery | None,
+        sink: ProseSink | None = None,
     ) -> T:
         tier = _capability_tier(model)
         base_messages = [message.copy() for message in messages]
@@ -161,6 +204,7 @@ class LlmClient:
                     messages=sent_messages,
                     tier=tier,
                     reasoning=reasoning,
+                    sink=sink,
                 )
 
             response = await request() if recovery is None else await recovery(request)
@@ -198,14 +242,17 @@ class LlmClient:
         messages: list[dict[str, str]],
         tier: str,
         reasoning: bool,
+        sink: ProseSink | None = None,
     ) -> ModelResponse:
         kwargs: dict[str, object] = {
             "model": model,
             "messages": messages,
-            "stream": False,
+            "stream": sink is not None,
             "timeout": _REQUEST_TIMEOUT,
             "num_retries": 0,
         }
+        if sink is not None:
+            kwargs["stream_options"] = {"include_usage": True}
         if tier == "schema":
             kwargs["response_format"] = output
         elif tier == "json":
@@ -218,7 +265,15 @@ class LlmClient:
         async with self._semaphore:
             started = monotonic()
             try:
-                raw_response = await self._acompletion(**kwargs)
+                if sink is None:
+                    raw_response = await self._acompletion(**kwargs)
+                else:
+                    async with asyncio.timeout(_REQUEST_TIMEOUT):
+                        await sink("", True)
+                        raw_stream = await self._acompletion(**kwargs)
+                        raw_response = await _consume_prose(
+                            raw_stream, sink=sink, messages=messages, model=model
+                        )
             except asyncio.CancelledError:
                 duration = _duration(started)
                 try:
@@ -232,6 +287,29 @@ class LlmClient:
                     )
                 except PersistenceError:
                     _LOGGER.warning("Could not record cancelled LLM request")
+                raise
+            except PersistenceError:
+                try:
+                    _record(
+                        conn,
+                        run_id=run_id,
+                        node_execution_id=node_execution_id,
+                        signature=output.__name__,
+                        model=model,
+                        duration_ms=_duration(started),
+                    )
+                except PersistenceError:
+                    _LOGGER.warning("Could not record failed prose request")
+                raise
+            except LlmCallError:
+                _record(
+                    conn,
+                    run_id=run_id,
+                    node_execution_id=node_execution_id,
+                    signature=output.__name__,
+                    model=model,
+                    duration_ms=_duration(started),
+                )
                 raise
             except Exception as exc:
                 _record(
@@ -300,6 +378,110 @@ class LlmClient:
                 cause=exc,
             ) from exc
         return raw_response
+
+
+def _verify_execution(conn: sqlite3.Connection, run_id: str, node_execution_id: str) -> None:
+    try:
+        execution = conn.execute(
+            "SELECT run_id FROM node_executions WHERE id = ?", (node_execution_id,)
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise PersistenceError("cannot verify LLM call execution", cause=exc) from exc
+    if execution is None or execution["run_id"] != run_id:
+        raise PersistenceError("LLM call execution does not belong to run")
+
+
+def _partial_text(content: str) -> str | None:
+    # ponytail: O(n²) partial parsing stays behind the 131072-character bound.
+    try:
+        value: object = from_json(
+            content.encode(), allow_partial="trailing-strings", allow_inf_nan=False
+        )
+    except ValueError:
+        return None
+    if isinstance(value, dict):
+        text = value.get("text")
+        return text if isinstance(text, str) else None
+    return None
+
+
+async def _consume_prose(
+    raw: object, *, sink: ProseSink, messages: list[dict[str, str]], model: str
+) -> ModelResponse:
+    if not isinstance(raw, _ProseStream):
+        raise LlmCallError(Failure(error_class="bug", message="LLM returned a malformed stream"))
+    chunks: list[ModelResponseStream] = []
+    content = ""
+    emitted = ""
+    try:
+        async for chunk in raw:
+            if not isinstance(chunk, ModelResponseStream):
+                raise LlmCallError(
+                    Failure(error_class="bug", message="LLM returned a malformed stream")
+                )
+            chunks.append(chunk)
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            if choice.index != 0:
+                raise LlmCallError(
+                    Failure(error_class="bug", message="LLM returned a malformed stream")
+                )
+            fragment = choice.delta.content
+            if fragment is None or fragment == "":
+                continue
+            if not isinstance(fragment, str):
+                raise LlmCallError(
+                    Failure(error_class="bug", message="LLM returned a malformed stream")
+                )
+            content += fragment
+            if len(content) > 131072:
+                raise LlmCallError(
+                    Failure(error_class="bug", message="prose response exceeds limit")
+                )
+            partial = _partial_text(content)
+            if partial is None:
+                continue
+            if not partial.startswith(emitted):
+                raise LlmCallError(Failure(error_class="bug", message="prose prefix changed"))
+            if len(partial) > len(emitted):
+                await sink(partial[len(emitted) :], False)
+                emitted = partial
+        if not any(chunk.choices for chunk in chunks):
+            stream_usage: object = next(
+                (
+                    usage
+                    for chunk in reversed(chunks)
+                    if (usage := getattr(chunk, "usage", None)) is not None
+                ),
+                None,
+            )
+            if stream_usage is not None and not isinstance(stream_usage, Usage):
+                raise LlmCallError(
+                    Failure(error_class="bug", message="LLM returned malformed usage metadata")
+                )
+            response = ModelResponse(
+                model=model,
+                choices=[
+                    Choices(
+                        index=0,
+                        message=Message(role="assistant", content=""),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=stream_usage
+                if isinstance(stream_usage, Usage)
+                else Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            )
+        else:
+            response = stream_chunk_builder(chunks, messages=messages)
+        if not isinstance(response, ModelResponse) or _content(response) != content:
+            raise LlmCallError(
+                Failure(error_class="bug", message="LLM returned a malformed stream")
+            )
+        return response
+    finally:
+        await raw.aclose()
 
 
 def _capability_tier(model: str) -> str:

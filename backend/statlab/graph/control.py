@@ -16,7 +16,7 @@ from statlab_contracts.envelope import Failure
 from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.candidates import BudgetState
 from statlab.graph.state import RunState
-from statlab.llm.client import CallRecovery, LlmClient
+from statlab.llm.client import CallRecovery, LlmClient, ProseSink
 from statlab.llm.prompts import PromptContext
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
@@ -118,6 +118,7 @@ class ControlContext:
     artifact_summaries: tuple[ArtifactSummary, ...] = ()
     estimated_remaining_seconds: float | None = None
     recovery: CallRecovery | None = None
+    prose_sink: ProseSink | None = None
     _prompt: PromptContext = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -315,26 +316,41 @@ async def answer_question(message: str, context: ControlContext) -> ControlRespo
         ),
         question=message,
     )
-    answer = await context.llm.complete(
-        context.conn,
-        run_id=context.state.run_id,
-        node_execution_id=context.audit_execution_id,
-        model=context.router.model_for(node, skill_model=skill_model),
-        reasoning=role == Role.REASONING,
-        output=QaAnswer,
-        messages=(
-            messages[0],
-            {
-                "role": "system",
-                "content": "Answer the user's question from the captured evidence only. "
-                "Cite only visible_refs. "
-                "Disclose missing/unexecuted evidence. Never recommend test-based selection, "
-                "inspection or refitting. Do not perform actions or claim actions happened.",
-            },
-            messages[1],
-        ),
-        recovery=context.recovery,
+    model = context.router.model_for(node, skill_model=skill_model)
+    request_messages = (
+        messages[0],
+        {
+            "role": "system",
+            "content": "Answer the user's question from the captured evidence only. "
+            "Cite only visible_refs. "
+            "Disclose missing/unexecuted evidence. Never recommend test-based selection, "
+            "inspection or refitting. Do not perform actions or claim actions happened.",
+        },
+        messages[1],
     )
+    if context.prose_sink is None:
+        answer = await context.llm.complete(
+            context.conn,
+            run_id=context.state.run_id,
+            node_execution_id=context.audit_execution_id,
+            model=model,
+            reasoning=role == Role.REASONING,
+            output=QaAnswer,
+            messages=request_messages,
+            recovery=context.recovery,
+        )
+    else:
+        answer = await context.llm.complete_prose(
+            context.conn,
+            run_id=context.state.run_id,
+            node_execution_id=context.audit_execution_id,
+            model=model,
+            reasoning=role == Role.REASONING,
+            output=QaAnswer,
+            messages=request_messages,
+            recovery=context.recovery,
+            sink=context.prose_sink,
+        )
     if not set(answer.references) <= context.visible_refs:
         raise LlmOutputError(
             Failure(error_class="tool_param", message="Q&A cited unavailable artifacts")
@@ -349,23 +365,38 @@ async def explain_status(
     template = status_template(facts)
     text = template
     if polish:
-        result = await context.llm.complete(
-            context.conn,
-            run_id=context.state.run_id,
-            node_execution_id=context.audit_execution_id,
-            model=context.router.model_for("status_explainer"),
-            reasoning=False,
-            output=ControlText,
-            messages=(
-                {
-                    "role": "system",
-                    "content": "Add brief explanatory context only. "
-                    "Canonical status, progress and ETA are "
-                    "delivered separately: do not restate or replace them or invent timing.",
-                },
-                {"role": "user", "content": template + "\n\n" + message},
-            ),
-            recovery=context.recovery,
+        model = context.router.model_for("status_explainer")
+        request_messages = (
+            {
+                "role": "system",
+                "content": "Add brief explanatory context only. "
+                "Canonical status, progress and ETA are "
+                "delivered separately: do not restate or replace them or invent timing.",
+            },
+            {"role": "user", "content": template + "\n\n" + message},
         )
+        if context.prose_sink is None:
+            result = await context.llm.complete(
+                context.conn,
+                run_id=context.state.run_id,
+                node_execution_id=context.audit_execution_id,
+                model=model,
+                reasoning=False,
+                output=ControlText,
+                messages=request_messages,
+                recovery=context.recovery,
+            )
+        else:
+            result = await context.llm.complete_prose(
+                context.conn,
+                run_id=context.state.run_id,
+                node_execution_id=context.audit_execution_id,
+                model=model,
+                reasoning=False,
+                output=ControlText,
+                messages=request_messages,
+                recovery=context.recovery,
+                sink=context.prose_sink,
+            )
         text = result.text
     return ControlResponse(category="status", text=text, facts=facts, template=template)

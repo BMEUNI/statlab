@@ -170,3 +170,22 @@ not re-derive any of this from memory:
 - **`MCPServer` runs a *sync* tool in an AnyIO worker thread but awaits an *async* tool on the event loop.** `@tool`'s wrapper is async (it awaits the fit semaphore), so it must offload the body itself with `anyio.to_thread.run_sync` — otherwise every tool call in every run serialises on one thread. Measured: 4 × 0.5 s calls took 2.09 s inline, 0.54 s offloaded. Test T17b pins it with a two-party barrier. Found 2026-10-01 while drafting chunk 09.
 - `mcp` depends on **`httpx2` 2.12.0**, installed alongside our pinned `httpx==0.28.1`. Both
   exist by design; do not "consolidate" them.
+
+## B14 inspected framework boundaries (2026-10-05; runtime unverified)
+
+- Browser pins: React/react-dom19.3.0, TanStack Query5.104.1, Vite8.3.2, TypeScript5.9.3,
+  @types/react and react-dom19.3.0, @types/node24.19.1. Local Node24.13.1/npm11.8.0.
+  Native TS test files require Node24 minimum in this project; parameter properties need
+  transformation and are prohibited. `erasableSyntaxOnly` and `verbatimModuleSyntax` catch these
+  compatibility errors statically. [Node docs](https://nodejs.org/api/typescript.html),
+  [TypeScript docs](https://www.typescriptlang.org/tsconfig/erasableSyntaxOnly.html).
+- Native EventSource owns reconnect and Last-Event-ID. Same-object total sequence tracking spans
+  candidate events; UI display hook stores only the last event, not full workspace history.
+  [EventSource standard](https://html.spec.whatwg.org/multipage/server-sent-events.html).
+- Uvicorn drains HTTP tasks before lifespan shutdown. Supported `python -m statlab.main` closes
+  SSE from its early signal hook; bare `uvicorn statlab.main:app` lacks that hook. Repeated signals
+  must not bypass the existing task drain. Parent dev launcher waits API before stopping MCP.
+- Inspected LiteLLM1.100.0 stream builder returns None for no chunks; usage-only chunks can index
+  an absent first choice. B14 normalizes only these empty-content cases and retains accounting.
+  Pydantic partial JSON decodes text prefixes; final model validation remains authoritative.
+  These source/SDK facts are not behavioral or coverage acceptance; see [B14 receipt](./receipts/B14.md).

@@ -64,7 +64,7 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B11 | 29 nodes 12–13 + 30 control router | implemented/reviewed; static acceptance 2026-10-05, exit0; runtime/coverage outstanding under user test stop. [Receipt](./receipts/B11.md). |
 | B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11 |
 | B13 | 33 API projects + 34 API runs | implemented/reviewed; static acceptance 2026-10-05, exit0; runtime/coverage outstanding under user test stop; [receipt](./receipts/B13.md) |
-| B14 | 35 SSE + 36 frontend scaffold | M12 |
+| B14 | 35 SSE + 36 frontend scaffold | implemented/reviewed; static acceptance 2026-10-05, exit0; frontend typecheck/build passed; M12 runtime/replay and coverage outstanding under user test stop; [receipt](./receipts/B14.md) |
 | B15 | 37 setup flow + 38 run workspace | |
 | B16 | 39 comparison + 40 report | M13 |
 
@@ -136,13 +136,13 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 |---|---|---|---|
 | 33 | `33_api_projects.md` — projects, dataset upload (≤200 MB, stored as `datasets/<sha256>.csv`, chunk 08 D-a), contract upload/validate/propose | implemented; static-only B13, runtime/coverage outstanding | 03, 05, 06 |
 | 34 | `34_api_runs.md` — run creation, state snapshot, messages, gate answers, control actions (incl. rewind → new run id) | implemented; static-only B13, runtime/coverage outstanding | 22, 32, 33 |
-| 35 | `35_sse_stream.md` — SSE endpoint, `?since=` replay from `events.jsonl`, 15 s heartbeat, token-delta streaming for prose only | untouched | 22, 34 |
+| 35 | [`35_sse_stream.md`](./35_sse_stream.md) — SSE endpoint, `?since=` replay from `events.jsonl`, 15 s heartbeat, token-delta streaming for prose only | implemented (static only; tests stopped) | 22, 34 |
 
 ## Phase G — Frontend (36–40)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
-| 36 | `36_frontend_scaffold.md` — Vite + TS strict, typed API client, `EventSource` hook with `seq` tracking and reconnect | untouched | 35 |
+| 36 | [`36_frontend_scaffold.md`](./36_frontend_scaffold.md) — Vite + TS strict, typed API client, `EventSource` hook with `seq` tracking and reconnect | implemented (static only; tests stopped) | 35 |
 | 37 | `37_frontend_setup_flow.md` — project picker, upload wizard, contract mapping table, mode selection | untouched | 33, 36 |
 | 38 | `38_frontend_run_workspace.md` — node graph (shared spine + candidate columns), chat with token streaming, inline gate forms | untouched | 35, 37 |
 | 39 | `39_frontend_comparison.md` — candidate comparison table sortable by metric with `varies_from_baseline`, artifact browser, live cost | untouched | 38 |

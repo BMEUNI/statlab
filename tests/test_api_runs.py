@@ -15,7 +15,6 @@ import httpx
 import litellm
 import pytest
 from fastapi import FastAPI
-from litellm import ModelResponse
 from litellm.exceptions import APIConnectionError
 from pydantic import JsonValue, SecretStr, TypeAdapter
 from statlab.api.projects import APIResources
@@ -172,13 +171,20 @@ async def _open_run_api(
         selected_records.executors[runtime.paths.run_id] = executor
         return executor
 
-    async def complete(**kwargs: object) -> ModelResponse:
+    async def complete(**kwargs: object) -> object:
         selected_records.requests.append(dict(kwargs))
         if not selected_records.replies:
             raise AssertionError("no canned run LLM response remains")
         reply = selected_records.replies.popleft()
         if isinstance(reply, BaseException):
             raise reply
+        if kwargs.get("stream") is True:
+            from tests.test_llm_stream import FakeStream, chunk
+
+            midpoint = len(reply) // 2
+            return FakeStream(
+                (chunk(reply[:midpoint]), chunk(reply[midpoint:]), chunk(None, usage=True))
+            )
         return _model_response(reply)
 
     def check_bound_models(
@@ -906,6 +912,22 @@ async def test_messages_status_noise_qa_and_provider_failure(
         assert tuple(event.payload["message_id"] for event in assistant_events) == tuple(
             row.id for row in messages[1::2]
         )
+        assert tuple(event.payload["reply_to"] for event in assistant_events) == tuple(
+            row.id for row in messages[::2]
+        )
+        deltas = tuple(
+            event
+            for event in await api.registry.bindings[run_id].loop.events.replay()
+            if event.type == "message.assistant.delta"
+        )
+        assert len(deltas) >= 1
+        assert (
+            "".join(str(event.payload["text"]) for event in deltas if not event.payload["reset"])
+            == responses[2]["text"]
+        )
+        assert all(event.payload["reply_to"] == messages[4].id for event in deltas)
+        assert api.records.requests[3]["stream"] is False
+        assert api.records.requests[4]["stream"] is True
         assert all(event.payload["session_id"] == config.session_id for event in events)
         assert all(event.run_id == run_id for event in events)
         joined = api.conn.execute(
@@ -943,9 +965,17 @@ async def test_messages_status_noise_qa_and_provider_failure(
         events = tuple(
             event
             for event in await api.registry.bindings[run_id].loop.events.replay()
-            if event.type in ("message.user", "message.assistant.complete")
+            if event.type in ("message.user", "message.assistant.complete", "error")
         )
-        assert tuple(event.type for event in events) == ("message.user",)
+        assert tuple(event.type for event in events) == (
+            "message.user",
+            "error",
+        )
+        assert events[1].payload == {
+            "reply_to": events[0].payload["message_id"],
+            "message": "Assistant response failed.",
+            "discard_draft": True,
+        }
         assert events[0].payload["message_id"] == rows[0].id
         assert events[0].run_id == run_id and events[0].payload["session_id"] == config.session_id
         joined = api.conn.execute(
@@ -984,9 +1014,17 @@ async def test_messages_status_noise_qa_and_provider_failure(
         events = tuple(
             event
             for event in await api.registry.bindings[run_id].loop.events.replay()
-            if event.type in ("message.user", "message.assistant.complete")
+            if event.type in ("message.user", "message.assistant.complete", "error")
         )
-        assert tuple(event.type for event in events) == ("message.user",)
+        assert tuple(event.type for event in events) == (
+            "message.user",
+            "error",
+        )
+        assert events[1].payload == {
+            "reply_to": events[0].payload["message_id"],
+            "message": "Assistant response failed.",
+            "discard_draft": True,
+        }
         assert events[0].payload["message_id"] == rows[0].id
         assert events[0].run_id == run_id and events[0].payload["session_id"] == config.session_id
         joined = api.conn.execute(

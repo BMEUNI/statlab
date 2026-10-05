@@ -6,11 +6,11 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**35 of 41 chunks implemented, plus revisions 09r and 20r. B13 reviewed with static-only acceptance 2026-10-05.**
-B9–B13 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
+**37 of 41 chunks implemented, plus revisions 09r and 20r. B14 reviewed with static-only acceptance 2026-10-05.**
+B9–B14 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
 batch with full behavioral/coverage acceptance. [B9 receipt](./receipts/B9.md),
 [B10 receipt](./receipts/B10.md), [B11 receipt](./receipts/B11.md), [B12 receipt](./receipts/B12.md)
-and [B13 receipt](./receipts/B13.md)
+and [B13 receipt](./receipts/B13.md), [B14 receipt](./receipts/B14.md)
 record this limit. B9 committed at `31bdf67`.
 B7 committed at `1e9fe6a`; B6 committed at `de2aa83`. Phases A/B and M7b complete.
 
@@ -24,10 +24,15 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B14 (chunks35–36, SSE then frontend scaffold; not started)
+## Next: batch B15 (chunks37–38, setup flow then run workspace; unstarted)
 
-Read B14 dependency rows and relevant PLAN decisions before its bounded detailed specs.
-B13 is finished; B14 has no new spec or delegation in this batch. Preserve B13's fresh per-run
+Chunk35's [SSE implementation](./35_sse_stream.md) and chunk36's
+[browser scaffold/launcher](./36_frontend_scaffold.md) are terminal and reviewed. Scoped statics,
+frontend typecheck/build/Make dryrun and one final global Python static acceptance passed.
+M12 runtime/replay proof remains outstanding. Backend implementation is complete; behavioral
+acceptance remains limited by the test stop. B15 and B16 remain; no B15 spec or source work started.
+Specify chunk37 only when authorized, using dependencies33/36; specify38 only after37's terminal
+handoff (dependencies35/37). Preserve B13's fresh per-run
 runtime/loop/lifecycle/GateService/ForkService, revision callback and tabular retained-report
 publisher. API caller owns registry, execution/continuation tasks and shutdown drain; inbound
 controls use real same-run audit_anchor. Gate reconciliation precedes restart scans. Retried
@@ -85,12 +90,21 @@ stopped by user; use focused statics and one final global static gate, disclose 
   SDK-established credential requirements; additional provider support needs a future decision.
 - Reuse one shared B6 LLM client/semaphore: one repair, 60-second timeout, no hidden retry.
   Event bus remains one writer per run/process; no multi-process coordination added.
+- B14 keeps persisted envelope replay and atomic replay/live handoff, max(query,Last-Event-ID),
+  total seq across candidates, shutdown-first SSE close and bounded prose-only deltas. Only
+  validated final responses feed controls; attempt accounting remains authoritative. Supported API launcher is
+  `python -m statlab.main`; bare Uvicorn lacks the early stream-close signal hook.
+  Local dev drains UI, API, then MCP without force-kill; no runtime proof yet.
+- Browser native EventSource owns reconnect; fatal parse/identity/sequence errors close the
+  stream, cleanup invalidates late callbacks. `useRunEvents.lastEvent` is display-only, not a
+  complete history; B15 workspace must consume every `connectRunEvents` callback. Scaffold
+  has read-only projects/run inspection, no gate/lifecycle actions. Build emitted unsuppressed
+  dependency `use client` directive warnings; browser-only entry has no Server Components.
 
 ## Deferred responsibilities
 
 | Responsibility | Owner |
 |---|---|
-| SSE delivery and browser shell | B14 |
 | Chat workspace | B15 / 38 |
 | Remaining table repositories | First real caller's chunk |
 

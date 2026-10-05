@@ -11,9 +11,7 @@ install: ## Sync the pinned dependency set
 	uv sync --all-groups
 
 check-env: ## Fail fast if configuration is missing or unsafe
-	@$(PY) -c "from statlab.config import load_settings; load_settings(); print('backend config OK')"
-	@$(PY) -c "from statlab_tools.settings import load_tool_settings; load_tool_settings(); print('mcp config OK')"
-	@$(PY) -m statlab.llm.routing
+	@$(PY) scripts/dev.py check
 
 test: ## Run the full suite with coverage gating
 	$(PY) -c 'import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:], timeout=900).returncode)' $(PY) -m pytest -q --cov --cov-report=term
@@ -36,16 +34,16 @@ typecheck: ## mypy --strict
 	$(PY) -m mypy
 
 api: check-env ## Run the backend alone (chunk 33+)
-	@echo "not implemented until chunk 33"
+	$(PY) -m statlab.main
 
 mcp: check-env ## Run the MCP server alone (chunk 07+)
 	$(PY) -m statlab_tools
 
 ui: ## Run the Vite dev server alone (chunk 36+)
-	@echo "not implemented until chunk 36"
+	cd frontend && node node_modules/vite/bin/vite.js
 
-dev: check-env ## Run all three processes; one Ctrl-C stops everything
-	@echo "not implemented until chunk 36; check-env works today"
+dev: ## Run all three processes; one Ctrl-C stops everything
+	$(PY) scripts/dev.py dev
 
 db-reset: ## Delete the database (chunk 05+)
 	rm -f statlab.db statlab.db-wal statlab.db-shm

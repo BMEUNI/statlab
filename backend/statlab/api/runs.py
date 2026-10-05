@@ -7,7 +7,7 @@ import hashlib
 import os
 import re
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +27,7 @@ from statlab_contracts.layout import RunPaths
 from statlab.api.projects import APIResources, ProjectsService, require_complete
 from statlab.domains.binding import RunBinding, bind_tabular
 from statlab.domains.tabular import TABULAR_DOMAIN
-from statlab.errors import ConfigError, EngineError, PersistenceError
+from statlab.errors import ConfigError, EngineError, LlmCallError, LlmOutputError, PersistenceError
 from statlab.graph.checkpoint import Checkpointer
 from statlab.graph.control import ControlContext, ControlResponse, ControlText, ConversationTurn
 from statlab.graph.engine import RunTracker
@@ -156,6 +156,7 @@ class RunRegistry:
         self.execution_tasks: dict[str, asyncio.Task[RunState]] = {}
         self.failed_tasks: set[str] = set()
         self.closing = False
+        self.streams_closing = asyncio.Event()
         self._lock = asyncio.Lock()
         self._admitted: set[asyncio.Task[object]] = set()
         self.requests_drained = asyncio.Event()
@@ -352,7 +353,7 @@ class RunRegistry:
             self._adopt(run_id, task)
 
     async def shutdown(self) -> None:
-        self.closing = True
+        self.begin_shutdown()
         await self.requests_drained.wait()
         first_failure: BaseException | None = None
         for run_id, binding in tuple(self.bindings.items()):
@@ -396,6 +397,10 @@ class RunRegistry:
                 self._completed(run_id, task)
         if first_failure is not None:
             raise first_failure
+
+    def begin_shutdown(self) -> None:
+        self.closing = True
+        self.streams_closing.set()
 
     def _adopt(self, run_id: str, task: asyncio.Task[RunState]) -> None:
         self.execution_tasks[run_id] = task
@@ -641,21 +646,6 @@ class RunRegistry:
             while sum(len(turn.text) for turn in turns) > 16000:
                 turns = turns[1:]
             current_node = anchor.node_name if state.cursor < len(state.spine) else None
-            context = ControlContext(
-                conn=self.resources.conn,
-                llm=self.resources.llm,
-                router=self.resources.router,
-                state=state,
-                contract=binding.runtime.contract,
-                skill=binding.runtime.skill,
-                audit_execution_id=anchor.id,
-                current_node=current_node,
-                memory=binding.runtime.memory,
-                conversation=turns,
-                artifact_summaries=(),
-                estimated_remaining_seconds=None,
-                recovery=None,
-            )
 
             async def change(
                 message: str, classified: InterruptClass, ctx: ControlContext
@@ -670,10 +660,59 @@ class RunRegistry:
                 ),
                 polish_status=False,
             )
+
+            async def prose_sink(text: str, reset: bool) -> None:
+                await binding.loop.events.append(
+                    "message.assistant.delta",
+                    {
+                        "reply_to": user.id,
+                        "session_id": user.session_id,
+                        "text": text,
+                        "reset": reset,
+                    },
+                )
+
+            context = ControlContext(
+                conn=self.resources.conn,
+                llm=self.resources.llm,
+                router=self.resources.router,
+                state=state,
+                contract=binding.runtime.contract,
+                skill=binding.runtime.skill,
+                audit_execution_id=anchor.id,
+                current_node=current_node,
+                memory=binding.runtime.memory,
+                conversation=turns,
+                artifact_summaries=(),
+                estimated_remaining_seconds=None,
+                recovery=None,
+                prose_sink=prose_sink,
+            )
             try:
                 response = await router.handle(body.text, context)
             except EngineError:
                 raise HTTPException(409, "run transition rejected") from None
+            except LlmCallError, LlmOutputError:
+                await binding.loop.events.append(
+                    "error",
+                    {
+                        "reply_to": user.id,
+                        "message": "Assistant response failed.",
+                        "discard_draft": True,
+                    },
+                )
+                raise
+            except asyncio.CancelledError:
+                with suppress(PersistenceError):
+                    await binding.loop.events.append(
+                        "error",
+                        {
+                            "reply_to": user.id,
+                            "message": "Assistant response cancelled.",
+                            "discard_draft": True,
+                        },
+                    )
+                raise
             assistant = create_message(
                 self.resources.conn,
                 session_id=config.session_id,
@@ -686,6 +725,7 @@ class RunRegistry:
                 "message.assistant.complete",
                 {
                     "message_id": assistant.id,
+                    "reply_to": user.id,
                     "session_id": assistant.session_id,
                     "text": assistant.content,
                     "response": response.model_dump(mode="json", exclude={"text"}),

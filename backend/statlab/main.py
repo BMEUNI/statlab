@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from types import FrameType
 
+import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from statlab.api.projects import APIResources, projects_router
 from statlab.api.runs import RunRegistry, runs_router
+from statlab.api.stream import stream_router
 from statlab.config import Settings, ensure_writable, load_settings
 from statlab.domains.routing import NODE_ROLES
 from statlab.domains.tabular import TABULAR_DOMAIN
@@ -56,7 +60,6 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         nonlocal active_resources, active_registry
-        del application
         selected = settings if settings is not None else load_settings()
         ensure_writable(selected.data_dir)
         ensure_writable(selected.db_path.parent)
@@ -96,6 +99,7 @@ def create_app(
                     environment,
                 )
                 active_registry = RunRegistry(active_resources)
+                application.state.run_registry = active_registry
                 try:
                     await active_registry.boot()
                     yield
@@ -103,6 +107,7 @@ def create_app(
                     try:
                         await active_registry.shutdown()
                     finally:
+                        application.state.run_registry = None
                         active_registry = None
                         active_resources = None
         finally:
@@ -114,6 +119,7 @@ def create_app(
     )
     app.include_router(projects_router(resources))
     app.include_router(runs_router(registry))
+    app.include_router(stream_router(registry))
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -164,4 +170,39 @@ def create_app(
     return app
 
 
+class _RunServer(uvicorn.Server):
+    def __init__(self, application: FastAPI, settings: Settings) -> None:
+        self._application = application
+        super().__init__(
+            uvicorn.Config(application, host=settings.api_host, port=settings.api_port)
+        )
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        registry = getattr(self._application.state, "run_registry", None)
+        if isinstance(registry, RunRegistry):
+            registry.begin_shutdown()
+        if self.should_exit:
+            return
+        super().handle_exit(sig, frame)
+
+
+def main() -> int:
+    try:
+        settings = load_settings()
+        application = create_app(settings)
+        server = _RunServer(application, settings)
+        server.run()
+        return 0
+    except ConfigError:
+        print(
+            "Backend configuration is invalid. Check .env and configuration values.",
+            file=sys.stderr,
+        )
+        return 2
+
+
 app = create_app()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
