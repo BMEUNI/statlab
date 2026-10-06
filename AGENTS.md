@@ -34,7 +34,7 @@ Describe exact implementation steps in prose, signatures, data definitions and n
 pseudocode. All code writing and source mutation/restoration belongs to the implementer, including
 one-line fixes and review corrections. No complexity, urgency or failed-worker exception.
 
-Main may edit project workflow instructions, Codex agent settings, plans and acceptance receipts.
+Main may edit project workflow instructions, Codex/Claude agent settings, plans and acceptance receipts.
 Main may read source/diffs and run read-only inspection and validation commands. Do not delegate
 a policy-only edit merely for ceremony. Skills and old specs do not grant either role extra authority.
 
@@ -77,11 +77,17 @@ delegating. A behavior summary or file list alone is not an implementation-ready
 
 ### Implementation and review loop
 
-1. Spawn one writer with `agent_type="implementer"` and `fork_turns="none"`. Only `gpt-6-luna`
-   with low reasoning is authorized for subagents. Never spawn Sol, `implementer_strong`, generic
-   workers, explorers, reviewers or other roles; never escalate model/effort after failures.
-   Check the available role configuration before source work: if it pins another model/effort,
-   report the runtime mismatch and require a fresh session rather than silently substituting.
+1. Spawn one writer with the current runtime's `implementer` role, never a fork or context copy:
+   - Codex: `agent_type="implementer"`, `fork_turns="none"`; `.codex/agents/implementer.toml`
+     pins `gpt-6-luna` with low reasoning.
+   - Claude Code: Agent tool `subagent_type="implementer"` (never `"fork"`, no `model` override);
+     `.claude/agents/implementer.md` pins `sonnet` with low effort. Continue the same stage's
+     implementer through SendMessage.
+   Only these two pinned roles are authorized for subagents. Never spawn Sol, `implementer_strong`,
+   Opus/Fable/Haiku overrides, general-purpose, Explore, Plan, cavecrew, reviewers or other roles;
+   never escalate model/effort after failures. Check the runtime's role file before source work:
+   if it is missing or pins another model/effort, report the mismatch and require a fresh session
+   rather than silently substituting.
    No dependent stages in parallel. Additional independent implementers require explicit user
    authorization and non-overlapping ownership. Implementers must never spawn subagents.
 2. Give a self-contained bounded assignment containing the detailed spec path, exact owned files,
@@ -94,7 +100,7 @@ delegating. A behavior summary or file list alone is not an implementation-ready
    weaken tests/validators, expand ownership or claim a failed check passed.
 4. Main diagnoses reported gaps read-only, updates the spec with a resolved correction recipe and
    exact affected checks, then sends it to the same implementer. Main never applies the correction.
-   Repeated failures require a clearer/smaller plan, not Sol escalation or main implementation.
+   Repeated failures require a clearer/smaller plan, not model/effort escalation or main implementation.
 5. Wait for the terminal stage receipt; inspect the complete diff against the plan and invariants,
    focused evidence and dependency/API blockers. Advance only dependency-ready work. Consolidate
    batch review into one pass and send one concrete correction plan where practical. Identify a
@@ -180,7 +186,7 @@ summaries and relevant failures. Redirect large outputs to unique logs; do not i
 Before rerunning, name changed input/property invalidating evidence. Source/test/fixture/dependency/
 runtime-test-config semantic edits require affected focused checks, then one full gate when stable.
 Reuse unrelated static/probe evidence. Exact mutation restoration preserves evidence. Planning/docs/
-status/AGENTS/agent instructions/Codex settings do not invalidate product gates: check syntax, links
+status/AGENTS/agent instructions/Codex/Claude settings do not invalidate product gates: check syntax, links
 and diff only. Test-command/config edits need command inspection; run product tests only if execution
 semantics change. Comments/formatting-only Python: Ruff and judgment, not automatic integration runs.
 
