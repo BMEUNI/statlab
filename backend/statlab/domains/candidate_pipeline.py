@@ -161,6 +161,21 @@ class CandidatePipelineExecutor:
         key: str,
         parameters: dict[str, JsonValue],
     ) -> PipelineState:
+        updated, _ = await self._fit_apply_output(
+            invocation, evidence, pipeline, fit, apply, key, parameters
+        )
+        return updated
+
+    async def _fit_apply_output(
+        self,
+        invocation: NodeInvocation,
+        evidence: _Evidence,
+        pipeline: PipelineState,
+        fit: str,
+        apply: str,
+        key: str,
+        parameters: dict[str, JsonValue],
+    ) -> tuple[PipelineState, ToolSuccess]:
         output = await self._call(
             invocation,
             evidence,
@@ -182,7 +197,7 @@ class CandidatePipelineExecutor:
         transforms = prepared.feature_manifest.get("transforms")
         if not isinstance(transforms, list):
             raise EngineError("malformed feature transform manifest")
-        return prepared.model_copy(
+        updated = prepared.model_copy(
             update={
                 "feature_manifest": {
                     **prepared.feature_manifest,
@@ -190,6 +205,7 @@ class CandidatePipelineExecutor:
                 }
             }
         )
+        return updated, output
 
     async def _finish(
         self,
@@ -422,7 +438,7 @@ class CandidatePipelineExecutor:
         )
         categorical.extend(f"{column}__bin" for column in feature.binned)
         if feature.encoding == "onehot":
-            pipeline = await self._fit_apply(
+            pipeline, output = await self._fit_apply_output(
                 invocation,
                 evidence,
                 pipeline,
@@ -431,6 +447,21 @@ class CandidatePipelineExecutor:
                 "encoder",
                 {"max_cardinality": feature.max_cardinality},
             )
+            skipped = output.summary.get("skipped_high_cardinality")
+            if isinstance(skipped, dict) and skipped:
+                skipped_parameters: dict[str, JsonValue] = {
+                    "columns": [*sorted(skipped)],
+                    "seed": self.runtime.contract.constraints.random_seed,
+                }
+                pipeline = await self._fit_apply(
+                    invocation,
+                    evidence,
+                    pipeline,
+                    "fit_target_encoder",
+                    "apply_target_encoder",
+                    "encoder",
+                    skipped_parameters,
+                )
         elif categorical:
             parameters: dict[str, JsonValue] = {"columns": list(categorical)}
             if feature.encoding == "ordinal":

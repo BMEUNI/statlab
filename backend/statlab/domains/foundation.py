@@ -575,6 +575,13 @@ class FoundationExecutor:
                     },
                 )
             )
+        protected = {
+            problem.target,
+            *contract.features.id_columns,
+            contract.split.time_column,
+            contract.split.group_column,
+        }
+        excluded = tuple(column for column in contract.features.exclude if column not in protected)
         if contract.preprocessing.drop_duplicates:
             frame = _frame(
                 await self._call(
@@ -586,7 +593,7 @@ class FoundationExecutor:
                         "subset": [
                             column
                             for column in columns
-                            if column not in contract.features.id_columns
+                            if column not in contract.features.id_columns and column not in excluded
                         ],
                     },
                 )
@@ -604,13 +611,6 @@ class FoundationExecutor:
                     },
                 )
             )
-        protected = {
-            problem.target,
-            *contract.features.id_columns,
-            contract.split.time_column,
-            contract.split.group_column,
-        }
-        excluded = tuple(column for column in contract.features.exclude if column not in protected)
         if excluded:
             frame = _frame(
                 await self._call(

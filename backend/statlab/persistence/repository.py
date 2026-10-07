@@ -249,7 +249,7 @@ def create_contract(
     two concurrent uploads cannot both claim v1 (§3.8)."""
     contract_id = new_id("ct")
     created_at = utc_now()
-    contract_json = contract.model_dump_json()
+    contract_json = contract.model_dump_json(exclude_unset=True)
     with transaction(conn):
         (max_version,) = conn.execute(
             "SELECT COALESCE(MAX(version), 0) FROM contracts WHERE project_id = ?", (project_id,)

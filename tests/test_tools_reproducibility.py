@@ -437,6 +437,25 @@ def test_snapshot_no_load_csv_is_tool_param(run_paths: RunPaths) -> None:
         snapshot_run(run_paths, calls)
 
 
+def test_snapshot_repeated_same_dataset_is_one_identity(run_paths: RunPaths) -> None:
+    _write_contract(run_paths)
+    once = (_call("load_csv", [_ref()], dataset="abc"),)
+    twice = (*once, _call("load_csv", [_ref()], dataset="abc"))
+    res = snapshot_run(run_paths, twice)
+    assert isinstance(res.summary["run_hash"], str)
+    assert len(res.summary["run_hash"]) == 64
+
+
+def test_snapshot_two_distinct_datasets_is_tool_param(run_paths: RunPaths) -> None:
+    _write_contract(run_paths)
+    calls = (
+        _call("load_csv", [_ref()], dataset="abc"),
+        _call("load_csv", [_ref()], dataset="def"),
+    )
+    with pytest.raises(ToolParamError, match="2 distinct load_csv dataset"):
+        snapshot_run(run_paths, calls)
+
+
 def test_snapshot_missing_contract_is_tool_param(run_paths: RunPaths) -> None:
     calls = (_call("load_csv", [_ref()], dataset="abc"),)
     with pytest.raises(ToolParamError, match="contract snapshot"):

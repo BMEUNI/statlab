@@ -198,7 +198,7 @@ class ProjectsService:
         try:
             with tempfile.NamedTemporaryFile(dir=paths.contracts, delete=False) as handle:
                 temporary = Path(handle.name)
-                handle.write(contract.model_dump_json().encode("utf-8"))
+                handle.write(contract.model_dump_json(exclude_unset=True).encode("utf-8"))
             os.link(temporary, destination)
             return create_contract(
                 self.resources.conn, project_id=project.id, path=destination, contract=contract

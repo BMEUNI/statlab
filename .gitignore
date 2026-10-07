@@ -32,3 +32,5 @@ Thumbs.db
 
 # graphify (local AST graph, rebuilt by post-commit hook)
 graphify-out/
+integration/out/
+integration/.cache/

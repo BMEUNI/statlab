@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch as mock_patch
@@ -55,7 +56,7 @@ from statlab.persistence.repository import (
 from statlab.storage import create_artifact
 from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
-from statlab_contracts.contract import DataContract
+from statlab_contracts.contract import DataContract, ModellingRules, TargetSpec
 from statlab_contracts.envelope import ToolSuccess
 
 
@@ -370,15 +371,39 @@ def test_latest_contract_returns_none_when_absent(
 def test_r9_json_byte_fidelity(
     migrated_db: sqlite3.Connection, project: ProjectRow, contract: DataContract
 ) -> None:
-    """R9: stored text is byte-identical to `contract.model_dump_json()`, and
-    `ContractRow.contract()` equals the original."""
+    """R9: stored text is byte-identical to `contract.model_dump_json(exclude_unset=True)`
+    (explicit fields only), and `ContractRow.contract()` equals the original."""
     created = create_contract(
         migrated_db, project_id=project.id, path=Path("/c.json"), contract=contract
     )
     fetched = get_contract(migrated_db, created.id)
     assert fetched is not None
-    assert fetched.contract_json == contract.model_dump_json()
+    assert fetched.contract_json == contract.model_dump_json(exclude_unset=True)
     assert fetched.contract() == contract
+
+
+def test_r9b_contract_explicitness_survives_storage(
+    migrated_db: sqlite3.Connection, project: ProjectRow
+) -> None:
+    """Defaults stay implicit after storage, so explicit-contract guards only see
+    user-set fields."""
+    contract = DataContract(
+        target=TargetSpec(column="y", type="binary"),
+        modelling=ModellingRules(candidates=("logistic_regression",)),
+    )
+    created = create_contract(
+        migrated_db, project_id=project.id, path=Path("/c.json"), contract=contract
+    )
+    fetched = get_contract(migrated_db, created.id)
+    assert fetched is not None
+    assert json.loads(fetched.contract_json) == {
+        "target": {"column": "y", "type": "binary"},
+        "modelling": {"candidates": ["logistic_regression"]},
+    }
+    restored = fetched.contract()
+    assert "tuning" not in restored.modelling.model_fields_set
+    assert "method" not in restored.modelling.tuning.model_fields_set
+    assert restored.preprocessing.model_fields_set == set()
 
 
 def test_r10_spec_hash_survives_storage(

@@ -1,0 +1,809 @@
+---
+status: in_progress
+dependencies: [B9-B14 offline acceptance (plan/receipts/B9-B14-offline.md)]
+completion_date: null
+implementation_notes: Scenario harness for end-to-end runs; stages H1 (framework + LLM-free smoke), H2 (offline LLM stand-in), H3 (restart/propose/memory/fork scenarios), then offline dry-run and live run with fix loop.
+---
+
+# Integration scenario harness
+
+User request (2026-10-07): a script plus predefined scenarios (dataset, contract/"prompt", run
+mode, gate answers, chat, expected outcome) that drive the REAL backend end to end, run by Claude,
+failures fixed one by one. Decisions: $2 budget per live suite, synthetic datasets with planted
+truth, offline dry-run before live. Goal = correct behaviour, NOT model accuracy.
+User-facing catalogue (authoritative for scenario content): [integration/SCENARIOS.md](../integration/SCENARIOS.md).
+
+Non-goals: no pytest tests for the harness, no coverage requirement (outside
+`[tool.coverage.run] source`), no backend/mcp_server/contracts source changes in H1–H3, no
+frontend. Harness is a script; it is never collected by pytest (`testpaths = ["tests"]`).
+
+## Architecture (all stages)
+
+Package `integration/` at repo root (importable from repo root: `python -m integration.run_scenarios`).
+- `integration/__init__.py` — empty.
+- `integration/scenarios.toml` — machine definitions transcribed from SCENARIOS.md.
+- `integration/model.py` — Pydantic scenario schema + loader.
+- `integration/datasets.py` — deterministic synthetic CSV generators.
+- `integration/services.py` — MCP subprocess + in-process API server (uvicorn on loopback).
+- `integration/driver.py` — HTTP setup, run loop, SSE recorder, gate policy, actions.
+- `integration/evidence.py` — read-only SQLite/file evidence collection.
+- `integration/checks.py` — global (G1–G7), expectation and soft checks.
+- `integration/run_scenarios.py` — CLI entry point, workspace, budget, summary.
+- `integration/out/` — outputs, gitignored.
+
+Process model: one MCP subprocess and one in-process API (uvicorn task) per suite invocation,
+both bound to 127.0.0.1 on free ports, isolated data dir and DB under the output folder.
+Scenarios run sequentially. The API runs in the harness process so H2 can inject the offline LLM
+through `create_app(settings, llm_client=LlmClient(settings, acompletion=...))`; live mode passes
+`llm_client=None` (production `LlmClient(settings)`, real litellm). Run creation copies
+`./uv.lock`, so the harness must run with cwd = repo root (check at startup: `Path("uv.lock")`
+is a non-empty file, else exit 2 with "run from the repository root").
+
+## Stage H1 — framework, data, LLM-free smoke (S17) and scenario definitions
+
+Owned files: everything under `integration/` except `SCENARIOS.md`; `.gitignore` (add one line
+`integration/out/`); `pyproject.toml` (append `"integration"` to `[tool.mypy] files`).
+Reuse: `statlab.main.create_app`, `statlab.config.Settings`, `statlab.llm.client.LlmClient`
+(type only in H1), `statlab_contracts.contract.DataContract`,
+`statlab_contracts.gates.GateAction`, `statlab_contracts.artifacts.ARTIFACT_ID_PATTERN`,
+`statlab.persistence.models.RunStatus` and `RunMode` (Literal aliases, verified).
+
+### model.py
+
+Frozen Pydantic models, `ConfigDict(frozen=True, extra="forbid")`, tuples not lists.
+- `DatasetKey = Literal["churn", "houses", "churn_dirty", "species", "sales", "visits"]`.
+- `GateRule`: `node: str`; `phase: Literal["before", "after", "failure"] | None = None`;
+  `action: GateAction`; `edits: dict[str, JsonValue] = {}`; `instruction: str | None = None`;
+  `reason: str | None = None`; `target: str | None = None`; `once: bool = True`.
+- `Trigger`: `event: str | None = None`; `node: str | None = None`; `status: RunStatus | None =
+  None`. After-validator: exactly one of `event`/`status` is set; `node` only with `event`.
+- `Action`: `when: Trigger`; `do: Literal["pause", "resume", "cancel", "message", "rewind"]`;
+  `text: str | None = None` (required iff `message`); `target: str | None = None` and
+  `request_id: str | None = None` (both required iff `rewind`). After-validator enforces these.
+- `Expect`: `status: RunStatus | None = None`; `nodes_completed: tuple[str, ...] = ()`;
+  `nodes_skipped: tuple[str, ...] = ()`; `nodes_failed: tuple[str, ...] = ()`;
+  `nodes_not_run: tuple[str, ...] = ()`; `failure_contains: str | None = None`;
+  `min_candidates_completed: int = 0`; `candidate_count: int | None = None`;
+  `no_gates: bool = False`; `gates_opened_for: tuple[str, ...] = ()`;
+  `gate_revision_min: dict[str, int] = {}`; `champion: bool | None = None`;
+  `test_scored: bool | None = None`; `report_contains: tuple[str, ...] = ()`;
+  `metrics_in_report: tuple[str, ...] = ()`; `pipeline_replay: bool = False`;
+  `manifest: bool = False`; `tools_used: tuple[str, ...] = ()`;
+  `events_include: tuple[str, ...] = ()`; `messages_answered: int = 0`.
+- `Soft`: `inference: dict[str, Literal["reject H0", "not rejected"]] = {}`;
+  `metric_min: float | None = None`; `metric_max: float | None = None`;
+  `summary_mentions: tuple[str, ...] = ()`.
+- `Setup`: `invalid_cases: bool = False`.
+- `Scenario`: `id: str = Field(pattern=r"^S\d{2}$")`; `title: str`; `dataset: DatasetKey`;
+  `mode: RunMode = "autonomous"`; `contract: dict[str, JsonValue]`; `setup: Setup = Setup()`;
+  `gates: tuple[GateRule, ...] = ()`; `actions: tuple[Action, ...] = ()`; `expect: Expect =
+  Expect()`; `soft: Soft = Soft()`; `timeout_s: int = Field(default=1200, gt=0)`;
+  `max_cost_usd: float = Field(default=0.25, gt=0)`.
+- `load_scenarios(path: Path) -> tuple[Scenario, ...]`: `tomllib.load`; top-level array key
+  `scenario`; validate each with `Scenario.model_validate`; duplicate ids → `ValueError("duplicate
+  scenario id <id>")`.
+
+### datasets.py
+
+Stdlib only (`random.Random(seed)`, `math`, `csv`, `datetime`). Public:
+`generate(key: DatasetKey) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]` (header,
+rows as strings) and `write_csv(key: DatasetKey, path: Path) -> Path` (csv.writer, `\n` line
+terminator, UTF-8). Numbers rendered with `str()` after the stated rounding; ints as `str(int)`.
+Bernoulli: `1 if rng.random() < p else 0`, `p = 1 / (1 + math.exp(-logit))`. Draw order per row
+is exactly as listed (determinism).
+- `churn` (seed 101, n 500): `plan = rng.choices(["basic","standard","premium"],
+  weights=[40,35,25])[0]`; `region = rng.choice(["north","south","east","west"])`;
+  `tenure = rng.randint(1, 72)`; `charges = round(min(150.0, max(10.0, rng.gauss(60, 15))), 2)`;
+  `calls = rng.choices(range(10), weights=[25,20,15,12,10,7,5,3,2,1])[0]`;
+  `logit = -0.5 + 1.4*(plan=="basic") + 0.5*(plan=="standard") - 0.04*tenure + 0.3*calls`;
+  churned Bernoulli. Columns `subscriber_id` (`f"S{i:05d}"`, i from 1), `plan`, `region`,
+  `tenure_months`, `monthly_charges`, `support_calls`, `churned`.
+- `churn_dirty` (seed 103, n 400): per row the churn draws above (same order, this seed), then
+  `notes_draw = rng.random()`, `notes_pick = rng.choice(["vip","late payer","moved"])`,
+  `city = f"city_{rng.randint(1, 60):02d}"`, `na_draw = rng.random()`,
+  `na_token = rng.choice(["NA","N/A",""])`. `notes = notes_pick if notes_draw >= 0.85 else ""`;
+  `monthly_charges` replaced by `na_token` when `na_draw < 0.05`. `country = "HU"`;
+  `customer_code = f"C{i:06d}x"` (unique). Columns: churn columns + `country`, `customer_code`,
+  `notes`, `city` (appended in that order before `churned`; `churned` stays last). Then append
+  copies of rows 1..20 at the end (420 rows).
+- `houses` (seed 102, n 400): `area = round(rng.uniform(30, 200), 1)`; `rooms = rng.randint(1,
+  6)`; `district = rng.choice(["a","b","c"])`; `age = rng.randint(0, 80)`; `garden =
+  rng.choice(["yes","no"])`; `price = round(1500*area + 20000*rooms + {"a":50000,"b":0,
+  "c":-30000}[district] - 300*age + rng.gauss(0, 20000))` (int); `area_missing = rng.random() <
+  0.05`; `age_missing = rng.random() < 0.03`; render missing as `""`. Columns `area_m2`, `rooms`,
+  `district`, `age_years`, `has_garden`, `price`.
+- `species` (seed 104): 150 rows per class in order setosa_like, versicolor_like,
+  virginica_like with means `x1` (5.0, 5.9, 6.6) sd 0.35 and `x3` (1.5, 4.3, 5.6) sd 0.4; per row
+  draw `x1`, `x2 = gauss(3.0, 0.4)`, `x3`, `x4 = gauss(1.0, 0.5)`, round 2; then
+  `rng.shuffle(rows)`. Columns `x1`..`x4`, `species`.
+- `sales` (seed 105, n 365, i from 0): `date = (date(2025,1,1) + timedelta(days=i)).isoformat()`;
+  `promo = 1 if rng.random() < 0.25 else 0`; `temp = round(10 + 12*math.sin(2*math.pi*(i-100)/365)
+  + rng.gauss(0, 3), 1)`; `units = round(100 + 20*promo + (0,2,4,6,10,25,15)[weekday] + 0.1*i +
+  0.5*temp + rng.gauss(0, 5))`. Columns `date`, `promo`, `temperature`, `units`.
+- `visits` (seed 106): patients 1..80; per patient `age = rng.randint(30, 80)`, `base =
+  rng.gauss(0, 1)`; 6 visits each: `dose = rng.choice([0,10,20,40])`, `biomarker = round(base +
+  rng.gauss(0, 0.5), 3)`, `logit = -2 + 0.06*dose + 1.2*biomarker`, responded Bernoulli. Columns
+  `patient_id` (`f"P{p:03d}"`), `age`, `dose`, `biomarker`, `responded`.
+
+### services.py
+
+- `free_port() -> int`: bind `socket.socket()` to `("127.0.0.1", 0)`, read port, close.
+- `class McpProcess`: `__init__(self, *, data_dir: Path, token: str, log_path: Path)`.
+  `start(self) -> str`: port = `free_port()`; env = `os.environ` copy plus
+  `STATLAB_MCP_TOKEN=token`, `STATLAB_DATA_DIR=str(data_dir)`, `STATLAB_MCP_HOST=127.0.0.1`,
+  `STATLAB_MCP_PORT=str(port)`, `STATLAB_FIT_PERMITS=1`; `subprocess.Popen([sys.executable, "-m",
+  "statlab_tools"], env=env, stdout=log file, stderr=subprocess.STDOUT)` (log opened `ab`);
+  poll `httpx.get(f"http://127.0.0.1:{port}/health", timeout=2)` every 0.25 s up to 60 s until
+  status 200; if the process exits or time runs out: `stop()` then `RuntimeError(f"MCP server did
+  not become healthy; see {log_path}")`. Returns `f"http://127.0.0.1:{port}/mcp"`.
+  `alive(self) -> bool` (`poll() is None`). `stop(self)`: terminate, wait 30 s, kill+wait if
+  needed; idempotent.
+- `class ApiServer`: `__init__(self, *, settings: Settings, llm_client: LlmClient | None)`.
+  `async start(self) -> str`: `app = create_app(settings, llm_client=llm_client)`;
+  `uvicorn.Config(app, host="127.0.0.1", port=settings.api_port, log_config=None,
+  access_log=False, lifespan="on")`; `server = uvicorn.Server(config)`; `self._task =
+  asyncio.create_task(server.serve())`; wait (0.1 s steps, 120 s) until `server.started` or the
+  task is done; task done → re-raise its exception or `RuntimeError("API stopped during
+  startup")`. Return `f"http://127.0.0.1:{settings.api_port}"`. `async stop(self)`:
+  `server.should_exit = True`; `await asyncio.wait_for(self._task, 120)`; idempotent.
+- `build_settings(*, token: str, mcp_url: str, data_dir: Path, db_path: Path, api_port: int) ->
+  Settings`: `Settings(mcp_token=SecretStr(token), mcp_url=mcp_url, data_dir=data_dir,
+  db_path=db_path, api_port=api_port)` (field names via `populate_by_name`; `max_concurrent_runs`
+  stays default 0 = unlimited, scenarios are sequential anyway).
+- Provider env: `create_app` lifespan runs `check_provider_environment` (local, no network) and
+  then `os.environ.update(environment)` with keys from `./.env`. Start MCP BEFORE the API so the
+  MCP child env never holds provider keys. Never log `os.environ`, settings dumps or request
+  headers.
+
+### driver.py
+
+`class Driver`: `__init__(self, *, base_url: str, workspace: Workspace)` creates
+`httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(120, read=300))`; `async close()`.
+`Workspace` (dataclass in `run_scenarios.py` or `driver.py`): `root`, `data_dir`, `db_path`,
+`api_log`, `mcp_log`; `scenario_dir(id) -> Path` creates `root / id`.
+Every HTTP call goes through `async _call(method, path, *, expected: set[int], **kwargs) ->
+httpx.Response`; status not in `expected` → raise `HarnessError(f"{method} {path} -> {status}:
+{body[:500]}")`. Every call is appended to `self.http_log: list[dict[str, JsonValue]]` (method,
+path, status, elapsed_ms) for `result.json`.
+
+Normal setup `async setup(scenario, scenario_dir) -> SetupResult` (project_id, dataset_id,
+contract_id, validation JSON):
+1. `POST /api/projects` `{"slug": scenario.id.lower(), "name": scenario.title}` → 201.
+2. `csv = write_csv(scenario.dataset, scenario_dir / "data.csv")`; `POST
+   /api/projects/{pid}/datasets` `files={"file": ("data.csv", bytes, "text/csv")}` → 201;
+   `dataset_id = json["id"]`.
+3. `contract = DataContract.model_validate(scenario.contract)`; `POST
+   /api/projects/{pid}/contracts/validate` `{"dataset_id", "contract":
+   contract.model_dump(mode="json")}` → 200; `valid is False` → `HarnessError("setup validation
+   failed: <mismatches>")`.
+4. `POST /api/projects/{pid}/contracts` `files={"file": ("contract.json",
+   contract.model_dump_json(), "application/json")}` → 201; `contract_id = json["id"]`.
+5. `POST /api/projects/{pid}/runs` `{"mode": scenario.mode, "dataset_ids": [dataset_id],
+   "contract_id": contract_id}` → 201; return `run_id`.
+
+`async run(scenario, run_id, scenario_dir, *, budget: Budget) -> RunOutcome`:
+- SSE recorder task: loop `client.stream("GET", f"/api/runs/{run_id}/events", params={"since":
+  last_seq}, timeout=httpx.Timeout(30, read=None))`; parse lines: `id: N` sets pending seq,
+  `data: <json>` sets pending payload, blank line emits `{**payload}` (payload already contains
+  `seq`, `type`, `payload`), lines starting `:` ignored. Append each new event (seq > last_seq)
+  to `self.events` and to `scenario_dir / "sse_events.jsonl"`. On `httpx.HTTPError` or stream
+  end, if not stopping: sleep 1 s and reconnect with `since=last_seq`. Cancelled at the end.
+- Poll loop, every 1.0 s: `GET /api/runs/{run_id}` → 200 snapshot; `status =
+  snapshot["run"]["status"]`; write latest snapshot to `scenario_dir / "snapshot.json"`.
+  a) Gates: for each `gate` in `snapshot["gates"]` with `status == "pending"`: `question =
+     json.loads(gate["question_json"])`; key `(gate["id"], question["revision"])` skipped if
+     already answered. Rule = first `GateRule` with `node == question["node"]`, `phase in (None,
+     question["phase"])`, and (`not once` or not yet used). No rule → action
+     `"approve"` if `"approve"` in `question["options"]` else `question["default"]`. Submit
+     `POST /api/runs/{run_id}/gates/{gate_id}` with `{"revision": question["revision"],
+     "action": ..., "edits": rule.edits, "instruction", "reason", "target"}` (omit `None`
+     keys; `edits` only for `approve_with_edits`) → expected {200}. Record
+     `{gate_id, node, phase, revision, action, response}` in `outcome.gate_answers`.
+  b) Actions: the first not-yet-fired action whose trigger matches fires (at most one per poll).
+     Event trigger: some recorded SSE event has `type == event` and (`node is None` or
+     `payload.get("node") == node`). Status trigger: `status == trigger.status`. `pause` /
+     `resume` / `cancel` → `POST /api/runs/{run_id}/control` `{"action": do}` expected {200};
+     `message` → `POST /api/runs/{run_id}/messages` `{"text": text}` expected {200}; `rewind` →
+     control with `target`, `request_id` expected {200, 201}. Record `{index, do, status_code,
+     body}` in `outcome.actions`; message responses also in `outcome.messages`.
+  c) Exit when `status in {"completed", "failed", "cancelled", "superseded"}` and no unfired
+     action has a status trigger equal to `status`.
+  d) Timeout (`elapsed > scenario.timeout_s`): best-effort cancel (ignore errors),
+     `outcome.timed_out = True`, exit.
+  e) Budget: `budget.spent()` (read-only `SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls` on
+     the suite DB) `>= budget.limit` → best-effort cancel, `outcome.budget_stopped = True`, exit.
+- After exit: sleep 2 s, stop the SSE task, return `RunOutcome` (dataclass: `run_id`,
+  `final_status`, `timed_out`, `budget_stopped`, `gate_answers`, `actions`, `messages`,
+  `events`, `started_at`, `ended_at`).
+
+Invalid-setup routine `async invalid_setup(scenario, scenario_dir) -> list[CheckResult]` (S17):
+project + dataset as steps 1–2; (a) validate `scenario.contract` → expect `valid is False`;
+upload it; create run → expect 422; (b) upload `{"target": {"column": "churned"}}` as
+`incomplete.json`; create run → expect 422 and detail contains "missing required setup fields";
+(c) upload `b"\x00\x01binary"` as `bad.csv` → expect status 400–499; then `GET
+/api/projects/{pid}` → `runs == []`; read-only SQL `SELECT COUNT(*) FROM llm_calls` == 0. Each
+lettered item and the two counts become one `CheckResult` (`S17-a`, `S17-b`, `S17-c`,
+`S17-runs`, `S17-llm`), severity must.
+
+### evidence.py
+
+`collect(*, db_path, data_dir, slug, run_id, scenario_dir) -> Evidence` (dataclass). Read-only
+connection `sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)`, `row_factory = sqlite3.Row`,
+closed in `finally`. Rows as dicts: `runs` (the run), `node_executions`, `llm_calls`,
+`tool_calls`, `gates`, `models`, `artifacts` (each `WHERE run_id = ?`, `ORDER BY rowid`); write
+each list to `scenario_dir / f"{table}.json"` (indent 2, `default=str`). Run dir =
+`data_dir / slug / "runs" / run_id`: parse `events.jsonl` (one JSON per line), `state.json` if
+present; copy `report/report.md`, `pipeline.py`, `manifest.json`, `contract.snapshot.json`
+into `scenario_dir` when present (fields hold their text or `None`).
+
+### checks.py
+
+`CheckResult(id: str, description: str, severity: Literal["must", "soft"], passed: bool,
+detail: str)` frozen dataclass.
+- `global_checks(*, scenario, outcome, evidence, api_log_slice: str, mcp_alive: bool, live:
+  bool) -> list[CheckResult]`:
+  G1 `" ERROR "` not in `api_log_slice` and `mcp_alive`. G2 not timed out, not budget stopped,
+  `outcome.final_status == expect.status` (skip → pass when `expect.status is None`). G3 server
+  events seq == 1..N; SSE events deduplicated by seq equal server events by (seq, type); if final
+  status `completed`, every `node.started` `execution_id` has a later `node.completed`/
+  `node.failed`/`node.skipped` with that `execution_id`. G4 terminal final status → no
+  `node_executions.status` in (`running`, `pending`). G5 test scorings = `tool_calls` with
+  `tool_name` starting `score_` where some string value anywhere in `json.loads(args_json)`
+  (recursive walk of dicts/lists) equals the `id` of an `artifacts` row of this run with
+  `split == "test"` or `derived_from_test == 1`; count ≤ 1; count == 1 iff
+  `runs.champion_model_id` not null. G6 every `llm_calls` row has the run id and a
+  `node_execution_id` among this run's executions. G7 live: `sum(cost_usd) <=
+  scenario.max_cost_usd`; offline/none: pass with detail "not live".
+- `expectation_checks(*, scenario, outcome, evidence, scenario_dir) -> list[CheckResult]`, one
+  must-check per set field (`E-status` is G2, so skip it here):
+  `nodes_completed`/`nodes_skipped`/`nodes_failed`: some execution row with that `node_name` and
+  status; `nodes_not_run`: no execution row for that node; `failure_contains`: some failed
+  execution's `error` text contains it; `min_candidates_completed`: count of
+  `state.branches[*].status == "completed"` ≥ N (state from evidence `state.json`);
+  `candidate_count`: `len(branches) == N`; `no_gates`: `gates == []`; `gates_opened_for`: a gate
+  whose parsed question `node` equals each name; `gate_revision_min`: max `question.revision`
+  over that node's gates ≥ value; `champion`: `(champion_model_id is not None) == value`;
+  `test_scored`: `(test_scored_at is not None) == value`; `report_contains` /
+  `metrics_in_report`: report text exists and contains each string; `manifest`: manifest text
+  exists; `tools_used`: each in the set of `tool_calls.tool_name`; `events_include`: each type in
+  server events; `messages_answered`: count of `outcome.messages` with non-empty `text` ≥ N;
+  `pipeline_replay`: see below.
+- Recorded test metric (helper `recorded_test_metric(evidence) -> float | None`): primary metric =
+  `json.loads(contract_snapshot)["objective"]["primary_metric"]`; the `node_executions` row with
+  `node_name == "champion_selection"` and `status == "completed"` (last by rowid);
+  `json.loads(summary)["test_metrics"]["metrics"][metric]["value"]`; any missing key/row → None
+  (source: `backend/statlab/domains/champion.py` summary keys `test_metrics`; score payload
+  `metrics` in `mcp_server/statlab_tools/tools/evaluation.py:404`).
+- Pipeline replay: recorded value as above (None → fail with detail "no recorded test metric"); run
+  `subprocess.run([sys.executable, pipeline_path, data_csv], env={"PATH", "HOME"} only,
+  cwd=tempfile.mkdtemp(), capture_output=True, text=True, timeout=300)`; last stdout line JSON
+  `["metrics"][metric]["value"]`; pass iff return code 0 and `abs(diff) <= 0.005`; detail holds
+  both values or stderr tail (last 2000 chars).
+- `soft_checks(*, scenario, evidence) -> list[CheckResult]` severity soft: `inference`: find the
+  report line starting `f"| {question} |"`; pass iff its last non-empty cell (split on `|`,
+  stripped) equals the expected text; `metric_min`/`metric_max`: `recorded_test_metric`
+  within bounds; `summary_mentions`: each string (case-insensitive) appears in some
+  `node_executions.summary` text.
+
+### run_scenarios.py
+
+`main(argv: Sequence[str] | None = None) -> int`; `if __name__ == "__main__": raise
+SystemExit(main())`. Args: `--llm` choices `("live",)` (H2 adds `offline`), required;
+`--only` (nargs `*`, scenario ids); `--budget-usd` float default 2.0; `--scenarios` Path default
+`integration/scenarios.toml`. Steps:
+1. Repo-root check (`uv.lock`). Load scenarios; filter `--only` (unknown id → exit 2).
+2. Workspace `integration/out/<UTC %Y%m%dT%H%M%SZ>-<llm>/`; `data/`, `statlab.db`, `api.log`,
+   `mcp.log`. Logging: root logger level INFO, `FileHandler(api.log)` format `%(asctime)s
+   %(levelname)s %(name)s %(message)s`; a console handler at WARNING.
+3. `token = secrets.token_urlsafe(32)`; start MCP; `api_port = free_port()`; settings; start API
+   (`llm_client=None` for live). Driver.
+4. For each scenario: record `api.log` size before; `try:` invalid setup routine if
+   `setup.invalid_cases`, else setup → run → evidence → global + expectation + soft checks;
+   `except HarnessError | httpx.HTTPError as exc:` add must-check `H-error` failed with
+   `str(exc)`; `api_log_slice` = bytes appended to `api.log` during the scenario; write
+   `scenario_dir / "result.json"` (scenario id/title, run id, final status, duration, cost,
+   checks, outcome lists, http log). Budget stop → mark remaining scenarios `skipped (budget)`
+   and stop the loop.
+5. `finally`: driver close, API stop, MCP stop.
+6. `summary.md`: header (mode, `git rev-parse HEAD` output, start/end UTC, total cost and call
+   count from read-only SQL); table `| Scenario | Title | Result | Must | Soft warnings | Cost
+   USD | Duration s |` (Result = PASS/FAIL/SKIPPED); then per failing scenario the failed
+   checks with detail and the scenario folder path. Print the summary path. Exit 0 iff every
+   non-skipped scenario passed all must checks, else 1.
+
+### scenarios.toml (H1 content)
+
+Transcribe from SCENARIOS.md: S01–S08, S10–S13, S17 (S09 and S14–S16 come in H3). Contracts as
+TOML tables mirroring `DataContract` JSON (e.g. `[scenario.contract.target]`, nested
+`[[scenario.contract.objective.inference_goals]]`). Use exactly:
+- Common classification contract (S01, S04–S08, S13 with its constraint): target `churned`,
+  `type = "binary"`, `positive_class = 1`; `features.id_columns = ["subscriber_id"]`; objective
+  `task = "classification"`, `primary_metric = "roc_auc"`, goals ("Does plan affect churn?",
+  `["plan"]`) and ("Does region affect churn?", `["region"]`); split `strategy = "stratified"`,
+  `seed = 42`; modelling candidates `["logistic_regression", "random_forest_classifier",
+  "hist_gb_classifier"]`, `inferential_model = "logit"`.
+- S01 expect: status completed; nodes_completed = the 6 shared nodes + `champion_selection`,
+  `artifact_persistence`; `min_candidates_completed = 2`; `no_gates = true`; `champion = true`;
+  `test_scored = true`; `report_contains = ["Modelling report", "Validation comparison",
+  "Inference"]`; `pipeline_replay = true`; `manifest = true`. Soft: inference plan "reject H0",
+  region "not rejected"; `metric_min = 0.6`. `max_cost_usd = 0.25`.
+- S02: dataset houses; target `price` `type = "continuous"`; objective regression `rmse`, goal
+  ("Does garden affect price?", `["has_garden"]`); split `random`, seed 42; preprocessing
+  `missing.default = "median"`; candidates `["linear_regression", "ridge",
+  "random_forest_regressor"]`, inferential `ols`. Expect as S01 plus `tools_used =
+  ["fit_imputer", "apply_imputer"]`, `metrics_in_report = ["rmse"]`. Soft: garden "not
+  rejected".
+- S03: dataset churn_dirty; S01 contract without inference goals and without
+  `inferential_model`; preprocessing `drop_duplicates = true`, `drop_constant = true`,
+  `max_cardinality = 30`. Expect completed, `nodes_failed` unset, `champion = true`,
+  `tools_used = ["drop_duplicate_rows"]`. Soft `summary_mentions = ["duplicate"]`.
+- S04: mode guided; expect completed, `gates_opened_for` = intake, problem_definition,
+  data_profiling, data_splitting, experiment_design, inferential_analysis, champion_selection,
+  artifact_persistence; `events_include = ["gate.opened", "gate.answered"]`; `champion = true`.
+  `max_cost_usd = 0.30`.
+- S05: guided; gates: problem_definition `approve_with_edits` edits `{secondary_metrics =
+  ["pr_auc"]}`; data_profiling `skip_node` reason "profiling not needed for this test";
+  experiment_design phase before `instruct` "Use only logistic_regression and
+  random_forest_classifier."; preprocessing `approve_all_remaining`. Expect completed,
+  `nodes_skipped = ["data_profiling"]`, `gate_revision_min = {experiment_design = 1}`,
+  `candidate_count = 2`, `metrics_in_report = ["pr_auc"]`. `max_cost_usd = 0.30`.
+- S06: guided; gate data_splitting `abort`. Expect `status = "cancelled"`, `nodes_not_run =
+  ["preprocessing"]`, `champion = false`, `test_scored = false`.
+- S07: autonomous; actions: (event `node.started` node `model_training` → pause), (status
+  paused → message "What is the current status of the run?"), (status paused → message "Which
+  candidate is performing best so far?"), (status paused → resume). Expect completed,
+  `messages_answered = 2`, `events_include = ["message.user", "message.assistant.complete"]`,
+  `champion = true`.
+- S08: action (event `node.started` node `preprocessing` → cancel). Expect cancelled,
+  `champion = false`, `test_scored = false`.
+- S10: dataset sales; target `units` continuous; regression `mae`; split `strategy =
+  "temporal"`, `time_column = "date"`; candidates `["linear_regression", "hist_gb_regressor"]`.
+  Expect `status = "failed"`, `nodes_failed = ["data_splitting"]`, `failure_contains =
+  "no supported v1 split"`, `nodes_not_run = ["preprocessing"]`, `test_scored = false`.
+  `max_cost_usd = 0.10`.
+- S11: dataset visits; target `responded` binary positive 1; classification `roc_auc`; split
+  `strategy = "grouped"`, `group_column = "patient_id"`; candidates `["logistic_regression",
+  "random_forest_classifier"]`. Expect as S10.
+- S12: dataset species; target `species` `type = "multiclass"`; classification
+  `balanced_accuracy`, goal ("Does x4 matter?", `["x4"]`); stratified seed 42; candidates
+  `["logistic_regression", "random_forest_classifier"]`, inferential `mnlogit`. Expect as S01
+  with `metrics_in_report = ["balanced_accuracy"]`. Soft x4 "not rejected".
+- S13: S01 contract plus `constraints.max_total_fit_seconds = 1`. No `expect` fields: any
+  terminal status is accepted (G2 then checks only timeout/budget; G1/G3/G4/G5 still apply).
+  Soft `summary_mentions = ["budget"]`.
+- S17: dataset churn; contract target `does_not_exist` with S01's other fields;
+  `setup.invalid_cases = true`; no expect fields.
+Every scenario gets `title` from SCENARIOS.md headings.
+
+### H1 checks and stop conditions
+
+Static: `.venv/bin/python -m ruff check integration`, `.venv/bin/python -m ruff format --check
+integration`, `.venv/bin/python -m mypy integration`. Smoke (no LLM, no cost):
+`.venv/bin/python -m integration.run_scenarios --llm live --only S17` → expect exit 0, summary
+shows S17 PASS. Also a parse smoke: `.venv/bin/python -c "from integration.model import
+load_scenarios; from pathlib import Path; print(len(load_scenarios(Path('integration/scenarios.toml'))))"`
+→ 13. Do NOT run any other scenario in live mode (would spend credits). Stop and report on:
+missing run-status/mode aliases, any import that would require backend changes, S17 failing,
+any static failure not fixable mechanically.
+Receipt: changed files + sha256, commands + exits, S17 summary excerpt, deviations.
+
+### H1 lint/type notes (resolved)
+
+- Ruff selects `S`: `random.Random` draws (S311) and harness `subprocess` calls (S603/S607 if
+  flagged) get a per-line `# noqa: <code> - <reason>` in the style of
+  `backend/statlab/llm/routing.py:121`. Nothing else may be suppressed; any other lint that is not
+  mechanically fixable → stop and report.
+- No explicit `Any`; JSON values typed with `pydantic.JsonValue`; parsed JSON narrowed with
+  `isinstance` before indexing. No `type: ignore`.
+- Live LLM credits: H1 runs only S17 (no run is ever created successfully, so no LLM call).
+
+## Stage H1b — real public datasets (user request 2026-10-07)
+
+User asked for one or two real downloaded datasets besides the synthetic ones. Chosen (UCI
+Machine Learning Repository, CC BY 4.0; verified downloadable 2026-10-07, hashes below):
+- `adult` — UCI Adult / Census Income (id 2), `https://archive.ics.uci.edu/static/public/2/adult.zip`,
+  zip sha256 `7537312dd56c2b98035880805ce99e68183a30ee468aa5329d6df0fbb3cc21bb`, member
+  `adult.data` (32,561 rows, comma + space separated, no header, `?` = missing, trailing blank
+  line; class balance 24,720 `<=50K` / 7,841 `>50K`).
+- `autompg` — UCI Auto MPG (id 9), `https://archive.ics.uci.edu/static/public/9/auto+mpg.zip`,
+  zip sha256 `5fc1507522b73b8050d3aa45df51eefe1b666ae5f428a5f1347b6483339f1003`, member
+  `auto-mpg.data` (398 rows; 8 whitespace-separated fields, then a TAB, then a double-quoted car
+  name; 6 rows have `?` horsepower; 305 distinct car names).
+Raw `?` tokens are kept in the CSV on purpose; the contracts declare `dataset.na_values = ["?"]`
+(exercises the NA-token path end to end, incl. pipeline replay).
+
+Owned files: `integration/datasets.py`, `integration/model.py` (DatasetKey only),
+`integration/scenarios.toml`, `.gitignore` (add one line `integration/.cache/`).
+
+### datasets.py additions
+- `DatasetKey` (in model.py) gains `"adult"`, `"autompg"`.
+- Module constant `REAL_SOURCES: dict[str, tuple[str, str, str]]` = key → (url, zip sha256,
+  member name) with the values above. `CACHE_DIR = Path("integration/.cache")`.
+- `fetch_zip(key) -> bytes`: path `CACHE_DIR / f"{key}.zip"`; if missing, `mkdir(parents=True,
+  exist_ok=True)` and download with `urllib.request.urlopen(url, timeout=120)` (`# noqa: S310 -
+  fixed https UCI URL`), write bytes. Read bytes; `hashlib.sha256` hex != pinned → delete the
+  cached file and raise `RuntimeError(f"{key}: downloaded archive sha256 mismatch")`. Return bytes.
+- `_member_text(key) -> str`: `zipfile.ZipFile(io.BytesIO(fetch_zip(key))).read(member)
+  .decode("utf-8")`.
+- `generate("adult")`: header `age, workclass, fnlwgt, education, education_num, marital_status,
+  occupation, relationship, race, sex, capital_gain, capital_loss, hours_per_week,
+  native_country, income` (snake_case names exactly). Rows: `csv.reader(text.splitlines(),
+  skipinitialspace=True)`; skip rows with no fields or only blank fields; each row must have 15
+  fields else `RuntimeError("adult: malformed row <line number>")`; values kept verbatim
+  (stripped).
+- `generate("autompg")`: header `mpg, cylinders, displacement, horsepower, weight, acceleration,
+  model_year, origin, car_name`. Per non-blank line: `left, name = line.split("\t", 1)`;
+  `fields = left.split()` must have 8 items else `RuntimeError("autompg: malformed row <n>")`;
+  `car_name = name.strip().strip('"')`; row = `(*fields, car_name)`. Values verbatim
+  (`3504.` stays `3504.`).
+- `write_csv` unchanged in behaviour (works for all keys via `generate`).
+
+### scenarios.toml additions
+- S18 "Real data: UCI Adult income (binary, messy categoricals)": dataset `adult`; contract
+  `dataset.na_values = ["?"]`; target `income` binary `positive_class = ">50K"`;
+  `features.exclude = ["fnlwgt"]`; objective classification `roc_auc`, goals ("Does sex affect
+  income?", `["sex"]`) and ("Does education_num affect income?", `["education_num"]`); split
+  stratified seed 42; candidates `["logistic_regression", "random_forest_classifier",
+  "hist_gb_classifier"]`, inferential `logit`. Expect: completed; nodes_completed = 6 shared +
+  champion_selection + artifact_persistence; `min_candidates_completed = 2`; `no_gates = true`;
+  `champion = true`; `test_scored = true`; `report_contains = ["Modelling report", "Validation
+  comparison", "Inference"]`; `pipeline_replay = true`; `manifest = true`. Soft: `metric_min =
+  0.8`; inference sex "reject H0". `timeout_s = 2400`; `max_cost_usd = 0.30`.
+- S19 "Real data: UCI Auto MPG (regression, missing horsepower)": dataset `autompg`; contract
+  `dataset.na_values = ["?"]`; target `mpg` continuous; `features.roles = {origin =
+  "categorical"}`; objective regression `rmse`, goal ("Does origin affect mpg?", `["origin"]`);
+  split random seed 42; candidates `["linear_regression", "ridge", "random_forest_regressor"]`,
+  inferential `ols`. `car_name` stays in on purpose (high-cardinality text). Expect as S18 plus
+  `tools_used = ["fit_imputer", "apply_imputer"]`, `metrics_in_report = ["rmse"]`. Soft:
+  `metric_max = 5.0`. `max_cost_usd = 0.30`.
+Parse smoke now prints 15.
+
+### H1b checks
+Ruff check/format and mypy on `integration` (same commands as H1); parse smoke → 15;
+`.venv/bin/python -c "from integration.datasets import generate; h, r = generate('adult');
+print(len(h), len(r)); h, r = generate('autompg'); print(len(h), len(r))"` → `15 32561` and
+`9 398`. No scenario runs (S18/S19 need the LLM).
+
+H1 acceptance (2026-10-07): implementer receipt + main diff review. Ruff check/format, mypy
+(8 files) exit 0; parse smoke 13; `--llm live --only S17` exit 0, S17 PASS 5/5, 0 LLM calls,
+output `integration/out/20261007T105101Z-live/`. Accepted deviations: `_call(json=, files=)`
+explicit params; helper dataclasses in driver.py; `_QUERIES` literal SQL; noqa S311 on
+`random.Random(...)` only. Real-run paths (SSE, gates, actions, evidence) unexercised until H2.
+
+## Stage H2 — offline stand-in LLM (+ H1b in the same stage)
+
+Do H1b (above) first, then this. Goal: `--llm offline` drives every scenario through the real
+API/MCP/nodes with a deterministic, free stand-in for `litellm.acompletion`. The stand-in only
+has to produce schema-valid, contract-consistent decisions; it never judges data.
+
+Owned files: `integration/offline_llm.py` (new), `integration/model.py`,
+`integration/run_scenarios.py`, `integration/scenarios.toml`, plus H1b files.
+
+### model.py
+- New `OfflineHints(_Frozen)`: `reference_levels: dict[str, str] = {}`;
+  `revised_candidates: tuple[str, ...] = ()`.
+- `Scenario.offline: OfflineHints = OfflineHints()`.
+
+### offline_llm.py
+Facts it relies on (verified): every role routes to `deepseek/...` → client "json" tier appends
+to the FIRST (system) message a final line `Schema: <compact json schema>` whose `"title"` is the
+output class name (`backend/statlab/llm/client.py:_schema_instruction`, `_with_instruction`).
+Prose calls (`complete_prose`, output `QaAnswer`) pass `stream=True` and consume
+`ModelResponseStream` chunks via an object with `__aiter__` and callable `aclose`
+(`client.py:_consume_prose`). Usage must carry `prompt_tokens_details.cached_tokens`.
+
+`class OfflineProvider`:
+- `__init__(self) -> None`: `self.scenario: Scenario | None = None`.
+- `async __call__(self, **kwargs: object) -> object`:
+  1. `messages = kwargs["messages"]`, must be a list of dicts with str `role`/`content`, else
+     `RuntimeError("offline provider: malformed messages")`. `model = str(kwargs["model"])`.
+  2. `system = messages[0]["content"]`; `marker = "\nSchema: "`; `index = system.rfind(marker)`;
+     `-1` → `RuntimeError("offline provider: request has no schema")`; `schema =
+     json.loads(system[index + len(marker):])`; `title = schema["title"]` (str).
+  3. `user_text = "\n".join(m["content"] for m in messages if m["role"] == "user")`.
+  4. `scenario = self.scenario`; None → `RuntimeError("offline provider: no active scenario")`.
+  5. `payload = self._answer(title, user_text, scenario)`; `content = json.dumps(payload)`.
+  6. `kwargs.get("stream") is True` → return `_Stream(content, model)`; else return
+     `ModelResponse(choices=[{"message": {"role": "assistant", "content": content},
+     "finish_reason": "stop", "index": 0}], model=model, usage={"prompt_tokens": 0,
+     "completion_tokens": 0, "total_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}})`
+     (pattern of `tests/test_llm_client.py:_response`).
+- `_answer(title, user_text, scenario) -> dict[str, JsonValue]` — contract =
+  `DataContract.model_validate(scenario.contract)`; `RATIONALE = "Offline stand-in decision."`:
+  - Titles `IntakeDecision`, `ProblemDecision`, `ProfileDecision`, `ProfileFindings`,
+    `SplitDecision`, `PreprocessingDecision`, `FeatureDecision`, `TrainingDecision`,
+    `EvaluationActions`, `ValidationConclusion`, `InterpretationDecision`, `SearchDecision`
+    → `{"rationale": RATIONALE}` (all other fields default; SearchDecision with no candidates
+    = no second wave).
+  - `DesignDecision` → names = `scenario.offline.revised_candidates` if those are non-empty AND
+    `"Revise the typed proposal" in user_text`, else `contract.modelling.candidates`; empty →
+    `RuntimeError("offline provider: contract has no candidates")`. Build with the real models
+    (`statlab_contracts.candidate`): `base = CandidateSpec(label=names[0], rationale=f"Offline
+    stand-in candidate {names[0]}.", is_baseline=True, estimator=EstimatorSpec(name=names[0]))`;
+    for each other name: `draft = CandidateSpec(label=name, rationale=f"Offline stand-in
+    candidate {name}.", estimator=EstimatorSpec(name=name))` then the final spec is the same
+    constructor plus `varies_from_baseline=tuple(sorted(changed_dimensions(base, draft)))`.
+    Return `{"rationale": RATIONALE, "candidate_set":
+    CandidateSet(candidates=(base, *others)).model_dump(mode="json")}`. (Rationale strings are
+    ≥ 20 chars, required by `CandidateSpec.rationale`.)
+  - `InferenceDecision` → `model = contract.modelling.inferential_model or {"continuous": "ols",
+    "binary": "logit", "multiclass": "mnlogit", "count": "glm_poisson"}[contract.target.type]`
+    (target type None → `RuntimeError`); `predictors` = goal predictors in goal order, de-duplicated
+    keeping first occurrence; `reference_levels = {k: v for k, v in
+    scenario.offline.reference_levels.items() if k in predictors}`. Return those three +
+    rationale. (Mirrors `design_inference.py` checks at lines 205-255.)
+  - `ChampionChoice` → `start = user_text.find('"ranking"')`; search `re.search(
+    r'"candidate"\s*:\s*"(c_\d{2,})"', user_text[start:] if start >= 0 else user_text)`; match →
+    group 1, else first `re.search(r"\bc_\d{2,}\b", user_text)`, else `"c_01"`. Return
+    `{"candidate_id": chosen, "rationale": RATIONALE}`.
+  - `InterruptClass` → `{"category": "status" if "current status" in user_text.lower() else
+    "qa", "lifecycle_action": None}`.
+  - `ControlText` → `{"text": "Offline stand-in reply."}`.
+  - `QaAnswer` → `{"text": "Offline stand-in answer.", "references": []}`.
+  - `ContractProposal` → `{"contract": scenario.contract, "reasoning": "Offline stand-in
+    proposal."}`.
+  - anything else → `RuntimeError(f"offline provider has no answer for {title}")` (surfaces in
+    api.log via the client's bug path; main extends the table).
+- `_Stream`: `__init__(content, model)`; `__aiter__` returns an async generator yielding, for
+  `piece in (content[: len(content) // 2], content[len(content) // 2 :])`:
+  `ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content=piece))],
+  model=model)`, then a usage chunk `ModelResponseStream(choices=[], model=model,
+  usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0,
+  prompt_tokens_details=PromptTokensDetails(cached_tokens=0)))` (pattern of
+  `tests/test_llm_stream.py:chunk`; imports as there). `async aclose(self) -> None`: no-op.
+
+### run_scenarios.py
+- `--llm` choices `("live", "offline")`.
+- In `_suite`: `provider = OfflineProvider() if args.llm == "offline" else None`;
+  `llm_client = LlmClient(settings, acompletion=provider) if provider is not None else None`;
+  pass to `ApiServer`. Before each scenario: `if provider is not None: provider.scenario =
+  scenario`. Nothing else changes (`live=args.llm == "live"` stays for G7).
+
+### scenarios.toml (offline hints)
+`[scenario.offline]` tables: S01, S04, S05, S06, S07, S08, S13 →
+`reference_levels = {plan = "premium", region = "north"}`; S05 additionally
+`revised_candidates = ["logistic_regression", "random_forest_classifier"]`; S02 →
+`{has_garden = "no"}`; S18 → `{sex = "Male"}`; S19 → `{origin = "1"}`.
+
+### H2 checks (implementer)
+Ruff check, Ruff format --check, mypy on `integration`; parse smoke → 15; H1b dataset smoke;
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S17` → exit 0 (proves the
+offline wiring starts the API). Main runs the full offline dry-run itself afterwards.
+
+### H2 addendum A — first offline S01 findings (2026-10-07, `integration/out/20261007T105450Z-offline`)
+Both are harness defects; backend behaved as designed.
+1. Every `model_training` refused "training method conflicts with explicit tuning method":
+   `Driver.setup` uploaded `contract.model_dump_json()`, which serializes every default and makes
+   all fields "explicit" (`model_fields_set`) server-side, e.g. `modelling.tuning.method`.
+   Fix in `integration/driver.py` `setup`: keep `DataContract.model_validate(scenario.contract)`
+   as a local pre-check only; send `scenario.contract` (the sparse dict) as the validate body's
+   `contract`, and upload `json.dumps(scenario.contract)` as `contract.json`.
+2. After the first failure gate was answered `abort` (run → cancelled), `_answer_gates` kept
+   answering the other pending gates of the same stale snapshot → 409. Fix: `_answer_gates`
+   submits at most ONE answer per call (return right after the first submission, after recording
+   it); the next poll re-reads the snapshot.
+Checks: Ruff check/format, mypy on `integration`; then `--llm offline --only S17` exit 0.
+
+### H2 addendum B — second offline S01 run (`integration/out/20261007T105632Z-offline`)
+After the first failure gate's `abort` cancelled the run, the other two failure gates stay
+`pending` (designed: unanswered gates are dormant; `GateService.reconcile` keeps them). The
+harness then answered one of them on the cancelled run → 409. Fix in `integration/driver.py`
+`Driver.run`: call `_answer_gates` only when `status in ("awaiting_user", "paused")`.
+Checks: Ruff check/format, mypy on `integration`.
+
+## Fix F1 — stored contracts lose field explicitness (backend defect found by S01 offline)
+
+Evidence: `integration/out/20261007T105632Z-offline/S01`: sparse uploaded contract (no
+`modelling.tuning`); `contract.snapshot.json` and `contracts.json` hold the FULL dump
+(`"tuning": {"method": "grid", ...}`); every candidate's `model_training` refused "training
+method conflicts with explicit tuning method" (`backend/statlab/domains/candidate_models.py:154`).
+Cause: `create_contract` (`backend/statlab/persistence/repository.py:252`) and
+`ProjectService.persist_contract` (`backend/statlab/api/projects.py:201`) serialize with
+`contract.model_dump_json()`, so on reload (`ContractRow.contract()`, MCP tools'
+`DataContract.model_validate_json(snapshot)`) every default is in `model_fields_set`. All seven
+explicitness guards (`design_inference.py:129/138/148`, `foundation.py:135/140`,
+`candidate_models.py:154`, `candidate_pipeline.py:238`) then always fire, i.e. contract defaults
+silently become hard user requirements. No PLAN decision requires the full dump; the propose
+endpoint already uses `exclude_unset=True` (`projects.py:274`), confirming the intent.
+Verified (pydantic 2.13.5): `model_dump_json(exclude_unset=True)` round-trips with `==` equal
+(equality ignores fields-set) and preserves `model_fields_set`; every reader validates through
+`DataContract`, so sparse JSON is accepted everywhere (incl. the embedded pipeline.py snapshot,
+`mcp_server/statlab_tools/tools/reproducibility.py:329`).
+
+Owned files: `backend/statlab/persistence/repository.py`, `backend/statlab/api/projects.py`,
+`tests/test_repository.py`, `tests/test_api_projects.py`.
+Recipe:
+1. `repository.py` `create_contract`: `contract_json = contract.model_dump_json(exclude_unset=True)`.
+2. `projects.py` `persist_contract`: write `contract.model_dump_json(exclude_unset=True)
+   .encode("utf-8")` (file bytes must stay byte-identical to the SQL text; runs.py compares them).
+3. `tests/test_repository.py::test_r9_json_byte_fidelity`: expected text becomes
+   `contract.model_dump_json(exclude_unset=True)`; docstring: "R9: stored text is byte-identical
+   to `contract.model_dump_json(exclude_unset=True)` (explicit fields only), and
+   `ContractRow.contract()` equals the original."
+4. New test right after it, `test_r9b_contract_explicitness_survives_storage(migrated_db,
+   project)`: `contract = DataContract(target=TargetSpec(column="y", type="binary"),
+   modelling=ModellingRules(candidates=("logistic_regression",)))` (import `TargetSpec`,
+   `ModellingRules` from `statlab_contracts.contract`); `create_contract(..., path=Path("/c.json"),
+   contract=contract)`; fetch with `get_contract`; assert `json.loads(fetched.contract_json) ==
+   {"target": {"column": "y", "type": "binary"}, "modelling": {"candidates":
+   ["logistic_regression"]}}`; `restored = fetched.contract()`; assert `"tuning" not in
+   restored.modelling.model_fields_set`; assert `"method" not in
+   restored.modelling.tuning.model_fields_set`; assert `restored.preprocessing.model_fields_set
+   == set()`. Docstring: "Defaults stay implicit after storage, so explicit-contract guards only
+   see user-set fields."
+5. `tests/test_api_projects.py::test_contract_upload_versions_validation_findings_and_no_runs`:
+   after the `assert Path(first_row["path"]).read_bytes() == first_bytes` line add a sparse
+   upload: `sparse = await client.post(path, files={"file": ("sparse.json", b'{"target":
+   {"column": "a"}}', "application/json")})`; assert `sparse.status_code == 201`; assert
+   `Path(sparse.json()["path"]).read_bytes() == b'{"target":{"column":"a"}}'`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_repository.py
+tests/test_api_projects.py tests/test_api_runs.py tests/test_domain_binding.py
+tests/test_storage.py tests/test_storage_fork.py tests/test_storage_prune.py
+tests/test_mcp_client.py tests/test_graph_engine.py tests/test_db_concurrency.py
+tests/test_db_migrations.py tests/test_control_router.py tests/test_skeleton.py
+tests/test_project_memory.py tests/test_prompt_context.py tests/test_llm_client.py'`;
+`.venv/bin/python -m ruff check` + `ruff format --check` + `mypy` on the four owned files.
+Known hazard (not fixed here): contracts already stored in an existing DB keep their full dump
+(all-explicit); new uploads are sparse. A client that uploads a full dump still marks everything
+explicit (correct: the user sent it).
+
+F1 acceptance (focused, 2026-10-07): implementer receipt + main diff review; 16 focused modules
+`make test-fast` exit 0 (log `/tmp/f1_tests.log`, quiet mode, all dots), Ruff/format/mypy on
+the 4 files exit 0. Offline S01 after F1: 23/24 must checks
+(`integration/out/20261007T110130Z-offline`); champion selected, test scored once. Full
+`make check` deferred to the batch acceptance.
+
+### H2 addendum C — replay uses relative paths
+`checks._replay` runs with `cwd=tempfile.mkdtemp()` but passes `evidence.pipeline_path` and
+`scenario_dir / "data.csv"`, which are relative (`integration/out/...`) → script not found, empty
+stdout → `IndexError`. Manual replay of the same files from a temp dir: exit 0. Fix in
+`integration/checks.py` `_replay`: pass `str(evidence.pipeline_path.resolve())` and
+`str((scenario_dir / "data.csv").resolve())`; directly after `subprocess.run`, if
+`completed.returncode != 0` return the failed must-check with detail `completed.stderr[-2000:]`
+before parsing stdout; on a parse exception include `completed.stderr[-2000:]` in the detail
+(`f"replay failed: {exc!r}; stderr: {completed.stderr[-2000:]}"`; the TimeoutExpired branch keeps
+`f"replay failed: {exc!r}"` since `completed` is unbound there — catch it in its own `except`
+around `subprocess.run`).
+Checks: Ruff check/format, mypy on `integration`.
+
+### H2 addendum D — mypy must skip run outputs
+`mypy integration` (and therefore `make typecheck`) recurses into `integration/out/**`, whose
+generated `pipeline.py` copies collide ("Duplicate module named pipeline"). Fix in
+`pyproject.toml` `[tool.mypy]`: add `exclude = ['^integration/out/']` (single-quoted TOML
+literal, regex on the discovered path). Ruff already skips it (gitignored). Checks: `.venv/bin/
+python -m mypy integration` exit 0 with output dirs present; `.venv/bin/python -m mypy` (no args,
+uses `files`) exit 0.
+
+H2 addenda C/D accepted (mypy 188 files clean). First full offline suite:
+`integration/out/20261007T110326Z-offline` — PASS S01 S02 S06 S07 S08 S12 S13; FAIL S03 S04 S05
+S10 S11 S17 S18 S19. Note: S07 shows $0.0046 offline — NOT a network call: litellm
+`stream_chunk_builder` estimates usage locally when the stand-in's usage chunk is zero
+(completion_tokens 14 = stand-in JSON); live providers send real usage.
+Designed behaviour confirmed (PLAN §8 "Auto: gates none (except escalation)"): an autonomous
+node failure escalates to a failure gate (`abort`/`rewind`), it does not fail the run.
+
+## Fixes F2–F4 — backend defects found by the full offline suite (one stage)
+
+Owned files: `mcp_server/statlab_tools/tools/reproducibility.py`,
+`backend/statlab/domains/candidate_pipeline.py`, `backend/statlab/domains/foundation.py`,
+`tests/test_tools_reproducibility.py`, `tests/test_nodes_candidate_pipeline.py`,
+`tests/test_nodes_foundation.py`.
+
+### F2 — guided runs always fail `snapshot_run` (S04, S05)
+Evidence: guided S04: `intake` attempt 1 (prepared before its gate) and attempt 2 both call
+`load_csv` with the SAME dataset sha256; `logged_calls` (`backend/statlab/mcp_client.py:575`)
+keeps every current-run call; `export_pipeline_script` slices from the target and succeeds, but
+`snapshot_run` (`reproducibility.py:514-523`) counts every `load_csv` → "the log has 2
+load_csv dataset(s)" → artifact_persistence failure gate. Same for any retried/restarted shared
+node. The run hash identity is the dataset, so repeated loads of one dataset are legitimate.
+Recipe (`snapshot_run`): keep the `datasets` list; compute `distinct = sorted(set(datasets))`;
+the refusal condition becomes `len(distinct) != 1`, message `f"the log has {len(distinct)}
+distinct load_csv dataset(s); the run hash needs exactly one"`, field error `f"{len(distinct)}
+distinct load_csv dataset sha256 in the log"`; `_run_hash(calls, distinct[0], contract_snapshot)`.
+Docstring sentence "A log with no `load_csv` is `tool_param`: it has no data identity to hash."
+becomes "A log whose `load_csv` calls name zero or several distinct datasets is `tool_param`;
+repeated loads of one dataset (guided pre-gate attempts, retries) share one data identity."
+Tests (`tests/test_tools_reproducibility.py`, after `test_snapshot_no_load_csv_is_tool_param`):
+- `test_snapshot_repeated_same_dataset_is_one_identity(run_paths)`: `_write_contract(run_paths)`;
+  `once = (_call("load_csv", [_ref()], dataset="abc"),)`; `twice = (*once, _call("load_csv",
+  [_ref()], dataset="abc"))`; `res = snapshot_run(run_paths, twice)`; assert
+  `isinstance(res.summary["run_hash"], str)` and `len(res.summary["run_hash"]) == 64`.
+- `test_snapshot_two_distinct_datasets_is_tool_param(run_paths)`: `_write_contract(run_paths)`;
+  calls = load_csv dataset "abc" and load_csv dataset "def" (fresh `_ref()` outputs); `with
+  pytest.raises(ToolParamError, match="2 distinct load_csv dataset"): snapshot_run(...)`.
+
+### F3 — high-cardinality categoricals reach training unencoded (S03, S19)
+Evidence: S03 `customer_code`/`city` (60 levels), S19 `car_name` (305): `fit_onehot_encoder`
+(columns=None) lists them in `skipped_high_cardinality` with "skipped -- target-encode it
+instead"; `candidate_pipeline.py` onehot branch never acts on it; `train_estimator` refuses
+"feature columns [...] are not numeric or bool; encode them first". PLAN.md:388:
+`max_cardinality` "above this → target/frequency encoding". Resolution: target-encode the
+skipped columns right after one-hot (target encoder tool exists, cross-fits OOF, D34c).
+Recipe (`candidate_pipeline.py`):
+1. Rename the body of `_fit_apply` into a new method `_fit_apply_output(self, invocation,
+   evidence, pipeline, fit, apply, key, parameters) -> tuple[PipelineState, ToolSuccess]`
+   (same parameters/types as `_fit_apply`), returning `(updated pipeline, output)` where `output`
+   is the fit tool's `ToolSuccess`. `_fit_apply` keeps its signature and returns element 0 of
+   `await self._fit_apply_output(...)`.
+2. In the feature stage `if feature.encoding == "onehot":` branch: call `_fit_apply_output`
+   with the same arguments as today (`"fit_onehot_encoder"`, `"apply_onehot_encoder"`,
+   `"encoder"`, `{"max_cardinality": feature.max_cardinality}`), assign the pipeline, keep the
+   output. Then `skipped = output.summary.get("skipped_high_cardinality")`; if `skipped` is a
+   non-empty dict: `pipeline = await self._fit_apply(invocation, evidence, pipeline,
+   "fit_target_encoder", "apply_target_encoder", "encoder", {"columns": sorted(skipped), "seed":
+   self.runtime.contract.constraints.random_seed})` (same parameter shape as the existing
+   `encoding == "target"` branch). Nothing else changes.
+Tests (`tests/test_nodes_candidate_pipeline.py`):
+- Fake `CandidateTools`: new attribute `self.skipped: dict[str, JsonValue] = {}` in `__init__`;
+  in the `tool.startswith("fit_")` branch add `if tool == "fit_onehot_encoder": summary =
+  {"skipped_high_cardinality": dict(self.skipped)}` (next to the existing `fit_imputer` case).
+- New test after `test_target_encoding_keeps_oof_train_and_only_applies_to_validation`:
+  `test_onehot_skipped_high_cardinality_columns_are_target_encoded(migrated_db, project,
+  tmp_path)`: `h, tools = await candidate_harness(migrated_db, project, tmp_path)`;
+  `tools.skipped = {"zip": 400, "city": 60}`; `await prepare_candidate(h)`; `calls = [(name,
+  params) for _, name, params in tools.calls]`; `names = [name for name, _ in calls]`; assert
+  `names.index("fit_target_encoder") > names.index("apply_onehot_encoder")`; `fit =
+  next(params for name, params in calls if name == "fit_target_encoder")`; assert
+  `fit["columns"] == ["city", "zip"]` and `fit["seed"] ==
+  h.runtime.contract.constraints.random_seed`; `pipeline = pipeline_from_state(h.state,
+  h.state.branches[0], require="feature_engineering")`; assert `[step.tool for step in
+  pipeline.replay] == ["drop_columns", "apply_imputer", "apply_onehot_encoder",
+  "apply_target_encoder", "apply_scaler"]`.
+  (`test_replay_fits_train_applies_both_and_locks_identity` keeps its 4-step replay: empty
+  `skipped` → no target encoding.)
+
+### F4 — dedup ignores `features.exclude` (S18)
+Evidence: S18 (UCI Adult, `exclude=["fnlwgt"]`): `drop_duplicate_rows` subset includes
+`fnlwgt` (near-unique) → only 24 rows dropped; `drop_columns(fnlwgt)` runs after; the frames
+then hold 888/833/416 cross-split duplicate pairs → `verify_split` `duplicate_rows: fail` →
+"split verification failed". `verify_split` compares all columns of the split frames, so dedup
+must use the same columns minus id columns.
+Recipe (`foundation.py` `_split`): move the `protected`/`excluded` computation (currently after
+the `drop_high_missing_rows` block) to just before the `if contract.preprocessing.drop_duplicates:`
+block (unchanged expressions); the dedup `subset` becomes the intake columns that are in neither
+`contract.features.id_columns` nor `excluded` (order preserved). The `drop_columns` call stays
+where it is and uses the same `excluded`.
+Test (`tests/test_nodes_foundation.py::test_contract_structural_options_and_traceability_survive`):
+expected dedup subset changes from `["x", "excluded", "y"]` to `["x", "y"]`.
+
+### F2–F4 checks
+`LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_tools_reproducibility.py
+tests/test_nodes_persistence.py tests/test_spine_reporting.py tests/test_nodes_candidate_pipeline.py
+tests/test_nodes_foundation.py tests/test_nodes_champion.py tests/test_skeleton.py'`; Ruff check,
+Ruff format --check and mypy on the six owned files.
+
+### H2 addendum E — harness corrections from the full offline suite
+1. `integration/driver.py` `invalid_setup` S17-llm count is suite-global (229 calls from earlier
+   scenarios). Use `SELECT COUNT(*) FROM llm_calls WHERE run_id IN (SELECT id FROM runs WHERE
+   project_id = ?)` with the S17 project id (parameterized).
+2. `integration/checks.py` `failure_contains`: also pass when some gate (from
+   `evidence.gates`, question parsed with the existing `_question`) has `phase == "failure"` and
+   `expect.failure_contains in json.dumps(question.get("failure"))`. (Autonomous refusals
+   escalate to failure gates, PLAN §8.)
+3. `integration/scenarios.toml` S10 and S11: `[scenario.expect]` becomes `status =
+   "cancelled"`, remove `nodes_failed`, keep `failure_contains`, `nodes_not_run`, `test_scored`,
+   add `gates_opened_for = ["data_splitting"]`; add a gate rule `[[scenario.gates]]` with `node =
+   "data_splitting"`, `phase = "failure"`, `action = "abort"`.
+Checks: Ruff check/format, mypy on `integration`; parse smoke → 15.
+
+F2–F4 acceptance (focused, 2026-10-07): main diff review matches recipe; 7 focused modules
+`make test-fast` exit 0 (`/tmp/f24_tests.log`), Ruff/format/mypy on 6 files exit 0. Accepted
+deviation: typed local `skipped_parameters` with `[*sorted(skipped)]` (mypy/ruff C413/C416).
+Second full offline suite (`integration/out/20261007T111547Z-offline`): 13/15 PASS incl. S03,
+S10, S11, S17, S18 (UCI Adult, 171 s), S19 (UCI Auto MPG). Remaining: S04/S05 G3.
+
+Open design question for the user (not changed): an approved `before` gate re-runs the node as
+attempt 2; attempt 1 (the proposal attempt, `gates.node_execution_id`) gets no `node.*` end event
+and its `node_executions` row stays `awaiting_user` after the run completes. Closure is only
+signalled by `gate.closed`. Changing it means choosing a terminal execution status for proposal
+attempts and touches accepted engine/recovery semantics.
+
+### H2 addendum F — G3 recognises proposal attempts; soft budget text
+1. `integration/checks.py` G3 `pairs_ok`: build `gate_exec = {payload["gate_id"]:
+   payload["node_execution_id"]}` from server `gate.opened` events (skip events missing either
+   key) and `closed = {gate_exec[gid] for gate.closed events whose gate_id is in gate_exec}`; a
+   `node.started` counts as finished if a later end event exists (current rule) OR its
+   `execution_id` is in `closed`.
+2. `integration/checks.py` soft `summary_mentions`: search each `node_executions` row's
+   `summary` AND `error` text (case-insensitive).
+Checks: Ruff check/format, mypy on `integration` (report mypy's own exit, not a pipe's).

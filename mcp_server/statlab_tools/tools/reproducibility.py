@@ -502,8 +502,9 @@ def snapshot_run(
     `calls` is the orchestrator-supplied tool log (D-b). The run hash (D-e) is the sha256 of
     canonical JSON over the dataset sha256, the parsed contract snapshot and every call with
     `project`/`run` dropped and each ref replaced by `"@{call}.{output}"`, so two runs with the
-    same data, contract and calls hash alike. A log with no `load_csv` is `tool_param`: it has no
-    data identity to hash.
+    same data, contract and calls hash alike. A log whose `load_csv` calls name zero or several
+    distinct datasets is `tool_param`; repeated loads of one dataset (guided pre-gate attempts,
+    retries) share one data identity.
 
     The manifest records the Python version, `platform.platform()`, the versions of the modelling
     packages (`null` for any not installed) and a sha256 and size for every file under the run
@@ -516,13 +517,15 @@ def snapshot_run(
         for call in calls
         if call.tool == "load_csv" and "dataset" in call.arguments
     ]
-    if len(datasets) != 1:
+    distinct = sorted(set(datasets))
+    if len(distinct) != 1:
         raise ToolParamError(
-            f"the log has {len(datasets)} load_csv dataset(s); the run hash needs exactly one",
-            field_errors={"calls": f"{len(datasets)} load_csv dataset sha256 in the log"},
+            f"the log has {len(distinct)} distinct load_csv dataset(s); "
+            "the run hash needs exactly one",
+            field_errors={"calls": f"{len(distinct)} distinct load_csv dataset sha256 in the log"},
         )
     contract_snapshot = _contract_snapshot(paths)
-    run_hash = _run_hash(calls, datasets[0], contract_snapshot)
+    run_hash = _run_hash(calls, distinct[0], contract_snapshot)
     packages = _package_versions()
     files = _file_digests(paths)
     manifest: dict[str, JsonValue] = {

@@ -62,6 +62,7 @@ class CandidateTools(DesignTools):
         self.drops: tuple[str, ...] = ()
         self.threshold: JsonValue = 0.4
         self.best_params: dict[str, JsonValue] = {"fit_intercept": False}
+        self.skipped: dict[str, JsonValue] = {}
         self.outputs: list[tuple[str, ToolSuccess]] = []
 
     def artifact(self, kind: ArtifactKind) -> ArtifactMeta:
@@ -94,6 +95,8 @@ class CandidateTools(DesignTools):
                 artifacts += (self.artifact("dataframe"),)
             if tool == "fit_imputer":
                 summary = {"dropped": [], "fills": {"x": 1}, "strategies": {"x": "median"}}
+            if tool == "fit_onehot_encoder":
+                summary = {"skipped_high_cardinality": dict(self.skipped)}
         elif (
             tool.startswith("apply_")
             or tool.startswith("add_")
@@ -363,6 +366,31 @@ async def test_replay_fits_train_applies_both_and_locks_identity(
                 candidate=CandidateProgress(public_id="c_02", spec=h.state.branches[0].spec),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_onehot_skipped_high_cardinality_columns_are_target_encoded(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    tools.skipped = {"zip": 400, "city": 60}
+    await prepare_candidate(h)
+    calls = [(name, params) for _, name, params in tools.calls]
+    names = [name for name, _ in calls]
+    assert names.index("fit_target_encoder") > names.index("apply_onehot_encoder")
+    fit = next(params for name, params in calls if name == "fit_target_encoder")
+    assert fit["columns"] == ["city", "zip"]
+    assert fit["seed"] == h.runtime.contract.constraints.random_seed
+    pipeline = pipeline_from_state(h.state, h.state.branches[0], require="feature_engineering")
+    assert [step.tool for step in pipeline.replay] == [
+        "drop_columns",
+        "apply_imputer",
+        "apply_onehot_encoder",
+        "apply_target_encoder",
+        "apply_scaler",
+    ]
 
 
 @pytest.mark.asyncio

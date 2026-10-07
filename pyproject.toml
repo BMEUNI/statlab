@@ -79,7 +79,8 @@ warn_unreachable = true
 warn_unused_ignores = true
 disallow_any_generics = true
 no_implicit_reexport = true
-files = ["backend", "mcp_server", "contracts", "tests"]
+files = ["backend", "mcp_server", "contracts", "tests", "integration"]
+exclude = ['^integration/out/']
 
 [[tool.mypy.overrides]]
 module = ["litellm.*", "statsmodels.*", "sklearn.*", "matplotlib.*", "joblib.*", "mcp.*", "pyarrow.*", "jsonschema.*"]

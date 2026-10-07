@@ -1,0 +1,704 @@
+# Machine-readable scenario definitions; catalogue in SCENARIOS.md.
+
+[[scenario]]
+id = "S01"
+title = "Classification, autonomous, full path (baseline)"
+dataset = "churn"
+mode = "autonomous"
+max_cost_usd = 0.25
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+min_candidates_completed = 2
+no_gates = true
+champion = true
+test_scored = true
+report_contains = ["Modelling report", "Validation comparison", "Inference"]
+pipeline_replay = true
+manifest = true
+
+[scenario.soft]
+metric_min = 0.6
+
+[scenario.soft.inference]
+"Does plan affect churn?" = "reject H0"
+"Does region affect churn?" = "not rejected"
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S02"
+title = "Regression, autonomous, missing values"
+dataset = "houses"
+mode = "autonomous"
+max_cost_usd = 0.25
+
+[scenario.contract.target]
+column = "price"
+type = "continuous"
+
+[scenario.contract.objective]
+task = "regression"
+primary_metric = "rmse"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does garden affect price?"
+predictors = ["has_garden"]
+
+[scenario.contract.split]
+strategy = "random"
+seed = 42
+
+[scenario.contract.preprocessing.missing]
+default = "median"
+
+[scenario.contract.modelling]
+candidates = ["linear_regression", "ridge", "random_forest_regressor"]
+inferential_model = "ols"
+
+[scenario.expect]
+status = "completed"
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+min_candidates_completed = 2
+no_gates = true
+champion = true
+test_scored = true
+report_contains = ["Modelling report", "Validation comparison", "Inference"]
+metrics_in_report = ["rmse"]
+pipeline_replay = true
+manifest = true
+tools_used = ["fit_imputer", "apply_imputer"]
+
+[scenario.soft.inference]
+"Does garden affect price?" = "not rejected"
+
+[scenario.offline]
+reference_levels = {has_garden = "no"}
+
+[[scenario]]
+id = "S03"
+title = "Dirty data is detected and handled"
+dataset = "churn_dirty"
+mode = "autonomous"
+max_cost_usd = 0.25
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.preprocessing]
+drop_duplicates = true
+drop_constant = true
+max_cardinality = 30
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+
+[scenario.expect]
+status = "completed"
+champion = true
+tools_used = ["drop_duplicate_rows"]
+
+[scenario.soft]
+summary_mentions = ["duplicate"]
+
+[[scenario]]
+id = "S04"
+title = "Guided mode, approve everything"
+dataset = "churn"
+mode = "guided"
+max_cost_usd = 0.30
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+gates_opened_for = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+events_include = ["gate.opened", "gate.answered"]
+champion = true
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S05"
+title = "Guided mode with edits, an instruction and a skip"
+dataset = "churn"
+mode = "guided"
+max_cost_usd = 0.30
+
+[[scenario.gates]]
+node = "problem_definition"
+action = "approve_with_edits"
+edits = { secondary_metrics = ["pr_auc"] }
+
+[[scenario.gates]]
+node = "data_profiling"
+action = "skip_node"
+reason = "profiling not needed for this test"
+
+[[scenario.gates]]
+node = "experiment_design"
+phase = "before"
+action = "instruct"
+instruction = "Use only logistic_regression and random_forest_classifier."
+
+[[scenario.gates]]
+node = "preprocessing"
+action = "approve_all_remaining"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+nodes_skipped = ["data_profiling"]
+candidate_count = 2
+metrics_in_report = ["pr_auc"]
+
+[scenario.expect.gate_revision_min]
+experiment_design = 1
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+revised_candidates = ["logistic_regression", "random_forest_classifier"]
+
+[[scenario]]
+id = "S06"
+title = "Guided abort"
+dataset = "churn"
+mode = "guided"
+
+[[scenario.gates]]
+node = "data_splitting"
+action = "abort"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "cancelled"
+nodes_not_run = ["preprocessing"]
+champion = false
+test_scored = false
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S07"
+title = "Lifecycle controls and chat"
+dataset = "churn"
+mode = "autonomous"
+
+[[scenario.actions]]
+when = { event = "node.started", node = "model_training" }
+do = "pause"
+
+[[scenario.actions]]
+when = { status = "paused" }
+do = "message"
+text = "What is the current status of the run?"
+
+[[scenario.actions]]
+when = { status = "paused" }
+do = "message"
+text = "Which candidate is performing best so far?"
+
+[[scenario.actions]]
+when = { status = "paused" }
+do = "resume"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+messages_answered = 2
+events_include = ["message.user", "message.assistant.complete"]
+champion = true
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S08"
+title = "Cancel mid-run"
+dataset = "churn"
+mode = "autonomous"
+
+[[scenario.actions]]
+when = { event = "node.started", node = "preprocessing" }
+do = "cancel"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "cancelled"
+champion = false
+test_scored = false
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S10"
+title = "Temporal data is refused cleanly (v1 limit)"
+dataset = "sales"
+mode = "autonomous"
+max_cost_usd = 0.10
+
+[scenario.contract.target]
+column = "units"
+type = "continuous"
+
+[scenario.contract.objective]
+task = "regression"
+primary_metric = "mae"
+
+[scenario.contract.split]
+strategy = "temporal"
+time_column = "date"
+
+[scenario.contract.modelling]
+candidates = ["linear_regression", "hist_gb_regressor"]
+
+[[scenario.gates]]
+node = "data_splitting"
+phase = "failure"
+action = "abort"
+
+[scenario.expect]
+status = "cancelled"
+failure_contains = "no supported v1 split"
+nodes_not_run = ["preprocessing"]
+test_scored = false
+gates_opened_for = ["data_splitting"]
+
+[[scenario]]
+id = "S11"
+title = "Grouped data is refused cleanly (v1 limit)"
+dataset = "visits"
+mode = "autonomous"
+max_cost_usd = 0.10
+
+[scenario.contract.target]
+column = "responded"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[scenario.contract.split]
+strategy = "grouped"
+group_column = "patient_id"
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier"]
+
+[[scenario.gates]]
+node = "data_splitting"
+phase = "failure"
+action = "abort"
+
+[scenario.expect]
+status = "cancelled"
+failure_contains = "no supported v1 split"
+nodes_not_run = ["preprocessing"]
+test_scored = false
+gates_opened_for = ["data_splitting"]
+
+[[scenario]]
+id = "S12"
+title = "Multiclass"
+dataset = "species"
+mode = "autonomous"
+
+[scenario.contract.target]
+column = "species"
+type = "multiclass"
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "balanced_accuracy"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does x4 matter?"
+predictors = ["x4"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier"]
+inferential_model = "mnlogit"
+
+[scenario.expect]
+status = "completed"
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+min_candidates_completed = 2
+no_gates = true
+champion = true
+test_scored = true
+report_contains = ["Modelling report", "Validation comparison", "Inference"]
+metrics_in_report = ["balanced_accuracy"]
+pipeline_replay = true
+manifest = true
+
+[scenario.soft.inference]
+"Does x4 matter?" = "not rejected"
+
+[[scenario]]
+id = "S13"
+title = "Fit budget exhaustion"
+dataset = "churn"
+mode = "autonomous"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.contract.constraints]
+max_total_fit_seconds = 1
+
+[scenario.soft]
+summary_mentions = ["budget"]
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S17"
+title = "Invalid setup is rejected cleanly (no LLM)"
+dataset = "churn"
+mode = "autonomous"
+
+[scenario.setup]
+invalid_cases = true
+
+[scenario.contract.target]
+column = "does_not_exist"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[[scenario]]
+id = "S18"
+title = "Real data: UCI Adult income (binary, messy categoricals)"
+dataset = "adult"
+mode = "autonomous"
+timeout_s = 2400
+max_cost_usd = 0.30
+
+[scenario.contract.dataset]
+na_values = ["?"]
+
+[scenario.contract.target]
+column = "income"
+type = "binary"
+positive_class = ">50K"
+
+[scenario.contract.features]
+exclude = ["fnlwgt"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does sex affect income?"
+predictors = ["sex"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does education_num affect income?"
+predictors = ["education_num"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+min_candidates_completed = 2
+no_gates = true
+champion = true
+test_scored = true
+report_contains = ["Modelling report", "Validation comparison", "Inference"]
+pipeline_replay = true
+manifest = true
+
+[scenario.soft]
+metric_min = 0.8
+
+[scenario.soft.inference]
+"Does sex affect income?" = "reject H0"
+
+[scenario.offline]
+reference_levels = {sex = "Male"}
+
+[[scenario]]
+id = "S19"
+title = "Real data: UCI Auto MPG (regression, missing horsepower)"
+dataset = "autompg"
+mode = "autonomous"
+max_cost_usd = 0.30
+
+[scenario.contract.dataset]
+na_values = ["?"]
+
+[scenario.contract.target]
+column = "mpg"
+type = "continuous"
+
+[scenario.contract.features.roles]
+origin = "categorical"
+
+[scenario.contract.objective]
+task = "regression"
+primary_metric = "rmse"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does origin affect mpg?"
+predictors = ["origin"]
+
+[scenario.contract.split]
+strategy = "random"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["linear_regression", "ridge", "random_forest_regressor"]
+inferential_model = "ols"
+
+[scenario.expect]
+status = "completed"
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+min_candidates_completed = 2
+no_gates = true
+champion = true
+test_scored = true
+report_contains = ["Modelling report", "Validation comparison", "Inference"]
+metrics_in_report = ["rmse"]
+tools_used = ["fit_imputer", "apply_imputer"]
+pipeline_replay = true
+manifest = true
+
+[scenario.soft]
+metric_max = 5.0
+
+[scenario.offline]
+reference_levels = {origin = "1"}

@@ -872,7 +872,7 @@ async def test_contract_structural_options_and_traceability_survive(
     dropped = next(params for _, tool, params in env.tools.calls if tool == "drop_columns")
     assert dropped["columns"] == ["excluded"]
     dedupe = next(params for _, tool, params in env.tools.calls if tool == "drop_duplicate_rows")
-    assert dedupe["subset"] == ["x", "excluded", "y"]
+    assert dedupe["subset"] == ["x", "y"]
     split = next(params for _, tool, params in env.tools.calls if tool == "split_random")
     assert split == {
         "frame": str(FRAME),
