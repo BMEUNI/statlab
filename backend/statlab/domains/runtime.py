@@ -78,6 +78,7 @@ class DomainRuntime:
         *,
         evidence: tuple[JsonValue, ...],
         question: str,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         context = self.context(invocation)
         if self.decision_override is not None:
@@ -139,6 +140,7 @@ class DomainRuntime:
             output=output,
             reasoning=self.router.role_for(context.node) == Role.REASONING,
             recovery=recovery,
+            check=check,
         )
 
     async def approve[T: BaseModel](

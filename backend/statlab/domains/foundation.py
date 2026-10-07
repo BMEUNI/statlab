@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, JsonValue, ValidationError
@@ -24,11 +25,22 @@ from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, StatlabError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import RunState
+from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.repository import require_run, set_test_fingerprint
 
 
 class _RefusalError(StatlabError):
     """Reachable data/decision refusal, distinct from malformed engine state."""
+
+
+def _rejecting[T](validate: Callable[[T], None]) -> Callable[[T], None]:
+    def check(decision: T) -> None:
+        try:
+            validate(decision)
+        except _RefusalError as exc:
+            raise DecisionRejectedError(str(exc)) from exc
+
+    return check
 
 
 def shared_result(state: RunState, node: str) -> NodeResult:
@@ -418,7 +430,8 @@ class FoundationExecutor:
         for selected, tool, compatible in selections:
             if len(set(selected)) != len(selected) or set(selected) - compatible:
                 raise _RefusalError(
-                    f"{tool} selection has unknown, repeated or incompatible columns"
+                    f"{tool} selection has unknown, repeated or incompatible columns; "
+                    f"allowed: {sorted(compatible)!r}"
                 )
             if selected and tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")
@@ -450,7 +463,12 @@ class FoundationExecutor:
             ProfileDecision,
             evidence=tuple(evidence.tools),
             question="Choose relevant typed columns and at most four descriptive plots. "
-            "Profile uses the whole input; goals remain fixed before EDA.",
+            "Profile uses the whole input; goals remain fixed before EDA. "
+            "summarize_categorical takes only non-numeric columns; numeric, correlations and "
+            "outliers take only numeric columns (dtype or contract role).",
+            check=_rejecting(
+                lambda d: self._validate_profile(invocation, d, schema.summary, problem.target)
+            ),
         )
         self._validate_profile(invocation, decision, schema.summary, problem.target)
         summary: dict[str, JsonValue] = {

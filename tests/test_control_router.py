@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -56,6 +56,7 @@ class FakeClient(LlmClient):
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
         recovery: CallRecovery | None = None,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         self.calls.append((model, reasoning, tuple(messages)))
         if self.entered is not None:

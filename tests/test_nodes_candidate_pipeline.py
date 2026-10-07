@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -953,6 +953,7 @@ async def test_decision_recovery_retries_transient_llm_failure(
             reasoning: bool = False,
             example: dict[str, JsonValue] | None = None,
             recovery: CallRecovery | None = None,
+            check: Callable[[T], None] | None = None,
         ) -> T:
             async def call() -> T:
                 self.attempts += 1

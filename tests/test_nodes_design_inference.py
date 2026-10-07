@@ -23,6 +23,7 @@ from statlab.domains.tabular import TABULAR_SPINE, TABULAR_TRAVERSAL
 from statlab.errors import EngineError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress
+from statlab.llm.client import DecisionRejectedError
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.mcp_client import CallContext, Repair
 from statlab.persistence.models import ProjectRow, RunMode
@@ -724,3 +725,21 @@ async def test_inference_registry_refusals(
     output = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
     assert output.status == "failed"
     assert output.error is not None and output.error.message == message
+
+
+@pytest.mark.asyncio
+async def test_design_and_inference_checks_feed_llm_repair(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await prepared(migrated_db, project, tmp_path)
+    assert (await design(h)).status == "completed"
+    design_check = h.llm.checks[DesignDecision]
+    assert design_check(shortlist()) is None
+    with pytest.raises(DecisionRejectedError):
+        design_check(shortlist("logistic_regression"))
+    assert (await DesignInferenceExecutor(h.runtime)(h.invocation(5))).status == "completed"
+    inference_check = h.llm.checks[InferenceDecision]
+    valid = InferenceDecision(model="ols", predictors=("x",), rationale="r")
+    assert inference_check(valid) is None
+    with pytest.raises(DecisionRejectedError):
+        inference_check(InferenceDecision(model="logit", predictors=("x",), rationale="r"))

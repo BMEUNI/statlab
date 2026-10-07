@@ -1416,3 +1416,123 @@ of `match kind` in `_matches_kind`; unreachable since `TunableKind` is closed). 
 the final `case "max_features":` to `case _:` (body unchanged; mypy narrows `kind` to the
 remaining literal). Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_vocabulary.py tests/test_candidate_models.py'`;
 Ruff check/format and mypy on `contracts/statlab_contracts/vocabulary.py`.
+
+## Live run 2 finding (2026-10-07, `integration/out/20261007T183001Z-live`, S01 only, $0.0041)
+
+S01 ended `cancelled` at `data_profiling`: the live LLM's `ProfileDecision` put a numeric-dtype
+column in `categorical`; `_validate_profile` refused ("summarize_categorical selection has
+unknown, repeated or incompatible columns"), the node failed, the failure gate defaulted to abort.
+The rule is correct (the tool rejects numeric columns too), but the LLM was neither told the rule
+nor given a chance to correct it: semantic refusals bypass the client's one-repair loop.
+
+## Fix F8 — semantic decision checks join the one-repair loop
+
+Goal: node validators that judge an LLM decision against run facts run inside
+`LlmClient.complete`'s single repair round, so the LLM sees the refusal reason once and can
+correct it. Applied to the three nodes that already have a standalone validator: profiling,
+experiment design, inference. Non-goals: no change to post-approval revalidation (kept), no new
+validators for training/evaluation/interpretation, no change to repair count, no PLAN change
+(the repair budget stays "exactly once").
+
+Owned files: `backend/statlab/llm/client.py`, `backend/statlab/llm/__init__.py` (only if it
+re-exports client names; add `DecisionRejectedError` beside the existing exports),
+`backend/statlab/domains/runtime.py`, `backend/statlab/domains/foundation.py`,
+`backend/statlab/domains/design_inference.py`, `tests/test_llm_client.py`,
+`tests/test_nodes_foundation.py`, `tests/test_nodes_design_inference.py`,
+`tests/test_control_router.py`, `tests/test_nodes_candidate_pipeline.py`.
+
+Recipe:
+1. `llm/client.py`:
+   - Add `class DecisionRejectedError(ValueError)` with docstring "A parsed decision that failed
+     the caller's semantic check; repaired exactly like a schema validation error."
+   - `complete(...)` gains keyword `check: Callable[[T], None] | None = None` (last parameter),
+     passed to `_complete(..., check=check)`. `_complete` gains keyword
+     `check: Callable[[T], None] | None = None` (after `sink`). `complete_prose`/`complete_setup`
+     unchanged (they pass nothing).
+   - In `_complete`'s `try`, replace `return output.model_validate_json(prior_content)` with:
+     `result = output.model_validate_json(prior_content)`; `if check is not None: check(result)`;
+     `return result`. `DecisionRejectedError` is a `ValueError`, so the existing
+     `except (ValidationError, ValueError)` handles repair and the final `LlmOutputError`.
+   - `_validation_errors`: before the final fallback return, add
+     `if isinstance(exc, DecisionRejectedError): return {"output": str(exc)}`.
+2. `domains/runtime.py` `decide(...)`: add keyword `check: Callable[[T], None] | None = None`;
+   pass `check=check` to `self.llm.complete(...)`. The `decision_override` path ignores it.
+3. `domains/foundation.py`:
+   - Import `DecisionRejectedError` from `statlab.llm.client`.
+   - Add module function
+     `def _rejecting[T](validate: Callable[[T], None]) -> Callable[[T], None]` returning an inner
+     `check(decision: T) -> None` that calls `validate(decision)` and converts `_RefusalError` to
+     `DecisionRejectedError(str(exc))` (`raise ... from exc`).
+   - `_validate_profile`: the column-selection refusal message becomes
+     `f"{tool} selection has unknown, repeated or incompatible columns; allowed: {sorted(compatible)!r}"`.
+     Plot and skill messages unchanged.
+   - `_profile`: pass `check=_rejecting(lambda d: self._validate_profile(invocation, d, schema.summary, problem.target))`
+     to the `ProfileDecision` `decide`, and append to its question:
+     `" summarize_categorical takes only non-numeric columns; numeric, correlations and outliers take only numeric columns (dtype or contract role)."`
+     Keep the existing post-decide and post-approval `_validate_profile` calls.
+4. `domains/design_inference.py` (import `_rejecting` from foundation beside `_RefusalError`):
+   - `_design`: `check=_rejecting(lambda d: self.validate_design(invocation, d, registry.summary, problem))`.
+   - `_inference`: `check=_rejecting(lambda d: self._validate_inference(invocation, d, registry, problem) and None)`
+     is NOT allowed (returns tuple); instead define a local
+     `def check_inference(decision: InferenceDecision) -> None: self._validate_inference(invocation, decision, registry, problem)`
+     and pass `check=_rejecting(check_inference)`.
+   - Keep every existing validation call.
+5. Test fakes: add the keyword parameter `check: Callable[[T], None] | None = None` after
+   `recovery` to the `complete` overrides in `tests/test_control_router.py` (~line 47),
+   `tests/test_nodes_candidate_pipeline.py` (~line 944) and `tests/test_nodes_foundation.py`
+   (`OfflineLlm.complete`). Only `OfflineLlm` uses it: in `__init__` add
+   `self.checks: dict[type[BaseModel], Callable[..., None]] = {}`; in `complete`, when `check` is
+   not None, `self.checks[output] = check` (before returning). Fakes never call `check`.
+6. New tests:
+   - `tests/test_llm_client.py::test_semantic_check_rejection_gets_one_repair`: schema tier as in
+     `test_schema_tier_custom_validator_gets_exactly_one_repair` (monkeypatch
+     `supports_response_schema` True, model `"openai/test"`, output `Result`); fake returns
+     `{"value":"bad"}` then `{"value":"good"}` (use `Result`'s actual field; read its definition
+     at the top of the file and use any two distinct valid values). `check` raises
+     `DecisionRejectedError("value is not allowed; allowed: ['good']")` when value is the first
+     one. Assert the result is the second value, 2 calls, and the second call's last message
+     content contains `value is not allowed; allowed: ['good']`.
+   - `tests/test_llm_client.py::test_semantic_check_rejected_twice_is_output_error`: check always
+     raises `DecisionRejectedError("never")`; assert `LlmOutputError` with
+     `error.value.failure.field_errors == {"output": "never"}` (read `LlmOutputError` in
+     `backend/statlab/errors.py` for the attribute holding the `Failure`; use that attribute) and
+     2 calls.
+   - `tests/test_nodes_foundation.py::test_profile_check_feeds_llm_repair`: `await
+     foundation.advance(2)`; `await foundation.step()` (default profile decision completes);
+     `check = foundation.llm.checks[ProfileDecision]`; `check(ProfileDecision(rationale="ok",
+     numeric=("x",)))` returns None; `with pytest.raises(DecisionRejectedError, match="allowed")`:
+     `check(ProfileDecision(rationale="bad", categorical=("x",)))`. Also assert the
+     `ProfileDecision` call's last message content contains `summarize_categorical takes only
+     non-numeric columns`.
+   - `tests/test_nodes_design_inference.py::test_design_and_inference_checks_feed_llm_repair`:
+     `h, _ = await prepared(migrated_db, project, tmp_path)`; `assert (await design(h)).status ==
+     "completed"`; `design_check = h.llm.checks[DesignDecision]`; `design_check(shortlist())` is
+     None; `with pytest.raises(DecisionRejectedError)`: `design_check(shortlist("logistic_regression"))`
+     (classification estimator for a continuous task). Then `await
+     DesignInferenceExecutor(h.runtime)(h.invocation(5))` completes; `inference_check =
+     h.llm.checks[InferenceDecision]`; valid: the prepared `InferenceDecision` (ols, ("x",)) is
+     None; invalid `InferenceDecision(model="logit", predictors=("x",), rationale="r")` raises
+     `DecisionRejectedError`.
+
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_nodes_foundation.py tests/test_nodes_design_inference.py tests/test_control_router.py tests/test_nodes_candidate_pipeline.py tests/test_nodes_candidate_models.py tests/test_nodes_champion.py tests/test_nodes_candidate_search.py'`;
+Ruff check, Ruff format --check and mypy on all owned files. Stop and report on any other failure.
+
+F8 resolutions: `Result` has one field `value: str` (use `"bad"`/`"good"`); the `Failure` is
+`LlmOutputError.failure`; `statlab/llm/__init__.py` re-exports `LlmClient` only — leave it
+unchanged and import `DecisionRejectedError` from `statlab.llm.client` everywhere. In step 4
+the lambda form for `_inference` is not used; only the local `check_inference` function.
+
+## H5 — rich stand-in exercises the semantic repair round (after F8)
+
+Goal: prove offline, end to end, that a semantically invalid first answer is repaired (F8) rather
+than failing the node. Owned file: `integration/offline_llm.py`.
+
+Recipe: in `_rich_profile`, add parameter `repaired: bool`. When `repaired` is False and `num` is
+nonempty, return the normal answer but with `"categorical": [*cat[:1], num[0]]` (a numeric column
+where only non-numeric columns are allowed). Otherwise return the normal answer. In `_answer`, the
+call becomes `_rich_profile(evidence, contract, "Repair the output" in user_text)` (`user_text`
+joins every user message, and the client's repair message starts with "Repair the output").
+
+Checks: Ruff check/format and mypy on `integration/offline_llm.py`;
+`.venv/bin/python -m integration.run_scenarios --llm offline-rich --only S01 S04 > /tmp/h5.log 2>&1`
+(exit and both summary rows). Main verifies two `llm_calls` rows for the profiling execution.

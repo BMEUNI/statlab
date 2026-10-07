@@ -16,6 +16,7 @@ from statlab.domains.foundation import (
     _object,
     _ref,
     _RefusalError,
+    _rejecting,
     _strings,
     _tool_summary,
     problem_from_state,
@@ -181,6 +182,9 @@ class DesignInferenceExecutor:
             "choices and shared pre-split row threshold. If checkpointed candidates exist, "
             "confirm that exact cumulative set, preserving every specification. "
             "Do not fit or probe parameters.",
+            check=_rejecting(
+                lambda d: self.validate_design(invocation, d, registry.summary, problem)
+            ),
         )
         self.validate_design(invocation, decision, registry.summary, problem)
         summary: dict[str, JsonValue] = {
@@ -262,6 +266,10 @@ class DesignInferenceExecutor:
             shared_result(invocation.state, "experiment_design").summary.get("registry"),
             "design registry",
         )
+
+        def check_inference(decision: InferenceDecision) -> None:
+            self._validate_inference(invocation, decision, registry, problem)
+
         decision = await self.runtime.decide(
             invocation,
             InferenceDecision,
@@ -270,6 +278,7 @@ class DesignInferenceExecutor:
             "and explicit categorical reference levels. Added controls are exploratory. Fit "
             "one canonical unscaled train+valid matrix, never test; request an optional residual "
             "plot only where supported. Do not revise goals or make causal claims.",
+            check=_rejecting(check_inference),
         )
         self._validate_inference(invocation, decision, registry, problem)
         summary: dict[str, JsonValue] = {"decision": decision.model_dump(mode="json")}

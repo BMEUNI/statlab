@@ -27,6 +27,7 @@ from statlab.config import Settings
 from statlab.errors import LlmCallError, LlmOutputError, PersistenceError
 from statlab.graph.recovery import recover_call
 from statlab.llm import LlmClient
+from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.repository import (
     create_contract,
     create_node_execution,
@@ -391,6 +392,71 @@ async def test_schema_tier_custom_validator_gets_exactly_one_repair(
     )
     assert result.value == "accepted"
     assert len(calls) == len(_rows(conn)) == 2
+
+
+@pytest.mark.asyncio
+async def test_semantic_check_rejection_gets_one_repair(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    calls: list[dict[str, object]] = []
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return _response('{"value":"bad"}' if len(calls) == 1 else '{"value":"good"}')
+
+    def check(decision: Result) -> None:
+        if decision.value == "bad":
+            raise DecisionRejectedError("value is not allowed; allowed: ['good']")
+
+    result = await LlmClient(_settings(tmp_path), acompletion=fake).complete(
+        conn,
+        run_id=run_id,
+        node_execution_id=execution_id,
+        model="openai/test",
+        messages=[],
+        output=Result,
+        check=check,
+    )
+    assert result.value == "good"
+    assert len(calls) == 2
+    second_messages = calls[1]["messages"]
+    assert isinstance(second_messages, list) and isinstance(second_messages[-1], dict)
+    assert "value is not allowed; allowed: ['good']" in second_messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_check_rejected_twice_is_output_error(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    calls: list[dict[str, object]] = []
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return _response('{"value":"bad"}')
+
+    def check(decision: Result) -> None:
+        raise DecisionRejectedError("never")
+
+    with pytest.raises(LlmOutputError) as error:
+        await LlmClient(_settings(tmp_path), acompletion=fake).complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="openai/test",
+            messages=[],
+            output=Result,
+            check=check,
+        )
+    assert error.value.failure.field_errors == {"output": "never"}
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,13 @@ class CallRecovery(Protocol):
     def __call__[T](self, call: Callable[[], Awaitable[T]]) -> Awaitable[T]: ...
 
 
+class DecisionRejectedError(ValueError):
+    """A parsed decision that failed the caller's semantic check.
+
+    Repaired exactly like a schema validation error.
+    """
+
+
 class LlmClient:
     """One configured request semaphore shared by all calls made through this client."""
 
@@ -82,6 +89,7 @@ class LlmClient:
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
         recovery: CallRecovery | None = None,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         """Return a validated model, repairing one invalid response exactly once."""
         _verify_execution(conn, run_id, node_execution_id)
@@ -96,6 +104,7 @@ class LlmClient:
             reasoning=reasoning,
             example=example,
             recovery=recovery,
+            check=check,
         )
 
     async def complete_prose[T: BaseModel](
@@ -168,6 +177,7 @@ class LlmClient:
         example: dict[str, JsonValue] | None,
         recovery: CallRecovery | None,
         sink: ProseSink | None = None,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         tier = _capability_tier(model)
         base_messages = [message.copy() for message in messages]
@@ -205,7 +215,10 @@ class LlmClient:
             try:
                 if not prior_content:
                     raise ValueError("response content is empty")
-                return output.model_validate_json(prior_content)
+                result = output.model_validate_json(prior_content)
+                if check is not None:
+                    check(result)
+                return result
             except (ValidationError, ValueError) as exc:
                 validation_errors = _validation_errors(exc)
                 if repaired:
@@ -563,6 +576,8 @@ def _validation_errors(exc: ValidationError | ValueError) -> dict[str, str]:
             ".".join(str(part) for part in error["loc"]) or "output": str(error["msg"])
             for error in errors
         }
+    if isinstance(exc, DecisionRejectedError):
+        return {"output": str(exc)}
     return {"output": "response must contain non-empty valid JSON"}
 
 

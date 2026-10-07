@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -51,7 +51,7 @@ from statlab.errors import EngineError, ToolCallError
 from statlab.graph.candidates import RunControl, ToolBoundary
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
-from statlab.llm.client import CallRecovery, LlmClient
+from statlab.llm.client import CallRecovery, DecisionRejectedError, LlmClient
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.mcp_client import CallContext, Repair
@@ -188,6 +188,7 @@ class OfflineLlm(LlmClient):
         self.responses: dict[type[BaseModel], BaseModel] = {}
         self.calls: list[tuple[type[BaseModel], bool, Sequence[dict[str, str]]]] = []
         self.cancel = False
+        self.checks: dict[type[BaseModel], Callable[..., None]] = {}
 
     async def complete[T: BaseModel](
         self,
@@ -201,9 +202,12 @@ class OfflineLlm(LlmClient):
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
         recovery: CallRecovery | None = None,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         assert run_id and node_execution_id and model
         assert example is None
+        if check is not None:
+            self.checks[output] = check
         self.calls.append((output, reasoning, messages))
         if self.cancel:
             raise asyncio.CancelledError
@@ -669,6 +673,18 @@ async def test_profile_selection_refuses_before_optional_tools(
         "report_missingness",
         "summarize_target",
     ]
+
+
+@pytest.mark.asyncio
+async def test_profile_check_feeds_llm_repair(foundation: Harness) -> None:
+    await foundation.advance(2)
+    await foundation.step()
+    check = foundation.llm.checks[ProfileDecision]
+    assert check(ProfileDecision(rationale="ok", numeric=("x",))) is None
+    with pytest.raises(DecisionRejectedError, match="allowed"):
+        check(ProfileDecision(rationale="bad", categorical=("x",)))
+    messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
+    assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
 
 
 @pytest.mark.asyncio

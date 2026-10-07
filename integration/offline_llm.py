@@ -197,7 +197,9 @@ def _candidate(state: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return _obj(state.get("candidate"), "candidate")
 
 
-def _rich_profile(evidence: list[JsonValue], contract: DataContract) -> dict[str, JsonValue]:
+def _rich_profile(
+    evidence: list[JsonValue], contract: DataContract, repaired: bool
+) -> dict[str, JsonValue]:
     columns: dict[str, JsonValue] | None = None
     for entry in evidence:
         item = _obj(entry, "evidence")
@@ -225,10 +227,13 @@ def _rich_profile(evidence: list[JsonValue], contract: DataContract) -> dict[str
     plots: list[JsonValue] = [{"kind": "distribution", "column": target}]
     if num + cat:
         plots.append({"kind": "target_relation", "column": (num + cat)[0]})
+    categorical: list[JsonValue] = list(cat[:2])
+    if not repaired and num:
+        categorical = [*cat[:1], num[0]]
     return {
         "rationale": RATIONALE,
         "numeric": list(num[:2]),
-        "categorical": list(cat[:2]),
+        "categorical": categorical,
         "correlations": list(num[:2]) if len(num) >= 2 else [],
         "outliers": list(num[:1]),
         "plots": plots,
@@ -422,7 +427,7 @@ class OfflineProvider:
         if self.rich and title in _RICH_TITLES:
             state, evidence = _parts(first_user)
             if title == "ProfileDecision":
-                return _rich_profile(evidence, contract)
+                return _rich_profile(evidence, contract, "Repair the output" in user_text)
             if title == "TrainingDecision":
                 return _rich_training(state, contract)
             if title == "EvaluationActions":

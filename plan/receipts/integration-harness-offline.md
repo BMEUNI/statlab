@@ -73,3 +73,18 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
   scenario. Only node failures: expected lifecycle interrupts (S07/S08/S16) and fit budget (S13).
 - Full plain suite after all edits `integration/out/20261007T150428Z-offline`: 19/19 PASS (soft:
   S12 x4 inference only).
+
+## Addendum — live run 2 finding, F8, H5, 2026-10-07
+
+- Live S01 (paid, user-confirmed) `integration/out/20261007T183001Z-live`: $0.0041, 3 LLM calls,
+  ended `cancelled` at `data_profiling` (LLM put a numeric column in `categorical`; refusal
+  bypassed the repair loop). Fixed by F8.
+- F8: `LlmClient.complete(check=...)`; `DecisionRejectedError(ValueError)` enters the existing
+  one-repair round with its message; profile/design/inference validators wired via `_rejecting`;
+  profile refusal names allowed columns and the profile question states the dtype rule.
+- H5: rich stand-in answers the first `ProfileDecision` invalidly; profiling then makes 3 LLM
+  calls (invalid, repaired, findings) and completes (`integration/out/20261007T183802Z-offline-rich`).
+- `make check` exit 0: 3055 passed, 1 designed skip; TOTAL 11402 stmts / 3286 branches 100%;
+  mypy 188 files; Ruff clean; 197 formatted.
+- Full rich suite `integration/out/20261007T184133Z-offline-rich`: 19/19 PASS (soft: S12 x4).
+- Full plain suite `integration/out/20261007T185211Z-offline`: 19/19 PASS (soft: S12 x4).
