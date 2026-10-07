@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import replace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 from statlab.domains.base import NodeResult
 from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.candidates import BudgetState, TraversalPlan
@@ -21,6 +22,7 @@ from statlab.graph.control import (
     status_facts,
 )
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
+from statlab.llm.client import CallRecovery, ProseSink
 from statlab.memory import read_memory, remember
 from statlab.persistence.repository import create_project
 from statlab_contracts.artifacts import ArtifactRef
@@ -116,8 +118,13 @@ async def test_qa_invented_well_formed_reference_rejected_without_repair_layer(
     minimal_contract: DataContract,
 ) -> None:
     client = FakeClient(QaAnswer(text="Invented", references=(ArtifactRef("a_2222222222222222"),)))
-    with pytest.raises(LlmOutputError, match="unavailable artifacts"):
+    with pytest.raises(LlmOutputError, match="unavailable artifacts") as excinfo:
         await answer_question("Explain", context(migrated_db, minimal_contract, client))
+    assert excinfo.value.failure == Failure(
+        error_class="tool_param",
+        message="Q&A cited unavailable artifacts",
+        field_errors={"references": "cites artifacts unavailable to this question"},
+    )
     assert len(client.calls) == 1
 
 
@@ -143,6 +150,41 @@ async def test_status_template_unknown_eta_and_polish_cannot_replace_facts(
     assert polished.text == "Brief extra context"
     assert len(client.calls) == 1
     assert client.calls[0][:2] == ("classify-model", False)
+
+
+@pytest.mark.asyncio
+async def test_polished_status_streams_through_prose_sink(
+    migrated_db: sqlite3.Connection,
+    minimal_contract: DataContract,
+) -> None:
+    class ProseClient(FakeClient):
+        async def complete_prose[T: BaseModel](
+            self,
+            conn: sqlite3.Connection,
+            *,
+            run_id: str,
+            node_execution_id: str,
+            model: str,
+            messages: Sequence[dict[str, str]],
+            output: type[T],
+            sink: ProseSink,
+            reasoning: bool = False,
+            example: dict[str, JsonValue] | None = None,
+            recovery: CallRecovery | None = None,
+        ) -> T:
+            self.calls.append((model, reasoning, tuple(messages)))
+            await sink("Brief extra context", False)
+            return output.model_validate({"text": "Brief extra context"})
+
+    chunks: list[str] = []
+
+    async def sink(text: str, reset: bool) -> None:
+        chunks.append(text)
+
+    ctx = replace(context(migrated_db, minimal_contract, ProseClient()), prose_sink=sink)
+    polished = await explain_status("status", ctx, polish=True)
+    assert polished.text == "Brief extra context"
+    assert chunks == ["Brief extra context"]
 
 
 @pytest.mark.asyncio

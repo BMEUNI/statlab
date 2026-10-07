@@ -15,11 +15,13 @@ from statlab.graph.engine import NodeInvocation
 from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.reconciliation import RecoveryBinding, RestartReconciler
 from statlab.graph.rewind import ForkService, project_frontier
+from statlab.graph.router import InterruptClass
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
 from statlab.persistence.models import RunRow
 from statlab.persistence.repository import (
     claim_test_scoring,
     count_prior_test_scorings,
+    create_run,
     get_run,
     list_node_executions,
     list_runs,
@@ -30,10 +32,12 @@ from statlab.persistence.repository import (
 from statlab.storage import create_artifact, list_artifacts
 from statlab_contracts.artifacts import ArtifactMeta, new_artifact_ref
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
+from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import Failure, ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
 
+from tests.test_control_router import FakeClient, context
 from tests.test_graph_engine import World, artifact, complete, log_outputs
 from tests.test_graph_engine import engine_world as engine_world
 from tests.test_graph_state import candidate_spec, node
@@ -221,18 +225,21 @@ async def test_completed_parent_fork_hardlinks_exact_refs_and_never_rewrites_anc
     engine_world: World,
 ) -> None:
     nodes = (node("prefix"), node("target"), node("tail"))
-    output = artifact(engine_world)
+    outputs: list[ArtifactMeta] = []
 
     # The actual producer belongs to a committed node attempt, not a fabricated checkpoint.
 
     async def producing(invocation: NodeInvocation) -> NodeResult:
         if invocation.spec.name == "prefix":
+            output = artifact(engine_world)
+            outputs.append(output)
             log_outputs(engine_world, invocation.execution.id, (output,))
             return NodeResult(status="completed", artifacts=(output.ref,))
         return await complete(invocation)
 
     lifecycle = RunLifecycle(engine_world.loop(nodes, producing), engine_world.initial(nodes))
     source = await lifecycle.start()
+    (output,) = outputs
     immutable_inputs(engine_world)
     original_rows = list_node_executions(engine_world.conn, source.run_id)
     original_events = await lifecycle.loop.events.replay()
@@ -307,16 +314,19 @@ async def test_active_parent_drains_before_child_publication(engine_world: World
 @pytest.mark.asyncio
 async def test_missing_retained_file_rejects_before_child_creation(engine_world: World) -> None:
     nodes = (node("prefix"), node("target"))
-    output = artifact(engine_world)
+    outputs: list[ArtifactMeta] = []
 
     async def execute(invocation: NodeInvocation) -> NodeResult:
         if invocation.spec.name == "prefix":
+            output = artifact(engine_world)
+            outputs.append(output)
             log_outputs(engine_world, invocation.execution.id, (output,))
             return NodeResult(status="completed", artifacts=(output.ref,))
         return await complete(invocation)
 
     lifecycle = RunLifecycle(engine_world.loop(nodes, execute), engine_world.initial(nodes))
     await lifecycle.start()
+    (output,) = outputs
     immutable_inputs(engine_world)
     row = get_run(engine_world.conn, lifecycle.initial.run_id)
     assert row is not None
@@ -359,28 +369,28 @@ async def test_retained_split_inherits_fingerprint_without_inheriting_claim(
     nodes = (node("split"), node("target"))
     metas: list[ArtifactMeta] = []
     roles: tuple[SplitRole, ...] = ("train", "valid", "test")
-    for role in roles:
-        meta = ArtifactMeta(ref=new_artifact_ref(), kind="dataframe", split=role)
-        path = engine_world.paths.artifact(meta.ref, meta.kind)
-        path.write_bytes(role.encode())
-        create_artifact(
-            engine_world.conn,
-            ref=meta.ref,
-            run_id=engine_world.paths.run_id,
-            kind=meta.kind,
-            path=path,
-            meta=meta,
-            produced_by="fixture_split",
-            split=meta.split,
-            derived_from_test=role == "test",
-        )
-        metas.append(meta)
     fingerprint = "f" * 64
-    set_test_fingerprint(engine_world.conn, engine_world.paths.run_id, fingerprint)
-    assert claim_test_scoring(engine_world.conn, engine_world.paths.run_id)
 
     async def execute(invocation: NodeInvocation) -> NodeResult:
         if invocation.spec.name == "split":
+            for role in roles:
+                meta = ArtifactMeta(ref=new_artifact_ref(), kind="dataframe", split=role)
+                path = engine_world.paths.artifact(meta.ref, meta.kind)
+                path.write_bytes(role.encode())
+                create_artifact(
+                    engine_world.conn,
+                    ref=meta.ref,
+                    run_id=engine_world.paths.run_id,
+                    kind=meta.kind,
+                    path=path,
+                    meta=meta,
+                    produced_by="fixture_split",
+                    split=meta.split,
+                    derived_from_test=role == "test",
+                )
+                metas.append(meta)
+            set_test_fingerprint(engine_world.conn, engine_world.paths.run_id, fingerprint)
+            assert claim_test_scoring(engine_world.conn, engine_world.paths.run_id)
             log_outputs(engine_world, invocation.execution.id, tuple(metas))
             return NodeResult(status="completed", artifacts=tuple(meta.ref for meta in metas))
         return await complete(invocation)
@@ -413,29 +423,18 @@ async def test_fork_after_champion_keeps_score_provenance_and_independent_report
     engine_world: World,
 ) -> None:
     nodes = (node("train", candidate=True), node("champion_selection"), node("preserve"))
-    fitted = artifact(engine_world, "model")
+    fitted_outputs: list[ArtifactMeta] = []
     score = new_artifact_ref()
     meta = ArtifactMeta(ref=score, kind="table")
-    score_path = engine_world.paths.artifact(score, "table")
-    score_path.write_bytes(b"locked score")
-    create_artifact(
-        engine_world.conn,
-        ref=score,
-        run_id=engine_world.paths.run_id,
-        kind="table",
-        path=score_path,
-        meta=meta,
-        produced_by="fixture_score",
-        derived_from_test=True,
-    )
     report = b"# Retained score report\n"
     (engine_world.paths.report / "report.md").write_bytes(report)
-    set_test_fingerprint(engine_world.conn, engine_world.paths.run_id, "f" * 64)
     selected_id: str | None = None
 
     async def execute(invocation: NodeInvocation) -> NodeResult:
         nonlocal selected_id
         if invocation.spec.name == "train":
+            fitted = artifact(engine_world, "model")
+            fitted_outputs.append(fitted)
             record_tool_call(
                 engine_world.conn,
                 run_id=invocation.state.run_id,
@@ -447,6 +446,7 @@ async def test_fork_after_champion_keeps_score_provenance_and_independent_report
             )
             return NodeResult(status="completed", artifacts=(fitted.ref,))
         if invocation.spec.name == "champion_selection":
+            (fitted,) = fitted_outputs
             branch = invocation.state.candidate
             assert branch is not None
             selected = save_champion_model(
@@ -458,6 +458,19 @@ async def test_fork_after_champion_keeps_score_provenance_and_independent_report
                 parameters={},
             )
             selected_id = selected.id
+            score_path = engine_world.paths.artifact(score, "table")
+            score_path.write_bytes(b"locked score")
+            create_artifact(
+                engine_world.conn,
+                ref=score,
+                run_id=engine_world.paths.run_id,
+                kind="table",
+                path=score_path,
+                meta=meta,
+                produced_by="fixture_score",
+                derived_from_test=True,
+            )
+            set_test_fingerprint(engine_world.conn, engine_world.paths.run_id, "f" * 64)
             assert claim_test_scoring(engine_world.conn, invocation.state.run_id)
             log_outputs(engine_world, invocation.execution.id, (meta,))
             return NodeResult(
@@ -522,3 +535,136 @@ async def test_fork_retry_rejects_a_different_target_without_side_effects(
         tuple(sorted(path.relative_to(runs_root).as_posix() for path in runs_root.rglob("*")))
         == entries
     )
+
+
+def test_projection_rejects_unreached_missing_shared_and_unapproved_frontiers() -> None:
+    state = RunState.initial(
+        run_id="r_frontier",
+        spine_id="synthetic",
+        nodes=(node("alpha"), node("beta")),
+        mode="autonomous",
+    )
+    with pytest.raises(EngineError, match="rewind frontier has not been reached"):
+        project_frontier(state, "beta")
+    source = wave_state()
+    running = CandidateProgress(
+        public_id="c_01",
+        spec=source.branches[0].spec,
+        wave=1,
+        position=3,
+        status="running",
+        results=(boundary("prepare", "p1"),),
+    )
+    state = RunState.model_validate(
+        {
+            **source.model_dump(),
+            "status": "running",
+            "cursor": 1,
+            "wave": 1,
+            "shared_results": (boundary("design", "design1"),),
+            "branches": (running,),
+        }
+    )
+    with pytest.raises(EngineError, match="required preceding shared boundary is unavailable"):
+        project_frontier(state, "train")
+    state = RunState.model_validate(
+        {
+            **source.model_dump(),
+            "wave": 1,
+            "branches": (),
+            "shared_results": (
+                boundary("design", "design1"),
+                boundary("overlap", "overlap1"),
+                boundary("tail", "tail1"),
+            ),
+        }
+    )
+    with pytest.raises(EngineError, match="candidate frontier has no approved specifications"):
+        project_frontier(state, "prepare")
+
+
+@pytest.mark.asyncio
+async def test_fork_skips_unpublished_request_and_rejects_unloadable_published_fork(
+    engine_world: World,
+) -> None:
+    nodes = (node("prefix"), node("target"), node("tail"))
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    source = await lifecycle.start()
+    immutable_inputs(engine_world)
+    parent = get_run(engine_world.conn, source.run_id)
+    assert parent is not None
+    unpublished = create_run(
+        engine_world.conn,
+        project_id=parent.project_id,
+        contract_id=parent.contract_id,
+        mode="autonomous",
+        config_json=json.dumps(
+            {"fork": {"request_id": "g_retry", "target": "target", "published": False}}
+        ),
+        forked_from_run_id=parent.id,
+        status="cancelled",
+    )
+    result = await service_for(engine_world, lifecycle, nodes).fork("target", request_id="g_retry")
+    assert result.new_run_id != unpublished.id
+    create_run(
+        engine_world.conn,
+        project_id=parent.project_id,
+        contract_id=parent.contract_id,
+        mode="autonomous",
+        config_json=json.dumps(
+            {"fork": {"request_id": "g_lost", "target": "target", "published": True}}
+        ),
+        forked_from_run_id=parent.id,
+        status="cancelled",
+    )
+    with pytest.raises(PersistenceError, match="published fork checkpoint is unavailable"):
+        await service_for(engine_world, lifecycle, nodes).fork("target", request_id="g_lost")
+
+
+@pytest.mark.asyncio
+async def test_fork_rejects_misbound_resolver_and_missing_immutable_inputs(
+    engine_world: World,
+) -> None:
+    nodes = (node("prefix"), node("target"), node("tail"))
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    await lifecycle.start()
+    immutable_inputs(engine_world)
+
+    def resolve(paths: RunPaths, state: RunState) -> RunLifecycle:
+        return lifecycle
+
+    with pytest.raises(EngineError, match="fork resolver must return a fresh correctly bound"):
+        await ForkService(lifecycle, resolver=resolve).fork("target")
+    engine_world.paths.contract_snapshot_json.unlink()
+    with pytest.raises(PersistenceError, match="fork requires immutable contract and skill inputs"):
+        await service_for(engine_world, lifecycle, nodes).fork("target")
+
+
+@pytest.mark.asyncio
+async def test_fork_without_lockfile_copies_only_present_inputs(engine_world: World) -> None:
+    nodes = (node("prefix"), node("target"), node("tail"))
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    await lifecycle.start()
+    immutable_inputs(engine_world)
+    (engine_world.paths.root / "uv.lock").unlink()
+    fork = await service_for(engine_world, lifecycle, nodes).fork("target")
+    paths = fork.lifecycle.loop.checkpointer.paths
+    assert paths.contract_snapshot_json.is_file()
+    assert paths.skill_snapshot_md.is_file()
+    assert not (paths.root / "uv.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_fork_control_binding_mismatch(
+    engine_world: World, minimal_contract: DataContract
+) -> None:
+    nodes = (node("prefix"), node("target"), node("tail"))
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    await lifecycle.start()
+    immutable_inputs(engine_world)
+    with pytest.raises(EngineError, match="fork control binding mismatch"):
+        await service_for(engine_world, lifecycle, nodes).handle(
+            "rewind",
+            InterruptClass(category="qa"),
+            context(engine_world.conn, minimal_contract, FakeClient()),
+        )

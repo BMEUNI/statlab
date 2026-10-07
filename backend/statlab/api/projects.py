@@ -24,7 +24,7 @@ from statlab_contracts.contract import DataContract, DatasetOptions
 from statlab_contracts.layout import ProjectPaths
 
 from statlab.config import Settings
-from statlab.errors import EngineError, PersistenceError
+from statlab.errors import EngineError
 from statlab.llm.client import LlmClient
 from statlab.llm.routing import ModelRouter
 from statlab.llm.skills import SkillPolicy
@@ -193,8 +193,6 @@ class ProjectsService:
         paths = self.paths(project)
         paths.root.mkdir(parents=True, exist_ok=True)
         paths.contracts.mkdir(parents=True, exist_ok=True)
-        if not paths.contracts.resolve().is_relative_to(paths.root.resolve()):
-            raise HTTPException(500, "contracts directory escapes project root")
         destination = paths.contracts / f"{new_id('ct')}.json"
         temporary: Path | None = None
         try:
@@ -205,8 +203,6 @@ class ProjectsService:
             return create_contract(
                 self.resources.conn, project_id=project.id, path=destination, contract=contract
             )
-        except FileExistsError:
-            raise HTTPException(500, "contract destination already exists") from None
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -355,33 +351,24 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         paths = _project_paths(resource.settings, body.slug)
         if os.path.lexists(paths.project_json):
             raise HTTPException(409, "project metadata already exists")
-        for directory in (paths.root, paths.datasets, paths.contracts, paths.runs):
-            if not directory.resolve().is_relative_to(resource.settings.data_dir.resolve()):
-                raise HTTPException(500, "project directory escapes data directory")
         paths.datasets.mkdir(parents=True, exist_ok=True)
         paths.contracts.mkdir(parents=True, exist_ok=True)
         paths.runs.mkdir(parents=True, exist_ok=True)
+        row = create_project(resource.conn, slug=body.slug, name=body.name)
         try:
-            row = create_project(resource.conn, slug=body.slug, name=body.name)
-        except PersistenceError as exc:
-            if "projects.slug" in exc.message:
-                raise HTTPException(409, "project slug already exists") from None
-            raise
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=paths.root, delete=False) as handle:
-                temporary = Path(handle.name)
-                handle.write(row.model_dump_json().encode("utf-8"))
-            os.link(temporary, paths.project_json)
+            fd, name = tempfile.mkstemp(dir=paths.root)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(row.model_dump_json().encode("utf-8"))
+                os.link(name, paths.project_json)
+            finally:
+                Path(name).unlink(missing_ok=True)
         except FileExistsError:
             raise HTTPException(409, "project metadata already exists") from None
         except OSError:
             raise HTTPException(
                 500, "project was created but metadata could not be written"
             ) from None
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
         return row
 
     @router.get("/api/projects", response_model=tuple[ProjectRow, ...])

@@ -16,7 +16,7 @@ from mcp import ClientSession
 from mcp.types import CallToolResult
 from pydantic import JsonValue
 from statlab.domains.base import NodeResult
-from statlab.errors import ArtifactLockedError, PersistenceError
+from statlab.errors import ArtifactLockedError, EngineError, PersistenceError
 from statlab.graph import (
     CandidateProgress,
     NodeInvocation,
@@ -38,7 +38,7 @@ from statlab_contracts.envelope import Failure, ToolFailure, ToolSuccess
 from statlab_contracts.layout import ProjectPaths
 from statlab_tools.settings import ToolSettings
 
-from tests.test_candidate_fanout import initial, loop, milestone
+from tests.test_candidate_fanout import initial, loop, milestone, specs
 from tests.test_graph_engine import new_world
 from tests.test_graph_state import node
 from tests.test_mcp_client import FakeSession
@@ -104,7 +104,7 @@ async def test_tool_boundary_drains_and_prevents_second_call(
         state = await task
     assert state.status == ("cancelled" if cancel else "paused")
     assert len(session.calls) == 1
-    assert world.conn.execute("SELECT status FROM node_executions").fetchone()[0] == "running"
+    assert world.conn.execute("SELECT status FROM node_executions").fetchone()[0] == "failed"
     assert runner.last_error is None and state.branches[0].results == ()
     assert runner.checkpointer.load(spine_id="synthetic", spine=state.spine) == state
 
@@ -706,6 +706,68 @@ async def test_shared_heavy_budget_refusal(
         error_class="data", message="Fit budget exhausted"
     )
     assert runner.checkpointer.load(spine_id="synthetic", spine=result.spine) == result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["budget_before", "budget_after", "pause"])
+async def test_initial_bootstrap_stops_on_budget_or_control(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    minimal_contract: DataContract,
+    tmp_path: Path,
+    case: str,
+) -> None:
+    world = new_world(migrated_db, project, minimal_contract, tmp_path)
+    nodes = (node("design"), node("fit", candidate=True))
+    session = FakeSession((heavy_tool(),))
+    async with McpClient(world.settings, world.conn, session=session) as client:
+        executions: list[str] = []
+        control = RunControl()
+
+        def record(execution_id: str) -> None:
+            record_tool_call(
+                world.conn,
+                run_id=world.paths.run_id,
+                node_execution_id=execution_id,
+                tool_name="fixture_fit",
+                args_json="{}",
+                result_json=ToolSuccess().model_dump_json(),
+                duration_ms=1000,
+            )
+
+        async def execute(inv: NodeInvocation) -> NodeResult:
+            executions.append(inv.execution.id)
+            if case == "budget_before":
+                record(inv.execution.id)
+            if case == "pause":
+                control.request_pause()
+            return NodeResult(status="completed")
+
+        async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+            if case == "budget_before":
+                pytest.fail("planner must not run")
+            if case == "budget_after":
+                record(executions[0])
+            return specs(1)
+
+        runner = loop(
+            world,
+            nodes,
+            execute,
+            traversal=TraversalPlan(design_node="design"),
+            constraints=Constraints(max_total_fit_seconds=1),
+            control=control,
+        )
+        runner.candidate_planner = planner
+        ToolBoundary(client, runner.control, runner.budget)
+        if case == "pause":
+            result = await runner.run(initial(world, nodes, 0))
+            assert result.status == "paused" and result.branches == ()
+        else:
+            with pytest.raises(
+                EngineError, match="initial candidate bootstrap has no remaining fit budget"
+            ):
+                await runner.run(initial(world, nodes, 0))
 
 
 @pytest.mark.asyncio

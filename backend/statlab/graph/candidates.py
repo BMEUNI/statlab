@@ -14,7 +14,7 @@ from statlab_contracts.envelope import Failure, ToolSuccess, retry_budget
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.recovery import Sleep, recover_call
 from statlab.mcp_client import CallContext, McpClient, Repair
-from statlab.persistence.repository import get_run
+from statlab.persistence.repository import require_run
 
 if TYPE_CHECKING:
     from statlab.graph.state import CandidateProgress, RunState, SpineEntry
@@ -210,9 +210,7 @@ class ToolBoundary:
 
         def can_retry() -> bool:
             self.control.check()
-            run = get_run(self.client.conn, ctx.paths.run_id)
-            if run is None:
-                raise PersistenceError("run does not exist")
+            run = require_run(self.client.conn, ctx.paths.run_id)
             return not repaired and not (tool.startswith("score_") and run.test_scored_at)
 
         # Return successful calls to the node so it can retain the result. The next

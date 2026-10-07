@@ -7,11 +7,13 @@ import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_models import (
+    CV_CAVEAT,
     CandidateModelExecutor,
     candidate_retune_decider,
     evaluation_decision,
@@ -20,12 +22,18 @@ from statlab.domains.candidate_pipeline import candidate_result, pipeline_from_s
 from statlab.domains.decisions import (
     EvaluationActions,
     InterpretationDecision,
+    ProblemSpec,
     TrainingDecision,
     ValidationConclusion,
 )
+from statlab.domains.foundation import problem_from_state
+from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError
+from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
 from statlab.persistence.models import ProjectRow
+from statlab.persistence.repository import create_node_execution, next_node_attempt
+from statlab_contracts.candidate import EstimatorSpec, FeatureSpec
 from statlab_contracts.contract import DataContract, ModellingRules, Tuning
 from statlab_contracts.vocabulary import TargetType
 
@@ -35,7 +43,7 @@ from tests.test_nodes_candidate_pipeline import (
     prepare_candidate,
     save_result,
 )
-from tests.test_nodes_foundation import TEST
+from tests.test_nodes_foundation import TEST, Harness
 
 
 @pytest.mark.asyncio
@@ -344,3 +352,296 @@ async def test_threshold_only_roc_is_retained_without_unrequested_plot(
     tools.failure_tool = "plot_curve"
     failed = await CandidateModelExecutor(h.runtime)(candidate_invocation(h, 9))
     assert failed.status == "failed" and not failed.artifacts
+
+
+async def _run(h: Harness, index: int) -> NodeResult:
+    return await CandidateModelExecutor(h.runtime)(candidate_invocation(h, index))
+
+
+async def _run_save(h: Harness, index: int) -> NodeResult:
+    invocation = candidate_invocation(h, index)
+    output = await CandidateModelExecutor(h.runtime)(invocation)
+    save_result(h, invocation, output)
+    return output
+
+
+def _failed(output: NodeResult, message: str) -> None:
+    assert output.status == "failed"
+    assert output.error is not None
+    assert output.error.message == message
+
+
+def _mode(h: Harness, mode: Literal["guided", "autonomous"]) -> None:
+    h.state = h.state.model_copy(update={"mode": mode})
+
+
+@pytest.mark.asyncio
+async def test_durable_decision_and_executor_binding_guards(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    await _run_save(h, 9)
+    branch = h.state.branches[0]
+    last = branch.results[-1]
+    bad = CandidateProgress(
+        public_id=branch.public_id,
+        spec=branch.spec,
+        position=branch.position,
+        status=branch.status,
+        results=(
+            *branch.results[:-1],
+            BoundaryResult(
+                node_name="model_evaluation",
+                execution_id=last.execution_id,
+                result=NodeResult(
+                    status="completed",
+                    summary={**last.result.summary, "decision": {"rationale": ""}},
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(EngineError, match="malformed durable evaluation decision"):
+        evaluation_decision(bad)
+    with pytest.raises(EngineError, match="retune branch is not checkpointed"):
+        await candidate_retune_decider(h.state, bad)
+    shared = TABULAR_SPINE[0]
+    execution = create_node_execution(
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        node_name=shared.name,
+        seq=1,
+        attempt=next_node_attempt(
+            h.runtime.conn, run_id=h.state.run_id, node_name=shared.name, candidate_id=None
+        ),
+    )
+    with pytest.raises(EngineError, match="model executor requires a candidate"):
+        await CandidateModelExecutor(h.runtime)(NodeInvocation(h.state, shared, execution, None))
+    with pytest.raises(EngineError, match="model executor cannot execute this node"):
+        await CandidateModelExecutor(h.runtime)(candidate_invocation(h, 6))
+
+
+@pytest.mark.asyncio
+async def test_training_refusals_and_exception_wait(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    await prepare_candidate(h)
+    assert h.state.branches[0].spec.estimator.params == {"choice": 0}
+    contract = h.runtime.contract
+    _mode(h, "guided")
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Needs review", material_exceptions=("Unusual grid",)
+    )
+    offset = len(tools.calls)
+    assert (await _run(h, 8)).status == "awaiting_user"
+    assert len(tools.calls) == offset
+    _mode(h, "autonomous")
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=contract.target,
+            objective=contract.objective,
+            features=contract.features,
+            modelling=ModellingRules(tuning=Tuning(method="random")),
+        ),
+    )
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Direct fit of approved estimator"
+    )
+    _failed(await _run(h, 8), "random search has no supported tool")
+    h.runtime = replace(h.runtime, contract=contract)
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Change params directly", params={"choice": 1}
+    )
+    _failed(await _run(h, 8), "initial direct parameters differ from approved candidate")
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Grid with fixed params", method="grid", params={"choice": 0}
+    )
+    _failed(await _run(h, 8), "grid decision must put fixed parameters in param_grid")
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Grid without explicit grid", method="grid"
+    )
+    _failed(await _run(h, 8), "approved parameters require an explicit grid")
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Direct with grid", param_grid={"choice": (0, 1)}
+    )
+    _failed(await _run(h, 8), "direct fitting cannot accept a parameter grid")
+    names = [name for _, name, _ in tools.calls]
+    assert "train_estimator" not in names and "tune_estimator" not in names
+
+
+@pytest.mark.asyncio
+async def test_multiclass_threshold_and_brier_refusals(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path, target_type="multiclass")
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    h.llm.responses[EvaluationActions] = EvaluationActions(
+        rationale="Threshold on multiclass", threshold_objective="f1"
+    )
+    _failed(await _run(h, 9), "threshold/calibration curve requires binary classification")
+    h.llm.responses[EvaluationActions] = EvaluationActions(rationale="Compatible validation")
+    await _run_save(h, 9)
+    index = next(
+        i for i, b in enumerate(h.state.shared_results) if b.node_name == "problem_definition"
+    )
+    old = h.state.shared_results[index]
+    problem = problem_from_state(h.state)
+    brier = ProblemSpec.model_validate(
+        {**problem.model_dump(mode="json"), "primary_metric": "brier", "metric_rule": "explicit"}
+    )
+    new = BoundaryResult(
+        node_name=old.node_name,
+        execution_id=old.execution_id,
+        result=NodeResult(
+            status="completed",
+            summary={**old.result.summary, "problem": brier.model_dump(mode="json")},
+            artifacts=old.result.artifacts,
+        ),
+    )
+    h.state = RunState.model_validate(
+        {
+            **h.state.model_dump(mode="json"),
+            "shared_results": [
+                new.model_dump(mode="json") if i == index else b.model_dump(mode="json")
+                for i, b in enumerate(h.state.shared_results)
+            ],
+        }
+    )
+    _failed(await _run(h, 10), "multiclass Brier permutation scorer is unsupported")
+    assert "permutation_importance" not in [name for _, name, _ in tools.calls]
+
+
+@pytest.mark.asyncio
+async def test_binary_threshold_range_and_calibrated_diagnostic_refusals(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(
+        migrated_db,
+        project,
+        tmp_path,
+        target_type="binary",
+        estimator=EstimatorSpec(name="logistic_regression", calibrate=True),
+    )
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    tools.threshold = 1.0
+    h.llm.responses[EvaluationActions] = EvaluationActions(
+        rationale="Choose threshold", threshold_objective="f1"
+    )
+    _failed(await _run(h, 9), "selected binary threshold is unavailable or outside (0,1)")
+    tools.threshold = 0.4
+    h.llm.responses[EvaluationActions] = EvaluationActions(
+        rationale="CV requested", cross_validation=True
+    )
+    _failed(await _run(h, 9), "train diagnostic tool cannot reproduce calibrated estimator")
+    assert "cross_validate_estimator" not in [name for _, name, _ in tools.calls]
+
+
+@pytest.mark.asyncio
+async def test_evaluation_exception_wait_and_out_of_range_after_action_wait(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    _mode(h, "guided")
+    h.llm.responses[EvaluationActions] = EvaluationActions(
+        rationale="Review actions", material_exceptions=("Skip CV",)
+    )
+    offset = len(tools.calls)
+    assert (await _run(h, 9)).status == "awaiting_user"
+    assert len(tools.calls) == offset
+    h.llm.responses[EvaluationActions] = EvaluationActions(rationale="Score validation")
+    tools.metric = -1.0
+    output = await _run(h, 9)
+    assert output.status == "awaiting_user"
+    assert output.metrics == {}
+    assert "Primary metric is outside its mathematical range" in output.warnings
+    assert "score_regression" in [name for _, name, _ in tools.calls]
+
+
+@pytest.mark.asyncio
+async def test_interpretation_wait_skip_coefficients_and_unscaled_pdp(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(
+        migrated_db,
+        project,
+        tmp_path,
+        feature=FeatureSpec(scaling="none"),
+        estimator=EstimatorSpec(name="decision_tree"),
+    )
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    await _run_save(h, 9)
+    _mode(h, "guided")
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="Review", material_exceptions=("Leakage suspicion",)
+    )
+    assert (await _run(h, 10)).status == "awaiting_user"
+    _mode(h, "autonomous")
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="Skip", skip_reason="Not needed for this candidate"
+    )
+    skipped = await _run(h, 10)
+    assert skipped.status == "skipped"
+    assert skipped.skip_reason == "Not needed for this candidate"
+    decision = skipped.summary["decision"]
+    assert isinstance(decision, dict)
+    assert decision["skip_reason"] == skipped.skip_reason
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="Coefficients", coefficients=True
+    )
+    _failed(
+        await _run(h, 10), "coefficient importance requires supported uncalibrated linear estimator"
+    )
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="PDP", partial_dependence=("x",)
+    )
+    assert (await _run(h, 10)).status == "completed"
+    pdp = [params for _, name, params in tools.calls if name == "partial_dependence"]
+    assert len(pdp) == 1
+    assert set(pdp[0]) == {"model", "frame", "column"}
+
+
+@pytest.mark.asyncio
+async def test_grid_without_explicit_grid_uses_registry_default(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(
+        migrated_db,
+        project,
+        tmp_path,
+        estimator=EstimatorSpec(name="linear_regression"),
+    )
+    await prepare_candidate(h)
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Registry default grid", method="grid"
+    )
+    output = await _run(h, 8)
+    assert output.status == "completed"
+    tune = [params for _, name, params in tools.calls if name == "tune_estimator"]
+    train = [params for _, name, params in tools.calls if name == "train_estimator"]
+    assert len(tune) == 1 and len(train) == 1
+    assert tune[0]["param_grid"] is None
+    assert tune[0]["metric"] == "rmse"
+    assert train[0]["params"] == {"fit_intercept": False}
+    assert output.summary["cv_caveat"] == CV_CAVEAT

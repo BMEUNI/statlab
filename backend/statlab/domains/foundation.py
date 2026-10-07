@@ -24,7 +24,7 @@ from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, StatlabError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import RunState
-from statlab.persistence.repository import get_run, set_test_fingerprint
+from statlab.persistence.repository import require_run, set_test_fingerprint
 
 
 class _RefusalError(StatlabError):
@@ -60,6 +60,12 @@ def _ref(summary: dict[str, JsonValue], key: str) -> ArtifactRef:
         raise EngineError(f"malformed {key} reference", cause=exc) from exc
 
 
+def resolved_metric(problem: ProblemSpec) -> Metric:
+    if problem.primary_metric is None:
+        raise EngineError("automatic metric has not been resolved")
+    return problem.primary_metric
+
+
 def problem_from_state(state: RunState) -> ProblemSpec:
     """The sole effective-metric reader; goals always come from pre-EDA scoping."""
     summary = shared_result(state, "problem_definition").summary
@@ -70,8 +76,7 @@ def problem_from_state(state: RunState) -> ProblemSpec:
             problem = ProblemSpec.model_validate(
                 {**problem.model_dump(mode="json"), "primary_metric": profile.get("primary_metric")}
             )
-            if problem.primary_metric is None:
-                raise EngineError("automatic metric has not been resolved")
+            resolved_metric(problem)
         return problem
     except ValidationError as exc:
         raise EngineError("malformed shared problem output", cause=exc) from exc
@@ -652,9 +657,7 @@ class FoundationExecutor:
         if not isinstance(fingerprint, str) or not fingerprint:
             raise EngineError("split tool omitted test fingerprint")
         set_test_fingerprint(self.runtime.conn, invocation.state.run_id, fingerprint)
-        run = get_run(self.runtime.conn, invocation.state.run_id)
-        if run is None:
-            raise EngineError("split run is missing")
+        run = require_run(self.runtime.conn, invocation.state.run_id)
         if run.test_fingerprint != fingerprint:
             raise _RefusalError("run already records a different test fingerprint")
         summary.update(

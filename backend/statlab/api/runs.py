@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
+import logging
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import (
@@ -27,7 +27,14 @@ from statlab_contracts.layout import RunPaths
 from statlab.api.projects import APIResources, ProjectsService, require_complete
 from statlab.domains.binding import RunBinding, bind_tabular
 from statlab.domains.tabular import TABULAR_DOMAIN
-from statlab.errors import ConfigError, EngineError, LlmCallError, LlmOutputError, PersistenceError
+from statlab.errors import (
+    ConfigError,
+    EngineError,
+    LlmCallError,
+    LlmOutputError,
+    PersistenceError,
+    traceback_frames,
+)
 from statlab.graph.checkpoint import Checkpointer
 from statlab.graph.control import ControlContext, ControlResponse, ControlText, ConversationTurn
 from statlab.graph.engine import RunTracker
@@ -46,16 +53,18 @@ from statlab.persistence.repository import (
     get_contract,
     get_dataset,
     get_gate,
-    get_project,
     get_run,
     get_session,
     list_gates,
     list_messages,
     list_projects,
+    require_project,
+    require_run,
     update_run_status,
 )
 from statlab.storage import ensure_run_layout
 
+_LOGGER = logging.getLogger(__name__)
 _RUN_ID = re.compile(r"^r_[0-9a-f]{16}$")
 _CHUNK_SIZE = 64 * 1024
 
@@ -170,9 +179,8 @@ class RunRegistry:
     async def request(self) -> AsyncIterator[None]:
         if self.closing:
             raise HTTPException(503, "application is closing")
-        task = asyncio.current_task()
-        if task is None:
-            raise EngineError("request has no owning task")
+        # Route handlers always run inside an event-loop task.
+        task = cast("asyncio.Task[object]", asyncio.current_task())
         self._admitted.add(task)
         self.requests_drained.clear()
         try:
@@ -200,9 +208,7 @@ class RunRegistry:
             return cached
         if _RUN_ID.fullmatch(row.id) is None:
             raise PersistenceError("stored run id is invalid")
-        project = get_project(self.resources.conn, row.project_id)
-        if project is None:
-            raise PersistenceError("run project is missing")
+        project = require_project(self.resources.conn, row.project_id)
         try:
             config = RunConfig.model_validate_json(row.config_json)
         except ValidationError as exc:
@@ -295,18 +301,10 @@ class RunRegistry:
         actual_initial = initial or RunState.initial(
             run_id=row.id, mode=row.mode, spine_id=TABULAR_DOMAIN.name, nodes=TABULAR_DOMAIN.nodes
         )
-        if (
-            actual_initial.run_id != row.id
-            or actual_initial.mode != row.mode
-            or actual_initial.spine_id != TABULAR_DOMAIN.name
-        ):
-            raise PersistenceError("run initial state identity mismatch")
         lockfile = paths.root / "uv.lock"
 
         def resolver(child_paths: RunPaths, child_state: RunState) -> RunLifecycle:
-            child_row = get_run(self.resources.conn, child_paths.run_id)
-            if child_row is None:
-                raise PersistenceError("fork child run is missing")
+            child_row = require_run(self.resources.conn, child_paths.run_id)
             return self.binding(child_row, initial=child_state).lifecycle
 
         result = bind_tabular(
@@ -348,8 +346,6 @@ class RunRegistry:
         )
         for task in batch.tasks:
             run_id = task.get_name().removeprefix("statlab-run:")
-            if run_id not in self.bindings:
-                raise PersistenceError("recovery task has no bound run")
             self._adopt(run_id, task)
 
     async def shutdown(self) -> None:
@@ -387,14 +383,12 @@ class RunRegistry:
                 ) and first_failure is None:
                     first_failure = exc
             except Exception as exc:
-                if first_failure is None:
-                    first_failure = exc
+                first_failure = first_failure or exc
         tasks = tuple(self.execution_tasks.values())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         for run_id, task in tuple(self.execution_tasks.items()):
-            if task.done():
-                self._completed(run_id, task)
+            self._completed(run_id, task)
         if first_failure is not None:
             raise first_failure
 
@@ -407,9 +401,19 @@ class RunRegistry:
         task.add_done_callback(lambda completed: self._completed(run_id, completed))
 
     def _completed(self, run_id: str, task: asyncio.Task[RunState]) -> None:
-        failure = task.cancelled()
-        if not failure:
-            failure = task.exception() is not None
+        if task.cancelled():
+            failure = True
+            _LOGGER.warning("Run %s execution task was cancelled", run_id)
+        else:
+            exc = task.exception()
+            failure = exc is not None
+            if exc is not None:
+                _LOGGER.error(
+                    "Run %s execution failed with %s\n%s",
+                    run_id,
+                    type(exc).__name__,
+                    traceback_frames(exc),
+                )
         if self.execution_tasks.get(run_id) is task:
             del self.execution_tasks[run_id]
         if failure:
@@ -491,11 +495,7 @@ class RunRegistry:
                 config_json=config.model_dump_json(),
                 status="cancelled",
             )
-            if _RUN_ID.fullmatch(row.id) is None:
-                raise PersistenceError("created run id is invalid")
             paths = RunPaths(self.resources.settings.data_dir, project.slug, row.id)
-            if os.path.lexists(paths.root):
-                raise PersistenceError("run destination already exists")
             paths.root.mkdir(parents=True, exist_ok=False)
             ensure_run_layout(paths)
             with paths.contract_snapshot_json.open("xb") as stream:
@@ -521,9 +521,7 @@ class RunRegistry:
     async def snapshot(self, run_id: str) -> RunSnapshot:
         binding = self.run(run_id)
         state = await binding.lifecycle.state()
-        row = get_run(self.resources.conn, run_id)
-        if row is None:
-            raise HTTPException(404, "run not found")
+        row = require_run(self.resources.conn, run_id)
         return RunSnapshot(
             run=row,
             state=state,
@@ -536,9 +534,7 @@ class RunRegistry:
         task = self.execution_tasks.get(run_id)
         if task is not None and not task.done():
             raise HTTPException(409, "run transition rejected")
-        row = get_run(self.resources.conn, run_id)
-        if row is None:
-            raise HTTPException(404, "run not found")
+        row = require_run(self.resources.conn, run_id)
         if row.status not in ("paused", "pending"):
             raise HTTPException(409, "run transition rejected")
         self._launch(binding, resume=row.status == "paused")
@@ -606,11 +602,6 @@ class RunRegistry:
     async def _lifecycle(
         self, binding: RunBinding, message: str, classified: InterruptClass, context: ControlContext
     ) -> ControlResponse:
-        if (
-            context.conn is not self.resources.conn
-            or context.state.run_id != binding.lifecycle.initial.run_id
-        ):
-            raise EngineError("lifecycle control binding mismatch")
         if classified.lifecycle_action == "resume":
             return await self._resume(binding)
         try:
@@ -622,9 +613,7 @@ class RunRegistry:
         async with self.mutation():
             binding = self.run(run_id)
             await self._settle_gate_task(binding)
-            run_row = get_run(self.resources.conn, run_id)
-            if run_row is None:
-                raise HTTPException(404, "run not found")
+            run_row = require_run(self.resources.conn, run_id)
             config = RunConfig.model_validate_json(run_row.config_json)
             user = create_message(
                 self.resources.conn,

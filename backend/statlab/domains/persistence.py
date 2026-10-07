@@ -27,7 +27,7 @@ from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.mcp_client import logged_calls
-from statlab.persistence.repository import get_run, remember_run_outcome
+from statlab.persistence.repository import remember_run_outcome, require_run
 
 
 def _digest(path: Path) -> str:
@@ -36,19 +36,16 @@ def _digest(path: Path) -> str:
 
 def _atomic_manifest(path: Path, manifest: dict[str, JsonValue]) -> None:
     """Publish complete metadata; retain snapshot_run's original content hash."""
-    temporary: Path | None = None
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    temporary = Path(name)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
-        ) as stream:
-            temporary = Path(stream.name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream, sort_keys=True, indent=2, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(path)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 class PersistenceExecutor:
@@ -76,12 +73,8 @@ class PersistenceExecutor:
         champion = shared_result(invocation.state, "champion_selection").summary
         target = _ref(champion, "test_score")
         problem = problem_from_state(invocation.state)
-        run = get_run(runtime.conn, runtime.paths.run_id)
+        run = require_run(runtime.conn, runtime.paths.run_id)
         provenance, model = champion_provenance(runtime.conn, invocation.state)
-        if run is None:
-            raise _RefusalError("persistence requires durable champion and completed test score")
-        if model.id != champion.get("model_id") or model.artifact_id != champion.get("model"):
-            raise _RefusalError("completed champion disagrees with durable model")
         lockfile = runtime.lockfile_path
         if lockfile is None:
             raise _RefusalError("persistence requires caller-supplied readable lockfile_path")

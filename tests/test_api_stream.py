@@ -13,8 +13,9 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import SecretStr
+from sse_starlette.sse import AppStatus
 from starlette.types import ASGIApp, Message, Scope
-from statlab.api.runs import RunConfig
+from statlab.api.runs import RunConfig, RunRegistry
 from statlab.api.stream import event_frame, parse_cursor, stream_events
 from statlab.config import Settings
 from statlab.errors import ConfigError
@@ -27,6 +28,7 @@ from statlab_contracts.layout import RunPaths
 
 from tests.test_api_runs import (
     FixtureRecords,
+    RunAPI,
     _create_run,
     _decision,
     _gate,
@@ -165,6 +167,12 @@ async def test_stream_heartbeat_keeps_subscription_and_writes_no_event(
     assert not bus._subscribers
 
 
+def _active_tasks(api: RunAPI) -> frozenset[str]:
+    return frozenset(
+        run_id for run_id, task in api.registry.execution_tasks.items() if not task.done()
+    )
+
+
 async def _drive_request(
     app: ASGIApp,
     path: str,
@@ -222,7 +230,7 @@ async def test_sse_route_replays_and_disconnects(
             latest = (await bus.replay())[-1].seq
             row_before = get_run(api.conn, run_id)
             gates_before = tuple(list_gates(api.conn, run_id))
-            tasks_before = dict(api.registry.execution_tasks)
+            tasks_before = _active_tasks(api)
             query_since = latest if latest_query else 0
             query = f"since={query_since}".encode()
             task, disconnected, messages = await _drive_request(
@@ -253,7 +261,7 @@ async def test_sse_route_replays_and_disconnects(
             assert api.registry.requests_drained.is_set()
             assert get_run(api.conn, run_id) == row_before
             assert tuple(list_gates(api.conn, run_id)) == gates_before
-            assert api.registry.execution_tasks == tasks_before
+            assert _active_tasks(api) == tasks_before
 
 
 @pytest.mark.asyncio
@@ -285,7 +293,7 @@ async def test_stream_shutdown_closes_subscriber_and_drains_admitted_request(
         binding = api.registry.bindings[run_id]
         run_before = get_run(api.conn, run_id)
         gates_before = tuple(list_gates(api.conn, run_id))
-        tasks_before = dict(api.registry.execution_tasks)
+        tasks_before = _active_tasks(api)
         latest = (await binding.loop.events.replay())[-1].seq
         task, disconnected, messages = await _drive_request(
             api.app,
@@ -311,7 +319,7 @@ async def test_stream_shutdown_closes_subscriber_and_drains_admitted_request(
             assert run_before is not None and run_before.status == "awaiting_user"
             assert tuple(list_gates(api.conn, run_id)) == gates_before
             assert gate.status == "pending"
-            assert api.registry.execution_tasks == tasks_before
+            assert _active_tasks(api) == tasks_before
             await asyncio.wait_for(api.registry.shutdown(), timeout=2)
         finally:
             disconnected.set()
@@ -335,6 +343,7 @@ async def test_server_signal_hook_signals_registry_before_uvicorn_exit(
             calls.append((sig, api.registry.closing, api.registry.streams_closing.is_set()))
 
         monkeypatch.setattr(uvicorn.Server, "handle_exit", parent_exit)
+        monkeypatch.setattr(main_module, "RunRegistry", RunRegistry)
         server = main_module._RunServer(api.app, api.settings)
         server.handle_exit(15, None)
         server.handle_exit(15, None)
@@ -355,6 +364,7 @@ async def test_server_signal_hook_before_registry_publication(
             forwarded.append(sig)
 
         monkeypatch.setattr(uvicorn.Server, "handle_exit", parent_exit)
+        monkeypatch.setattr(main_module, "RunRegistry", RunRegistry)
         app = FastAPI()
         server = main_module._RunServer(app, api.settings)
         server.handle_exit(2, None)
@@ -413,7 +423,10 @@ def test_main_config_error_display_is_fixed_and_secret_free(
     assert invoked is False
 
 
-def test_server_repeated_signals_preserve_lifespan_drain() -> None:
+def test_server_repeated_signals_preserve_lifespan_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(AppStatus, "should_exit", False)
     import statlab.main as main_module
 
     settings = Settings(
@@ -452,7 +465,7 @@ async def test_unavailable_citation_discards_streamed_draft(
         await _gate(api, run_id)
         row_before = get_run(api.conn, run_id)
         gates_before = tuple(list_gates(api.conn, run_id))
-        tasks_before = dict(api.registry.execution_tasks)
+        tasks_before = _active_tasks(api)
         response = await api.client.post(
             f"/api/runs/{run_id}/messages", json={"text": "what evidence?"}
         )
@@ -483,7 +496,7 @@ async def test_unavailable_citation_discards_streamed_draft(
         assert "a_0123456789abcdef" not in str(error_event.payload)
         assert get_run(api.conn, run_id) == row_before
         assert tuple(list_gates(api.conn, run_id)) == gates_before
-        assert api.registry.execution_tasks == tasks_before
+        assert _active_tasks(api) == tasks_before
 
 
 @pytest.mark.asyncio
@@ -501,7 +514,7 @@ async def test_cancelled_control_discards_streamed_draft_and_drains_request(
         gate = await _gate(api, run_id)
         run_before = get_run(api.conn, run_id)
         gates_before = tuple(list_gates(api.conn, run_id))
-        tasks_before = dict(api.registry.execution_tasks)
+        tasks_before = _active_tasks(api)
         llm = api.registry.resources.llm
         original = llm._acompletion
         entered, release = asyncio.Event(), asyncio.Event()
@@ -567,9 +580,23 @@ async def test_cancelled_control_discards_streamed_draft_and_drains_request(
         assert run_before is not None and run_before.status == "awaiting_user"
         assert tuple(list_gates(api.conn, run_id)) == gates_before
         assert gate.status == "pending"
-        assert api.registry.execution_tasks == tasks_before
+        assert _active_tasks(api) == tasks_before
         usage = api.conn.execute(
             "SELECT signature, prompt_tokens, completion_tokens, cached_tokens "
             "FROM llm_calls ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
         assert usage is not None and tuple(usage) == ("QaAnswer", 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_events_route_rejects_while_closing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api)
+        run_id = str(created.json()["run_id"])
+        await _gate(api, run_id)
+        api.registry.begin_shutdown()
+        closed = await api.client.get(f"/api/runs/{run_id}/events")
+        assert closed.status_code == 503

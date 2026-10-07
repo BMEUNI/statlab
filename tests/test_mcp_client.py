@@ -178,6 +178,59 @@ async def test_setup_dataset_uses_fixed_tool_and_skips_lineage(
     assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
 
 
+_SETUP_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "project": {"type": "string"},
+        "dataset": {"type": "string"},
+        "options": {"type": "object"},
+    },
+    "required": ["project", "dataset", "options"],
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_setup_dataset_requires_entered_client_and_existing_project(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    client = McpClient(settings(paths, tmp_path), conn, session=FakeSession(()))
+    with pytest.raises(EngineError, match="MCP client is not entered"):
+        await client.setup_dataset(project=paths.slug, dataset="a" * 64, options=DatasetOptions())
+    session = FakeSession(
+        (served_tool("setup_dataset", _SETUP_SCHEMA, allow_in=["setup"], phase="setup"),)
+    )
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as entered:
+        with pytest.raises(EngineError, match="setup project does not exist"):
+            await entered.setup_dataset(
+                project="missing-project", dataset="a" * 64, options=DatasetOptions()
+            )
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_setup_dataset_refuses_non_finite_contract(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, contract, _ = world
+    session = FakeSession(
+        (served_tool("setup_dataset", _SETUP_SCHEMA, allow_in=["setup"], phase="setup"),)
+    )
+    bad = DataContract.model_validate(
+        {**contract.model_dump(mode="json"), "objective": {"success_threshold": float("nan")}}
+    )
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        with pytest.raises(ToolCallError) as caught:
+            await client.setup_dataset(
+                project=paths.slug, dataset="a" * 64, options=DatasetOptions(), contract=bad
+            )
+    failure = caught.value.failure
+    assert failure.error_class == "tool_param"
+    assert failure.message == "tool parameters must be strict JSON"
+    assert session.calls == []
+
+
 @pytest.mark.asyncio
 async def test_setup_dataset_refuses_wrong_registry_phase_before_dispatch(
     world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
@@ -206,7 +259,14 @@ async def test_setup_dataset_requires_exact_metadata(
 ) -> None:
     conn, paths, _, _ = world
     session = FakeSession(
-        (served_tool("setup_dataset", {"type": "object"}, allow_in=allow_in, phase=phase),)
+        (
+            served_tool(
+                "setup_dataset",
+                {"type": "object", "properties": {}},
+                allow_in=allow_in,
+                phase=phase,
+            ),
+        )
     )
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
         with pytest.raises(EngineError):
@@ -238,7 +298,14 @@ async def test_setup_dataset_schema_failure_and_tool_failure_are_preserved(
     assert not session.calls
 
     session = FakeSession(
-        (served_tool("setup_dataset", {"type": "object"}, allow_in=["setup"], phase="setup"),)
+        (
+            served_tool(
+                "setup_dataset",
+                {"type": "object", "properties": {}},
+                allow_in=["setup"],
+                phase="setup",
+            ),
+        )
     )
     session.envelope = ToolFailure(error_class="data", message="bad CSV").model_dump(mode="json")
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
@@ -255,7 +322,14 @@ async def test_setup_dataset_preserves_cancellation(
 ) -> None:
     conn, paths, _, _ = world
     session = FakeSession(
-        (served_tool("setup_dataset", {"type": "object"}, allow_in=["setup"], phase="setup"),)
+        (
+            served_tool(
+                "setup_dataset",
+                {"type": "object", "properties": {}},
+                allow_in=["setup"],
+                phase="setup",
+            ),
+        )
     )
     session.exception = asyncio.CancelledError()
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
@@ -270,7 +344,9 @@ async def test_setup_dataset_rejects_malformed_results_and_artifacts(
     world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
 ) -> None:
     conn, paths, _, _ = world
-    tool = served_tool("setup_dataset", {"type": "object"}, allow_in=["setup"], phase="setup")
+    tool = served_tool(
+        "setup_dataset", {"type": "object", "properties": {}}, allow_in=["setup"], phase="setup"
+    )
     session = FakeSession((tool,))
     session.malformed_result = True
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
@@ -319,7 +395,14 @@ async def test_setup_dataset_maps_foreign_dispatch_failures_without_audit(
 ) -> None:
     conn, paths, _, _ = world
     session = FakeSession(
-        (served_tool("setup_dataset", {"type": "object"}, allow_in=["setup"], phase="setup"),)
+        (
+            served_tool(
+                "setup_dataset",
+                {"type": "object", "properties": {}},
+                allow_in=["setup"],
+                phase="setup",
+            ),
+        )
     )
     session.exception = exception
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
@@ -336,7 +419,7 @@ async def test_setup_dataset_missing_tool_fails_before_dispatch(
     world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
 ) -> None:
     conn, paths, _, _ = world
-    session = FakeSession((served_tool("other", {"type": "object"}),))
+    session = FakeSession((served_tool("other", {"type": "object", "properties": {}}),))
     async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
         with pytest.raises(EngineError):
             await client.setup_dataset(

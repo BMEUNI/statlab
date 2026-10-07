@@ -178,7 +178,11 @@ def status_facts(context: ControlContext) -> StatusFacts:
     shared = {item.node_name: item.result.status for item in state.shared_results}
     candidates: list[CandidateStatus] = []
     for branch in state.branches:
-        position = branch.position if state.traversal is not None else state.cursor
+        position = (
+            max(state.traversal.region(state.spine)[0], branch.position)
+            if state.traversal is not None
+            else state.cursor
+        )
         latest = {item.node_name: item.result.status for item in branch.results}
         before = tuple(
             entry.name for entry in state.spine[:position] if entry.kind == "PER_CANDIDATE"
@@ -353,7 +357,11 @@ async def answer_question(message: str, context: ControlContext) -> ControlRespo
         )
     if not set(answer.references) <= context.visible_refs:
         raise LlmOutputError(
-            Failure(error_class="tool_param", message="Q&A cited unavailable artifacts")
+            Failure(
+                error_class="tool_param",
+                message="Q&A cited unavailable artifacts",
+                field_errors={"references": "cites artifacts unavailable to this question"},
+            )
         )
     return ControlResponse(category="qa", text=answer.text, references=answer.references)
 

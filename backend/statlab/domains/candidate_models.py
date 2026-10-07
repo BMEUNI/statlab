@@ -28,6 +28,7 @@ from statlab.domains.foundation import (
     _ref,
     _RefusalError,
     problem_from_state,
+    resolved_metric,
 )
 from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, ToolCallError
@@ -351,9 +352,8 @@ class CandidateModelExecutor:
                 },
             )
         metrics = _object(scored.summary.get("metrics"), "validation metrics")
-        if problem.primary_metric is None:
-            raise EngineError("missing resolved primary metric")
-        entry = _object(metrics.get(problem.primary_metric), "primary metric")
+        metric = resolved_metric(problem)
+        entry = _object(metrics.get(metric), "primary metric")
         value = entry.get("value")
         if (
             isinstance(value, bool)
@@ -457,7 +457,7 @@ class CandidateModelExecutor:
         )
         output = await self._finish(invocation, evidence, final, summary)
         if output.status == "completed":
-            return output.model_copy(update={"metrics": {problem.primary_metric: float(value)}})
+            return output.model_copy(update={"metrics": {metric: float(value)}})
         return output
 
     async def _interpretation(

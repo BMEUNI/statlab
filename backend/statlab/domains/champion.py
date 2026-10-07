@@ -34,6 +34,7 @@ from statlab.persistence.repository import (
     count_prior_test_scorings,
     get_champion_model,
     get_run,
+    require_run,
     save_champion_model,
 )
 from statlab.storage import get_artifact, list_artifacts
@@ -142,9 +143,7 @@ class ChampionExecutor:
         }
         audits = champion_audits(self.runtime)
         selections = tuple(audit for audit in audits if audit.tool == "select_champion")
-        run = get_run(self.runtime.conn, state.run_id)
-        if run is None:
-            raise EngineError("champion run is missing")
+        run = require_run(self.runtime.conn, state.run_id)
         pointer = get_champion_model(self.runtime.conn, state.run_id)
         comparison_summary: dict[str, JsonValue]
         if selections:

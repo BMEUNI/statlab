@@ -179,6 +179,13 @@ def get_project(conn: sqlite3.Connection, project_id: str) -> ProjectRow | None:
     return ProjectRow.model_validate(dict(row)) if row is not None else None
 
 
+def require_project(conn: sqlite3.Connection, project_id: str) -> ProjectRow:
+    row = get_project(conn, project_id)
+    if row is None:
+        raise PersistenceError("project does not exist")
+    return row
+
+
 def get_project_by_slug(conn: sqlite3.Connection, slug: str) -> ProjectRow | None:
     row = conn.execute("SELECT * FROM projects WHERE slug = ?", (slug,)).fetchone()
     return ProjectRow.model_validate(dict(row)) if row is not None else None
@@ -314,6 +321,13 @@ def create_run(
 def get_run(conn: sqlite3.Connection, run_id: str) -> RunRow | None:
     row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
     return RunRow.model_validate(dict(row)) if row is not None else None
+
+
+def require_run(conn: sqlite3.Connection, run_id: str) -> RunRow:
+    row = get_run(conn, run_id)
+    if row is None:
+        raise PersistenceError("run does not exist")
+    return row
 
 
 def list_runs(conn: sqlite3.Connection, project_id: str) -> tuple[RunRow, ...]:
@@ -918,9 +932,7 @@ def get_model(conn: sqlite3.Connection, model_id: str) -> ModelRow | None:
 def get_champion_model(conn: sqlite3.Connection, run_id: str) -> ModelRow | None:
     """Resolve a pointer only when its model, candidate and fitted artifact agree."""
     try:
-        run = get_run(conn, run_id)
-        if run is None:
-            raise PersistenceError("champion run does not exist")
+        run = require_run(conn, run_id)
         if run.champion_model_id is None:
             return None
         model = get_model(conn, run.champion_model_id)
@@ -950,9 +962,7 @@ def _check_model_identity(
         or not Path(artifact["path"]).is_file()
     ):
         raise PersistenceError("model requires an available fitted artifact")
-    current = get_run(conn, run_id)
-    if current is None:
-        raise PersistenceError("champion run does not exist")
+    current = require_run(conn, run_id)
     ancestor = current
     visited: set[str] = set()
     while ancestor.id != artifact["run_id"]:
@@ -996,9 +1006,7 @@ def save_champion_model(
         serialized = json.dumps(parameters, sort_keys=True, separators=(",", ":"), allow_nan=False)
         with transaction(conn):
             _check_model_identity(conn, run_id, candidate_id, artifact_id, name)
-            run = get_run(conn, run_id)
-            if run is None:
-                raise PersistenceError("champion run does not exist")
+            run = require_run(conn, run_id)
             previous = get_champion_model(conn, run_id)
             if previous is not None:
                 if (

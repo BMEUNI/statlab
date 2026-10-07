@@ -29,19 +29,26 @@ from statlab.domains.decisions import (
     ProfilePlot,
     SplitDecision,
     TrainingDecision,
+    ValidationConclusion,
 )
 from statlab.domains.foundation import (
     FoundationExecutor,
+    _frame,
+    _ref,
+    _RefusalError,
+    _strings,
+    _tool_summary,
     problem_from_state,
     problem_spec,
     resolve_metric,
+    resolved_metric,
     shared_result,
 )
 from statlab.domains.routing import NODE_ROLES
 from statlab.domains.runtime import Approval, DomainRuntime
 from statlab.domains.tabular import TABULAR_DOMAIN, TABULAR_SPINE
 from statlab.errors import EngineError, ToolCallError
-from statlab.graph.candidates import ToolBoundary
+from statlab.graph.candidates import RunControl, ToolBoundary
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
 from statlab.llm.client import CallRecovery, LlmClient
@@ -78,6 +85,8 @@ FINGERPRINT = "f" * 64
 
 class OfflineTools(ToolBoundary):
     def __init__(self, conn: sqlite3.Connection) -> None:
+        self.control = RunControl()
+        self.sleep = None
         self.conn = conn
         self.calls: list[tuple[CallContext, str, dict[str, JsonValue]]] = []
         self.valid_contract = True
@@ -90,6 +99,10 @@ class OfflineTools(ToolBoundary):
         self.roles: dict[str, JsonValue] = {"x": "numeric", "y": "boolean"}
         self.rows_dropped = 2
         self.x_dtype = "float64"
+        self.id_candidates: list[JsonValue] = [{"column": "id"}]
+        self.leak_suspects: list[JsonValue] = [{"column": "x"}]
+        self.split_count = 3
+        self.omit_fingerprint = False
 
     async def call(
         self,
@@ -118,9 +131,9 @@ class OfflineTools(ToolBoundary):
         if tool == "validate_contract":
             return ToolSuccess(summary={"valid": self.valid_contract, "mismatches": []})
         if tool == "detect_id_columns":
-            return ToolSuccess(summary={"candidates": [{"column": "id"}]})
+            return ToolSuccess(summary={"candidates": self.id_candidates})
         if tool == "detect_leaky_columns":
-            return ToolSuccess(summary={"suspects": [{"column": "x"}]})
+            return ToolSuccess(summary={"suspects": self.leak_suspects})
         if tool == "profile_schema":
             return ToolSuccess(
                 summary={
@@ -151,18 +164,18 @@ class OfflineTools(ToolBoundary):
         if tool in ("split_random", "split_stratified"):
             # Accepted B6 dispatch records/locks the produced test artifact before verification.
             set_test_fingerprint(self.conn, ctx.paths.run_id, self.fingerprint)
-            return ToolSuccess(
-                summary={
-                    "rows": {"train": 140, "valid": 48, "test": 48},
-                    "rows_dropped_null_target": 2,
-                    "test_fingerprint": self.fingerprint,
-                },
-                artifacts=(
-                    ArtifactMeta(ref=TRAIN, kind="dataframe", split="train"),
-                    ArtifactMeta(ref=VALID, kind="dataframe", split="valid"),
-                    ArtifactMeta(ref=TEST, kind="dataframe", split="test"),
-                ),
+            report: dict[str, JsonValue] = {
+                "rows": {"train": 140, "valid": 48, "test": 48},
+                "rows_dropped_null_target": 2,
+            }
+            if not self.omit_fingerprint:
+                report["test_fingerprint"] = self.fingerprint
+            artifacts = (
+                ArtifactMeta(ref=TRAIN, kind="dataframe", split="train"),
+                ArtifactMeta(ref=VALID, kind="dataframe", split="valid"),
+                ArtifactMeta(ref=TEST, kind="dataframe", split="test"),
             )
+            return ToolSuccess(summary=report, artifacts=artifacts[: self.split_count])
         if tool == "verify_split":
             return ToolSuccess(summary={"passed": self.verify_passed, "checks": {}})
         if tool.startswith("plot_"):
@@ -971,3 +984,334 @@ async def test_problem_reader_reuses_only_pre_eda_goal_spec(foundation: Harness)
         ).inference_goals
         == ()
     )
+
+
+def _binary_problem() -> ProblemSpec:
+    return ProblemSpec(
+        rationale="r",
+        target="y",
+        target_type="binary",
+        task="classification",
+        primary_metric=None,
+        metric_rule="classification_auto",
+    )
+
+
+def test_foundation_helpers_reject_malformed_evidence() -> None:
+    with pytest.raises(EngineError, match="missing or malformed label"):
+        _strings("x", "label")
+    with pytest.raises(EngineError, match="missing or malformed raw reference"):
+        _ref({}, "raw")
+    with pytest.raises(EngineError, match="missing tool evidence: load_csv"):
+        _tool_summary(NodeResult(status="completed", summary={"tools": []}), "load_csv")
+    with pytest.raises(EngineError, match="missing tool evidence: load_csv"):
+        _tool_summary(NodeResult(status="completed"), "load_csv")
+    with pytest.raises(EngineError, match="tool did not return exactly one shared dataframe"):
+        _frame(ToolSuccess())
+    with pytest.raises(EngineError, match="automatic metric has not been resolved"):
+        resolved_metric(_binary_problem())
+
+
+@pytest.mark.parametrize(
+    "target,message",
+    [
+        (
+            {"kind": "class", "classes": {"0": {"share": 1.0}}, "minority_share": 1.0},
+            "classification needs at least two observed classes",
+        ),
+        (
+            {
+                "kind": "class",
+                "classes": {"0": {"share": 0.4}, "1": {"share": 0.3}, "2": {"share": 0.3}},
+                "minority_share": 0.3,
+            },
+            "binary target summary has a contradictory class count",
+        ),
+        (
+            {"kind": "class", "classes": {"0": 1, "1": 2}, "minority_share": 0.5},
+            "class-share evidence is malformed",
+        ),
+        (
+            {
+                "kind": "class",
+                "classes": {"0": {"share": 0}, "1": {"share": 1}},
+                "minority_share": 0,
+            },
+            "class-share evidence is unavailable",
+        ),
+        (
+            {
+                "kind": "class",
+                "classes": {"0": {"share": 0.5}, "1": {"share": 0.5}},
+                "minority_share": 0.4,
+            },
+            "class-share evidence is contradictory",
+        ),
+    ],
+)
+def test_resolve_metric_refuses_contradictory_class_evidence(
+    target: dict[str, JsonValue], message: str
+) -> None:
+    with pytest.raises(_RefusalError, match=message):
+        resolve_metric(_binary_problem(), target)
+
+
+@pytest.mark.asyncio
+async def test_malformed_problem_boundary_fails_closed(foundation: Harness) -> None:
+    h = foundation
+    await h.advance(2)
+    bad = RunState.model_validate(
+        {
+            **h.state.model_dump(mode="json"),
+            "shared_results": [
+                h.state.shared_results[0].model_dump(mode="json"),
+                BoundaryResult(
+                    node_name="problem_definition",
+                    execution_id=h.state.shared_results[1].execution_id,
+                    result=NodeResult(status="completed", summary={"problem": {"target": ""}}),
+                ).model_dump(mode="json"),
+            ],
+        }
+    )
+    with pytest.raises(EngineError, match="malformed shared problem output"):
+        problem_from_state(bad)
+    h.state = bad
+    with pytest.raises(EngineError, match="malformed problem boundary"):
+        await h.step()
+
+
+@pytest.mark.asyncio
+async def test_untyped_boolean_target_is_binary(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = harness(
+        migrated_db, project, tmp_path, contract=DataContract(target=TargetSpec(column="y"))
+    )
+    await h.advance(2)
+    problem = ProblemSpec.model_validate(h.state.shared_results[1].result.summary["problem"])
+    assert problem.target_type == "binary" and problem.task == "classification"
+
+
+@pytest.mark.asyncio
+async def test_intake_without_flags_and_escalation(foundation: Harness) -> None:
+    h = foundation
+    h.tools.id_candidates = []
+    h.tools.leak_suspects = []
+    out = await h.step()
+    assert out.status == "completed"
+    assert "ID candidates require review; no columns were removed" not in out.warnings
+    assert "suspected leakage requires review; flags are not proof" not in out.warnings
+
+
+@pytest.mark.asyncio
+async def test_intake_escalation_fails_for_review(foundation: Harness) -> None:
+    h = foundation
+    h.llm.responses[IntakeDecision] = IntakeDecision(rationale="Escalate", disposition="escalate")
+    out = await h.step()
+    assert out.status == "failed" and out.error is not None
+    assert out.error.message == "intake requires data/contract review"
+
+
+@pytest.mark.asyncio
+async def test_profile_roles_override_dtype_and_skip_absent_columns(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = harness(
+        migrated_db,
+        project,
+        tmp_path,
+        contract=DataContract(
+            target=TargetSpec(column="y", type="binary"),
+            features=FeatureRules(roles={"x": "categorical", "ghost": "numeric"}),
+        ),
+    )
+    h.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="Categorical x",
+        categorical=("x",),
+        plots=(ProfilePlot(kind="target_relation", column="x"),),
+    )
+    await h.advance(3)
+    categorical = [p for _, t, p in h.tools.calls if t == "summarize_categorical"]
+    assert len(categorical) == 1 and categorical[0]["columns"] == ["x"]
+    relation = [p for _, t, p in h.tools.calls if t == "plot_target_relation"]
+    assert len(relation) == 1
+    assert relation[0]["target"] == "y" and relation[0]["column"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_profile_refuses_unavailable_tool_and_unknown_plot_column(
+    foundation: Harness,
+) -> None:
+    h = foundation
+    base = policy()
+    h.runtime = replace(
+        h.runtime,
+        skill=SkillPolicy(
+            "fixed preamble",
+            tuple(
+                NodeSkill(
+                    spec.name,
+                    "fixed section",
+                    "purpose",
+                    "heuristics",
+                    "tools",
+                    "outputs",
+                    "pitfalls",
+                    base.node(spec.name).allowed - {"summarize_numeric"},
+                )
+                for spec in TABULAR_SPINE
+            ),
+            b"fixed policy",
+        ),
+    )
+    await h.advance(2)
+    out = await h.step()
+    assert out.status == "failed" and out.error is not None
+    assert out.error.message == "summarize_numeric is unavailable in this node skill"
+
+
+@pytest.mark.asyncio
+async def test_profile_refuses_unknown_plot_column(foundation: Harness) -> None:
+    h = foundation
+    h.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="Ghost plot", plots=(ProfilePlot(kind="distribution", column="ghost"),)
+    )
+    await h.advance(2)
+    out = await h.step()
+    assert out.status == "failed" and out.error is not None
+    assert out.error.message == "plot names an unknown column or unavailable tool"
+
+
+@pytest.mark.asyncio
+async def test_regression_refuses_stratified_split_proposal(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = harness(
+        migrated_db,
+        project,
+        tmp_path,
+        contract=DataContract(target=TargetSpec(column="y", type="continuous")),
+    )
+    h.tools.roles["y"] = "numeric"
+    h.llm.responses[SplitDecision] = SplitDecision(rationale="Stratify", strategy="stratified")
+    await h.advance(3)
+    out = await h.step()
+    assert out.status == "failed" and out.error is not None
+    assert out.error.message == "regression cannot use a stratified split"
+
+
+@pytest.mark.asyncio
+async def test_split_after_skipped_profile_casts_and_respects_no_duplicate_drop(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = harness(
+        migrated_db,
+        project,
+        tmp_path,
+        contract=DataContract(
+            target=TargetSpec(column="y", type="binary"),
+            objective=Objective(primary_metric="roc_auc"),
+            features=FeatureRules(roles={"x": "numeric"}),
+            preprocessing=PreprocessingRules(drop_duplicates=False),
+        ),
+    )
+    await h.advance(2)
+    h.state = RunState.model_validate(
+        {
+            **h.state.model_dump(mode="json"),
+            "cursor": 3,
+            "shared_results": [
+                *(b.model_dump(mode="json") for b in h.state.shared_results),
+                BoundaryResult(
+                    node_name="data_profiling",
+                    execution_id="skipped-profile",
+                    result=NodeResult(status="skipped", skip_reason="Profiling skipped"),
+                ).model_dump(mode="json"),
+            ],
+        }
+    )
+    offset = len(h.tools.calls)
+    assert (await h.step()).status == "completed"
+    calls = h.tools.calls[offset:]
+    assert calls[0][1] == "cast_dtypes"
+    assert calls[0][2] == {"frame": str(RAW), "target": "y", "roles": {"x": "numeric"}}
+    assert all(tool != "drop_duplicate_rows" for _, tool, _ in calls)
+
+
+@pytest.mark.parametrize("knob", ["count", "fingerprint"])
+@pytest.mark.asyncio
+async def test_split_rejects_malformed_artifacts_and_missing_fingerprint(
+    foundation: Harness, knob: str
+) -> None:
+    h = foundation
+    await h.advance(3)
+    if knob == "count":
+        h.tools.split_count = 2
+        match = "split tool returned malformed split artifacts"
+    else:
+        h.tools.omit_fingerprint = True
+        match = "split tool omitted test fingerprint"
+    with pytest.raises(EngineError, match=match):
+        await h.step()
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        (
+            {
+                "target_type": "continuous",
+                "task": "regression",
+                "primary_metric": "roc_auc",
+                "metric_rule": "explicit",
+            },
+            "primary metric is incompatible with task",
+        ),
+        (
+            {
+                "target_type": "continuous",
+                "task": "regression",
+                "primary_metric": "rmse",
+                "metric_rule": "explicit",
+                "secondary_metrics": ["roc_auc"],
+            },
+            "secondary metric is incompatible with task",
+        ),
+        (
+            {
+                "target_type": "continuous",
+                "task": "regression",
+                "primary_metric": "rmse",
+                "metric_rule": "classification_auto",
+            },
+            "classification rule requires classification",
+        ),
+        (
+            {
+                "target_type": "binary",
+                "task": "classification",
+                "primary_metric": None,
+                "metric_rule": "explicit",
+            },
+            "resolved metric is required",
+        ),
+        (
+            {
+                "target_type": "binary",
+                "task": "classification",
+                "primary_metric": "f1",
+                "metric_rule": "override",
+                "metric_override_rationale": " ",
+            },
+            "metric override needs a nonblank rationale",
+        ),
+    ],
+)
+def test_problem_and_conclusion_validators(payload: dict[str, JsonValue], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ProblemSpec.model_validate({"rationale": "r", "target": "y", **payload})
+
+
+def test_conclusion_retune_requires_reason() -> None:
+    with pytest.raises(ValidationError, match="retune requires a nonblank reason"):
+        ValidationConclusion.model_validate({"rationale": "r", "retune": True})

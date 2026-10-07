@@ -11,15 +11,27 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, JsonValue, TypeAdapter
+from statlab.domains.base import NodeResult
 from statlab.domains.champion import ChampionExecutor
 from statlab.domains.decisions import PersistenceDecision
-from statlab.domains.persistence import PersistenceExecutor
-from statlab.errors import EngineError
+from statlab.domains.persistence import PersistenceExecutor, _atomic_manifest
+from statlab.domains.rewind import champion_provenance, publish_retained_report
+from statlab.domains.tabular import TABULAR_SPINE
+from statlab.errors import EngineError, PersistenceError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
 from statlab.mcp_client import logged_calls
+from statlab.persistence.ids import new_id
 from statlab.persistence.models import ProjectRow
-from statlab.persistence.repository import finish_node_execution, list_memory, record_llm_call
+from statlab.persistence.repository import (
+    finish_node_execution,
+    list_memory,
+    list_node_executions,
+    record_llm_call,
+)
+from statlab.storage import create_artifact, ensure_run_layout
+from statlab_contracts.artifacts import ArtifactMeta, new_artifact_ref
+from statlab_contracts.layout import RunPaths
 
 from tests.test_nodes_champion import ChampionTools, champion_harness, tail_invocation, with_mode
 from tests.test_nodes_foundation import Harness
@@ -62,6 +74,21 @@ async def persistence_harness(
             ),
         ),
     )
+    assert logged_calls(conn, h.state.run_id, fork_aware=True, checkpoint=h.state) == logged_calls(
+        conn, h.state.run_id
+    )
+    rows = {row.id: row for row in list_node_executions(conn, h.state.run_id)}
+    first, second = h.state.branches
+    assert {item.execution_id for item in first.results}.isdisjoint(
+        {item.execution_id for item in second.results}
+    )
+    names = tuple(node.name for node in TABULAR_SPINE)
+    for shared in h.state.shared_results:
+        row = rows[shared.execution_id]
+        assert row.node_name == shared.node_name
+        assert row.seq == 1 + names.index(shared.node_name)
+        assert row.status == shared.result.status
+        assert row.candidate_id is None
     lock = root / "supplied.lock"
     lock.write_bytes(b"version = 1\n# exact caller input\n")
     h.runtime = replace(h.runtime, lockfile_path=lock)
@@ -236,3 +263,160 @@ async def test_preservation_keeps_cancellation_and_rejects_foreign_node(
     monkeypatch.setattr(ChampionTools, "call", cancelled)
     with pytest.raises(asyncio.CancelledError):
         await PersistenceExecutor(h.runtime)(tail_invocation(h, 12))
+
+
+def test_atomic_manifest_creation_failure_leaves_no_temporary(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        _atomic_manifest(tmp_path / "missing" / "manifest.json", {})
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.asyncio
+async def test_export_tool_failure_is_structured(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await persistence_harness(migrated_db, project, tmp_path)
+    tools.failure_tool = "export_pipeline_script"
+    output = await PersistenceExecutor(h.runtime)(tail_invocation(h, 12))
+    assert output.status == "failed" and output.error is not None
+    assert output.error.message == "champion tool refused"
+
+
+@pytest.mark.asyncio
+async def test_score_absent_from_real_audit_refuses(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await persistence_harness(migrated_db, project, tmp_path)
+    meta = ArtifactMeta(ref=new_artifact_ref(), kind="table")
+    path = h.runtime.paths.artifact(meta.ref, "table")
+    path.write_bytes(b"orphan score")
+    create_artifact(
+        migrated_db,
+        ref=meta.ref,
+        run_id=h.state.run_id,
+        kind="table",
+        path=path,
+        meta=meta,
+        produced_by="fixture",
+        derived_from_test=True,
+    )
+    last = h.state.shared_results[-1]
+    replaced = BoundaryResult(
+        node_name=last.node_name,
+        execution_id=last.execution_id,
+        result=NodeResult(
+            status="completed",
+            summary={**last.result.summary, "test_score": str(meta.ref)},
+            artifacts=last.result.artifacts,
+        ),
+    )
+    h.state = RunState.model_validate(
+        {
+            **h.state.model_dump(mode="json"),
+            "shared_results": [
+                *(b.model_dump(mode="json") for b in h.state.shared_results[:-1]),
+                replaced.model_dump(mode="json"),
+            ],
+        }
+    )
+    output = await PersistenceExecutor(h.runtime)(tail_invocation(h, 12))
+    assert output.status == "failed" and output.error is not None
+    assert output.error.message == "champion test score is absent from real tool audit"
+
+
+@pytest.mark.asyncio
+async def test_lockfile_changed_during_approval_refuses_before_export(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await persistence_harness(migrated_db, project, tmp_path)
+    h.state = with_mode(h.state, "guided")
+
+    async def approve(
+        invocation: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
+    ) -> BaseModel:
+        (h.runtime.paths.root / "uv.lock").write_bytes(b"changed during approval\n")
+        return decision
+
+    h.runtime = replace(h.runtime, approval=approve)
+    output = await PersistenceExecutor(h.runtime)(tail_invocation(h, 12))
+    assert output.status == "failed" and output.error is not None
+    assert output.error.message == "run lockfile already differs from supplied bytes"
+    assert tools.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("[]", "snapshot manifest is malformed"),
+        ('{"run_hash": "other"}', "snapshot manifest disagrees with returned run hash"),
+    ],
+)
+async def test_snapshot_manifest_must_parse_and_match(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+    text: str,
+    message: str,
+) -> None:
+    h, tools = await persistence_harness(migrated_db, project, tmp_path)
+    tools.manifest_text = text
+    with pytest.raises(EngineError, match="artifact preservation failed") as raised:
+        await PersistenceExecutor(h.runtime)(tail_invocation(h, 12))
+    assert isinstance(raised.value.__cause__, PersistenceError)
+    assert raised.value.__cause__.message == message
+
+
+@pytest.mark.asyncio
+async def test_champion_provenance_rejects_missing_unknown_and_unclaimed(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await persistence_harness(migrated_db, project, tmp_path)
+    conn = h.runtime.conn
+    last = h.state.shared_results[-1]
+    base = h.state.model_dump(mode="json")
+    short = RunState.model_validate(
+        {
+            **base,
+            "cursor": 11,
+            "shared_results": [b.model_dump(mode="json") for b in h.state.shared_results[:-1]],
+        }
+    )
+    with pytest.raises(PersistenceError, match="retained champion boundary is unavailable"):
+        champion_provenance(conn, short)
+    unknown = RunState.model_validate(
+        {
+            **base,
+            "shared_results": [
+                *(b.model_dump(mode="json") for b in h.state.shared_results[:-1]),
+                BoundaryResult(
+                    node_name=last.node_name, execution_id="ne_missing", result=last.result
+                ).model_dump(mode="json"),
+            ],
+        }
+    )
+    with pytest.raises(PersistenceError, match="champion execution is unavailable"):
+        champion_provenance(conn, unknown)
+    conn.execute("UPDATE runs SET test_scored_at = NULL WHERE id = ?", (h.state.run_id,))
+    with pytest.raises(PersistenceError, match="retained champion score provenance is invalid"):
+        champion_provenance(conn, h.state)
+
+
+@pytest.mark.asyncio
+async def test_publish_retained_report_copies_plots_and_rejects_changed_report(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await persistence_harness(migrated_db, project, tmp_path)
+    parent = h.runtime.paths
+    child = RunPaths(parent.data_dir, parent.slug, new_id("r"))
+    ensure_run_layout(child)
+    ref = sorted(h.state.retained_refs)[0]
+    (parent.artifacts / f"{ref}.png").write_bytes(b"png bytes")
+    await publish_retained_report(parent, child, h.state)
+    assert (child.report / "report.md").read_bytes() == (parent.report / "report.md").read_bytes()
+    assert (child.report / "plots" / f"{ref}.png").read_bytes() == b"png bytes"
+    (parent.report / "report.md").write_bytes(b"# changed\n")
+    with pytest.raises(
+        PersistenceError, match="retained report hash disagrees with committed champion"
+    ):
+        await publish_retained_report(parent, child, h.state)

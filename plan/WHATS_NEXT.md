@@ -6,9 +6,11 @@ then active spec and named [PLAN](./PLAN.md) decisions. Do not read archives at 
 
 ## State
 
-**37 of 41 chunks implemented, plus revisions 09r and 20r. B14 reviewed with static-only acceptance 2026-10-05.**
-B9–B14 runtime/coverage acceptance is outstanding under the user's test stop; B8 remains the last
-batch with full behavioral/coverage acceptance. [B9 receipt](./receipts/B9.md),
+**37 of 41 chunks implemented, plus revisions 09r and 20r. B9–B14 offline runtime/coverage
+accepted 2026-10-07: `make check` exit 0, 3006 passed, 1 designed skip, 100% line/branch.**
+See [offline receipt](./receipts/B9-B14-offline.md) and [offline validation plan](./offline_runtime_validation.md).
+Next validation step: the paid ONLINE runtime run (needs explicit user go-ahead and API credits).
+Browser smoke (M12) remains deferred. Earlier static-only receipts: [B9 receipt](./receipts/B9.md),
 [B10 receipt](./receipts/B10.md), [B11 receipt](./receipts/B11.md), [B12 receipt](./receipts/B12.md)
 and [B13 receipt](./receipts/B13.md), [B14 receipt](./receipts/B14.md)
 record this limit. B9 committed at `31bdf67`.
@@ -41,8 +43,9 @@ Keep dependent stages sequential. Main owns all design decisions, detailed per-f
 review and acceptance; main writes no code. Delegate only implementation-ready plans to the Luna/low
 `implementer`. Missing decisions/failures return to main for a resolved correction plan. No Sol workers
 or model escalation. Follow [role and plan requirements](../AGENTS.md#roles-plannerreviewer-and-mechanical-implementer).
-User authorizes automatic local commits after finished work; never push. Runtime tests remain
-stopped by user; use focused statics and one final global static gate, disclose runtime gaps.
+User authorizes automatic local commits after finished work; never push. The earlier test stop
+was lifted for offline runtime validation, now complete (2026-10-07). Paid online runs need a
+fresh explicit user authorization. B15 stays unstarted.
 
 ## Accepted seams and next-stage hazards
 

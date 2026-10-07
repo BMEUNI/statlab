@@ -25,8 +25,10 @@ from statlab.graph import (
     TraversalPlan,
 )
 from statlab.graph.state import BoundaryResult
+from statlab.persistence.db import transaction
 from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import get_run, list_node_executions
+from statlab.storage import validate_checkpoint_ownership
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.contract import Constraints, DataContract
 from statlab_contracts.envelope import Failure
@@ -323,9 +325,17 @@ async def test_initial_cap_and_invalid_traversal_have_no_side_effects(world: Wor
     runner = loop(world, nodes, execute, constraints=Constraints(max_candidates=2))
     with pytest.raises(EngineError, match="max_candidates"):
         await runner.run(initial(world, nodes))
+    assert not world.paths.state_json.exists()
+    assert not list_node_executions(world.conn, world.paths.run_id)
+    assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
+    assert await runner.events.replay() == ()
     runner = loop(world, nodes, execute, traversal=TraversalPlan(overlap_shared="compare"))
     with pytest.raises(EngineError, match="overlap"):
         await runner.run(initial(world, nodes))
+    assert not world.paths.state_json.exists()
+    assert not list_node_executions(world.conn, world.paths.run_id)
+    assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
+    assert await runner.events.replay() == ()
     runner = loop(world, nodes, execute)
     without_baseline = RunState.initial(
         run_id=world.paths.run_id,
@@ -338,6 +348,8 @@ async def test_initial_cap_and_invalid_traversal_have_no_side_effects(world: Wor
         await runner.run(without_baseline)
     assert not world.paths.state_json.exists()
     assert not list_node_executions(world.conn, world.paths.run_id)
+    assert world.conn.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
+    assert await runner.events.replay() == ()
 
 
 @pytest.mark.asyncio
@@ -572,7 +584,9 @@ async def test_restart_refuses_changed_traversal(world: World) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["tool", "llm", "unexpected", "skip"])
-async def test_fanout_executor_failure_boundary(world: World, failure: str) -> None:
+async def test_fanout_executor_failure_boundary(
+    world: World, failure: str, caplog: pytest.LogCaptureFixture
+) -> None:
     nodes = (node("fit", candidate=True), node("tail"))
     detail = Failure(error_class="data", message="Candidate failed safely")
 
@@ -602,6 +616,8 @@ async def test_fanout_executor_failure_boundary(world: World, failure: str) -> N
         else detail
     )
     assert (runner.last_error is not None) == (failure == "unexpected")
+    assert ("executor failed with ValueError" in caplog.text) == (failure == "unexpected")
+    assert "private diagnostic" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -741,6 +757,11 @@ async def test_repeated_design_halt_reload_and_reconcile(
             event for event in await recovering.events.replay() if event.type == "gate.opened"
         ]
         assert len(opened) == 1 and opened[0].payload["gate_id"] == "wave2"
+    anchor = await recovering.ensure_audit_anchor(start)
+    if outcome == "awaiting_user":
+        assert anchor.id == state.pending_result.execution_id
+    else:
+        assert anchor.id == executions[-1].id
 
 
 @pytest.mark.asyncio
@@ -988,3 +1009,23 @@ async def test_initial_stop_before_prefix_never_calls_planner(world: World) -> N
     runner.candidate_planner = planner
     result = await runner.run(initial(world, nodes, 0))
     assert result.status == "cancelled" and not result.branches
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_candidate_spec_tamper_is_rejected(world: World) -> None:
+    nodes = (node("fit", candidate=True),)
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        return NodeResult(status="completed")
+
+    state = await loop(world, nodes, execute, traversal=TraversalPlan()).run(
+        initial(world, nodes, 1)
+    )
+    assert state.status == "completed"
+    validate_checkpoint_ownership(world.conn, state.run_id, state)
+    with transaction(world.conn):
+        world.conn.execute(
+            "UPDATE candidates SET spec_json = '{}' WHERE run_id = ?", (state.run_id,)
+        )
+    with pytest.raises(PersistenceError, match="checkpoint candidate ownership mismatch"):
+        validate_checkpoint_ownership(world.conn, state.run_id, state)

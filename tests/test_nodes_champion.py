@@ -14,12 +14,11 @@ import pytest
 from pydantic import JsonValue
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_models import CandidateModelExecutor
-from statlab.domains.candidate_pipeline import pipeline_from_state
-from statlab.domains.champion import ChampionExecutor, eligible_candidates
+from statlab.domains.candidate_pipeline import candidate_result, pipeline_from_state
+from statlab.domains.champion import ChampionExecutor, champion_audits, eligible_candidates
 from statlab.domains.decisions import ChampionChoice, PipelineState
-from statlab.domains.foundation import _ref
 from statlab.domains.tabular import TABULAR_SPINE
-from statlab.errors import EngineError
+from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
 from statlab.llm.skills import NodeSkill, SkillPolicy
@@ -29,12 +28,15 @@ from statlab.persistence.repository import (
     claim_test_scoring,
     create_node_execution,
     ensure_candidate,
+    finish_node_execution,
+    next_node_attempt,
     record_tool_call,
+    save_champion_model,
 )
-from statlab.storage import create_artifact, get_artifact
+from statlab.storage import create_artifact
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
-from statlab_contracts.envelope import ToolSuccess
+from statlab_contracts.envelope import Failure, ToolFailure, ToolSuccess
 from statlab_contracts.vocabulary import TargetType
 
 from tests.test_nodes_candidate_pipeline import (
@@ -44,7 +46,7 @@ from tests.test_nodes_candidate_pipeline import (
     prepare_candidate,
     save_result,
 )
-from tests.test_nodes_foundation import TEST, Harness
+from tests.test_nodes_foundation import Harness
 
 
 class ChampionTools(CandidateTools):
@@ -54,6 +56,7 @@ class ChampionTools(CandidateTools):
         self.interrupt_score = False
         self.interrupt_report = False
         self.interrupt_select = False
+        self.manifest_text: str | None = None
 
     def result(self, kind: ArtifactKind, summary: dict[str, JsonValue]) -> ToolSuccess:
         return ToolSuccess(summary=summary, artifacts=(self.artifact(kind),))
@@ -70,6 +73,8 @@ class ChampionTools(CandidateTools):
         assert tool in ctx.allowed and repair is None
         sent = {**params, **(trusted or {})}
         self.calls.append((ctx, tool, sent.copy()))
+        if tool == self.failure_tool:
+            raise ToolCallError(tool, Failure(error_class="data", message="champion tool refused"))
         if tool in ("score_regression", "score_classification"):
             assert ctx.champion_selected
             assert claim_test_scoring(self.conn, ctx.paths.run_id)
@@ -117,7 +122,11 @@ class ChampionTools(CandidateTools):
                 summary={"sha256": hashlib.sha256(ctx.paths.pipeline_py.read_bytes()).hexdigest()}
             )
         elif tool == "snapshot_run":
-            ctx.paths.manifest_json.write_text(json.dumps({"run_hash": "h" * 64, "files": []}))
+            ctx.paths.manifest_json.write_text(
+                self.manifest_text
+                if self.manifest_text is not None
+                else json.dumps({"run_hash": "h" * 64, "files": []})
+            )
             output = ToolSuccess(summary={"run_hash": "h" * 64})
         else:
             raise AssertionError(tool)
@@ -157,9 +166,50 @@ class ChampionTools(CandidateTools):
 def tail_invocation(h: Harness, index: int = 11) -> NodeInvocation:
     spec = TABULAR_SPINE[index]
     execution = create_node_execution(
-        h.runtime.conn, run_id=h.state.run_id, node_name=spec.name, seq=index + 1
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        node_name=spec.name,
+        seq=index + 1,
+        attempt=next_node_attempt(
+            h.runtime.conn,
+            run_id=h.state.run_id,
+            node_name=spec.name,
+            candidate_id=None,
+        ),
     )
     return NodeInvocation(h.state, spec, execution, None)
+
+
+def _persist_fixture_call(
+    h: Harness,
+    execution_id: str,
+    tool: str,
+    arguments: dict[str, JsonValue],
+    output: ToolSuccess,
+) -> None:
+    for meta in output.artifacts:
+        path = h.runtime.paths.artifact(meta.ref, meta.kind)
+        path.write_bytes(b"frozen fitted model" if meta.kind == "model" else b"offline artifact")
+        create_artifact(
+            h.runtime.conn,
+            ref=meta.ref,
+            run_id=h.state.run_id,
+            kind=meta.kind,
+            path=path,
+            meta=meta,
+            produced_by=tool,
+            split=meta.split,
+            derived_from_test=meta.split == "test",
+        )
+    record_tool_call(
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        node_execution_id=execution_id,
+        tool_name=tool,
+        args_json=json.dumps(arguments),
+        result_json=output.model_dump_json(),
+        duration_ms=1,
+    )
 
 
 async def champion_harness(
@@ -169,12 +219,53 @@ async def champion_harness(
     *,
     target_type: TargetType = "continuous",
 ) -> tuple[Harness, ChampionTools]:
-    h, _ = await candidate_harness(conn, project, root, target_type=target_type)
+    h, candidate_tools = await candidate_harness(conn, project, root, target_type=target_type)
+    shared: list[BoundaryResult] = []
+    mapped: dict[str, str] = {}
+    audited: list[tuple[str, ToolSuccess]] = []
+    for index, boundary in enumerate(h.state.shared_results):
+        assert boundary.node_name == TABULAR_SPINE[index].name
+        execution = create_node_execution(
+            conn,
+            run_id=h.state.run_id,
+            node_name=boundary.node_name,
+            seq=index + 1,
+            candidate_id=None,
+            attempt=next_node_attempt(
+                conn, run_id=h.state.run_id, node_name=boundary.node_name, candidate_id=None
+            ),
+        )
+        finish_node_execution(conn, execution.id, boundary.result)
+        mapped[boundary.execution_id] = execution.id
+        shared.append(
+            BoundaryResult(
+                node_name=boundary.node_name, execution_id=execution.id, result=boundary.result
+            )
+        )
+        entries = boundary.result.summary.get("tools", [])
+        assert isinstance(entries, list)
+        for entry in entries:
+            assert isinstance(entry, dict)
+            tool_name = entry["tool"]
+            stored = entry["result"]
+            assert isinstance(tool_name, str) and isinstance(stored, dict)
+            audited.append((tool_name, ToolSuccess.model_validate(stored)))
+    for (ctx, tool, arguments), (audit_tool, shared_output) in zip(
+        h.tools.calls, audited, strict=True
+    ):
+        assert tool == audit_tool
+        _persist_fixture_call(h, mapped[ctx.node_execution_id], tool, arguments, shared_output)
+    h.state = h.state.model_copy(update={"shared_results": tuple(shared)})
     await prepare_candidate(h)
     for index in (8, 9, 10):
         invocation = candidate_invocation(h, index)
         output = await CandidateModelExecutor(h.runtime)(invocation)
         save_result(h, invocation, output)
+    for (ctx, tool, arguments), (output_tool, tool_output) in zip(
+        candidate_tools.calls, candidate_tools.outputs, strict=True
+    ):
+        assert tool == output_tool
+        _persist_fixture_call(h, ctx.node_execution_id, tool, arguments, tool_output)
     original = h.state.branches[0]
     first = CandidateProgress(
         public_id=original.public_id,
@@ -190,6 +281,9 @@ async def champion_harness(
         features=first.spec.features,
         estimator=EstimatorSpec(name=first.spec.estimator.name, params={"fit_intercept": False}),
     )
+    second_progress = CandidateProgress(public_id="c_02", spec=spec)
+    second_id = second_progress.database_id(h.state.run_id)
+    ensure_candidate(conn, candidate_id=second_id, run_id=h.state.run_id, spec=spec)
     second_results: list[BoundaryResult] = []
     for boundary in first.results:
         summary = dict(boundary.result.summary)
@@ -202,22 +296,27 @@ async def champion_harness(
                 feature_manifest=pipeline.feature_manifest,
                 methodology=spec,
             ).model_dump(mode="json")
+        result = NodeResult(
+            status=boundary.result.status,
+            summary=summary,
+            skip_reason=boundary.result.skip_reason,
+        )
+        copied = create_node_execution(
+            conn,
+            run_id=h.state.run_id,
+            node_name=boundary.node_name,
+            seq=1 + [node.name for node in TABULAR_SPINE].index(boundary.node_name),
+            candidate_id=second_id,
+            attempt=next_node_attempt(
+                conn, run_id=h.state.run_id, node_name=boundary.node_name, candidate_id=second_id
+            ),
+        )
+        finish_node_execution(conn, copied.id, result)
         second_results.append(
-            BoundaryResult(
-                node_name=boundary.node_name,
-                execution_id=boundary.execution_id,
-                result=NodeResult(
-                    status=boundary.result.status,
-                    summary=summary,
-                    skip_reason=boundary.result.skip_reason,
-                ),
-            )
+            BoundaryResult(node_name=boundary.node_name, execution_id=copied.id, result=result)
         )
     second = CandidateProgress(
         public_id="c_02", spec=spec, results=tuple(second_results), position=11, status="completed"
-    )
-    ensure_candidate(
-        conn, candidate_id=second.database_id(h.state.run_id), run_id=h.state.run_id, spec=spec
     )
     h.state = RunState(
         run_id=h.state.run_id,
@@ -229,45 +328,6 @@ async def champion_harness(
         branches=(first, second),
         shared_results=h.state.shared_results,
     )
-    # Persist the actual trained artifact/audit the production repository resolves.
-    training = next(
-        boundary for boundary in first.results if boundary.node_name == "model_training"
-    )
-    ref = _ref(training.result.summary, "model")
-    path = h.runtime.paths.artifact(ref, "model")
-    path.write_bytes(b"frozen fitted model")
-    create_artifact(
-        conn,
-        ref=ref,
-        run_id=h.state.run_id,
-        kind="model",
-        path=path,
-        meta=ArtifactMeta(ref=ref, kind="model"),
-        produced_by="train_estimator",
-    )
-    record_tool_call(
-        conn,
-        run_id=h.state.run_id,
-        node_execution_id=training.execution_id,
-        tool_name="train_estimator",
-        args_json="{}",
-        result_json=ToolSuccess(artifacts=(ArtifactMeta(ref=ref, kind="model"),)).model_dump_json(),
-        duration_ms=1,
-    )
-    if get_artifact(conn, str(TEST)) is None:
-        test_path = h.runtime.paths.artifact(TEST, "dataframe")
-        test_path.write_bytes(b"held-out frame")
-        create_artifact(
-            conn,
-            ref=TEST,
-            run_id=h.state.run_id,
-            kind="dataframe",
-            path=test_path,
-            meta=ArtifactMeta(ref=TEST, kind="dataframe", split="test"),
-            produced_by="split_random",
-            split="test",
-            derived_from_test=True,
-        )
     tools = ChampionTools(conn)
     tools.counter = 1000
     names = frozenset(
@@ -443,6 +503,12 @@ async def test_latest_retune_model_threshold_and_repository_exposure_are_reporte
         run_id=h.state.run_id,
         node_name="model_training",
         seq=9,
+        attempt=next_node_attempt(
+            migrated_db,
+            run_id=h.state.run_id,
+            node_name="model_training",
+            candidate_id=first.database_id(h.state.run_id),
+        ),
         candidate_id=first.database_id(h.state.run_id),
     )
     path = h.runtime.paths.artifact(latest_model, "model")
@@ -549,3 +615,268 @@ async def test_latest_retune_model_threshold_and_repository_exposure_are_reporte
     assert report["coefficient_table"] == str(coefficient)
     assert report["prior_test_scorings"] == 1 and report["n_waves"] == 2
     assert "c_01=1" in str(report["sections"])
+
+
+def _failed(output: NodeResult, message: str) -> None:
+    assert output.status == "failed"
+    assert output.error is not None
+    assert output.error.message == message
+
+
+async def _run_champion(h: Harness) -> NodeResult:
+    return await ChampionExecutor(h.runtime)(tail_invocation(h))
+
+
+@pytest.mark.asyncio
+async def test_champion_audit_skips_failures_and_malformed_rows_fail_closed(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await champion_harness(migrated_db, project, tmp_path)
+    inv = tail_invocation(h)
+    record_tool_call(
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        node_execution_id=inv.execution.id,
+        tool_name="compare_models",
+        args_json=json.dumps({}),
+        result_json=ToolFailure(error_class="data", message="refused").model_dump_json(),
+        duration_ms=1,
+    )
+    assert champion_audits(h.runtime) == ()
+    record_tool_call(
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        node_execution_id=inv.execution.id,
+        tool_name="compare_models",
+        args_json=json.dumps({}),
+        result_json="not json",
+        duration_ms=1,
+    )
+    with pytest.raises(PersistenceError, match="cannot recover champion audit"):
+        champion_audits(h.runtime)
+    with pytest.raises(EngineError, match="champion persistence failed"):
+        await _run_champion(h)
+
+
+@pytest.mark.asyncio
+async def test_eligibility_requires_join_and_excludes_unsuccessful_branches(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await champion_harness(migrated_db, project, tmp_path)
+    second = h.state.branches[1]
+    for status in ("running", "failed"):
+        if status == "running":
+            rebuilt = CandidateProgress(
+                public_id=second.public_id,
+                spec=second.spec,
+                results=second.results,
+                position=second.position,
+                status="running",
+            )
+        else:
+            assert [r.node_name for r in second.results[:4]] == [
+                "preprocessing",
+                "feature_engineering",
+                "model_training",
+                "model_evaluation",
+            ]
+            rebuilt = CandidateProgress(
+                public_id=second.public_id,
+                spec=second.spec,
+                results=second.results[:4],
+                position=10,
+                status="failed",
+                pending_result=BoundaryResult(
+                    node_name="model_interpretation",
+                    execution_id="failed-interpretation",
+                    result=NodeResult(
+                        status="failed",
+                        error=Failure(error_class="data", message="interpretation refused"),
+                    ),
+                ),
+            )
+        state = RunState.model_validate(
+            {
+                **h.state.model_dump(mode="json"),
+                **({"cursor": 6} if status == "running" else {}),
+                "branches": [
+                    h.state.branches[0].model_dump(mode="json"),
+                    rebuilt.model_dump(mode="json"),
+                ],
+            }
+        )
+        if status == "running":
+            with pytest.raises(EngineError, match="champion selection requires joined candidates"):
+                eligible_candidates(state)
+        else:
+            survivors, excluded = eligible_candidates(state)
+            assert survivors == (h.state.branches[0],)
+            assert excluded == {"c_02": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_champion_tool_failure_is_structured(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    tools.failure_tool = "compare_models"
+    output = await _run_champion(h)
+    _failed(output, "champion tool refused")
+    assert output.artifacts == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["duplicate", "malformed", "disagree", "ranking", "comparison"])
+async def test_interrupted_selection_audits_must_be_unique_and_consistent(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path, case: str
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    conn = h.runtime.conn
+    tools.interrupt_select = True
+    with pytest.raises(asyncio.CancelledError):
+        await _run_champion(h)
+    tools.interrupt_select = False
+    inv = tail_invocation(h)
+    row = conn.execute("SELECT * FROM tool_calls WHERE tool_name = 'select_champion'").fetchone()
+    args = json.loads(row["args_json"])
+
+    def record(args_json: str, result_json: str) -> None:
+        record_tool_call(
+            conn,
+            run_id=h.state.run_id,
+            node_execution_id=inv.execution.id,
+            tool_name="select_champion",
+            args_json=args_json,
+            result_json=result_json,
+            duration_ms=1,
+        )
+
+    if case == "duplicate":
+        record(row["args_json"], row["result_json"])
+        _failed(await _run_champion(h), "interrupted selection has multiple successful audits")
+    elif case == "comparison":
+        conn.execute(
+            "DELETE FROM tool_calls WHERE tool_name = 'compare_models' "
+            "AND node_execution_id IN (SELECT id FROM node_executions "
+            "WHERE node_name = 'champion_selection')"
+        )
+        _failed(
+            await _run_champion(h),
+            "interrupted selection disagrees with latest validation evidence",
+        )
+    else:
+        conn.execute("DELETE FROM tool_calls WHERE id = ?", (row["id"],))
+        success = ToolSuccess.model_validate_json(row["result_json"])
+        if case == "malformed":
+            record(json.dumps({**args, "candidate": 1}), row["result_json"])
+            with pytest.raises(EngineError, match="malformed successful selection audit"):
+                await _run_champion(h)
+        elif case == "disagree":
+            record(
+                json.dumps(args),
+                ToolSuccess(
+                    summary={"candidate": "c_02"}, artifacts=success.artifacts
+                ).model_dump_json(),
+            )
+            with pytest.raises(EngineError, match="disagrees with its choice"):
+                await _run_champion(h)
+        else:
+            record(json.dumps({**args, "ranking": "a_00000000000000aa"}), row["result_json"])
+            _failed(
+                await _run_champion(h),
+                "interrupted selection lacks matching validation ranking audit",
+            )
+
+
+@pytest.mark.asyncio
+async def test_claimed_or_pointed_run_without_selection_audit_refuses(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    claim_test_scoring(h.runtime.conn, h.state.run_id)
+    _failed(await _run_champion(h), "interrupted champion has no successful selection audit")
+    assert not any(name == "compare_models" for _, name, _ in tools.calls)
+
+
+@pytest.mark.asyncio
+async def test_durable_pointer_must_match_frozen_choice(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    h.llm.responses[ChampionChoice] = ChampionChoice(candidate_id="c_02", rationale="Second branch")
+    tools.interrupt_select = True
+    with pytest.raises(asyncio.CancelledError):
+        await _run_champion(h)
+    tools.interrupt_select = False
+    first = h.state.branches[0]
+    save_champion_model(
+        h.runtime.conn,
+        run_id=h.state.run_id,
+        candidate_id=first.database_id(h.state.run_id),
+        artifact_id=str(candidate_result(first, "model_training").summary["model"]),
+        name=first.spec.estimator.name,
+        parameters={"fit_intercept": False},
+    )
+    _failed(await _run_champion(h), "durable champion disagrees with frozen latest model")
+
+
+@pytest.mark.asyncio
+async def test_missing_test_fingerprint_fails_after_score(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await champion_harness(migrated_db, project, tmp_path)
+    h.runtime.conn.execute(
+        "UPDATE runs SET test_fingerprint = NULL WHERE id = ?", (h.state.run_id,)
+    )
+    with pytest.raises(EngineError, match="champion test fingerprint is missing"):
+        await _run_champion(h)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        (
+            "DELETE FROM tool_calls WHERE tool_name = 'predict' "
+            "AND node_execution_id IN (SELECT id FROM node_executions "
+            "WHERE node_name = 'champion_selection')",
+            "interrupted score lacks frozen prediction audit",
+        ),
+        (
+            "DELETE FROM tool_calls WHERE tool_name = 'apply_scaler' "
+            "AND node_execution_id IN (SELECT id FROM node_executions "
+            "WHERE node_name = 'champion_selection')",
+            "interrupted score lacks frozen replay audit",
+        ),
+        (
+            "UPDATE tool_calls SET args_json = json_set(args_json, '$.frame', "
+            "'a_00000000000000bb') WHERE tool_name = 'drop_columns' "
+            "AND node_execution_id IN (SELECT id FROM node_executions "
+            "WHERE node_name = 'champion_selection')",
+            "interrupted score replay does not start at shared test",
+        ),
+        (
+            "UPDATE tool_calls SET args_json = json_set(args_json, '$.target', 'not_target') "
+            "WHERE tool_name = 'score_regression' "
+            "AND node_execution_id IN (SELECT id FROM node_executions "
+            "WHERE node_name = 'champion_selection')",
+            "test scoring interrupted: successful audit does not match frozen champion",
+        ),
+    ],
+)
+async def test_recovered_score_requires_frozen_audit_chain(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+    statement: str,
+    message: str,
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    replay = [step.tool for step in pipeline_from_state(h.state, h.state.branches[0]).replay]
+    assert "apply_scaler" in replay and "drop_columns" in replay
+    tools.interrupt_report = True
+    with pytest.raises(asyncio.CancelledError):
+        await _run_champion(h)
+    tools.interrupt_report = False
+    assert h.runtime.conn.execute(statement).rowcount >= 1
+    _failed(await _run_champion(h), message)

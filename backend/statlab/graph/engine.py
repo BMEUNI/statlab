@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -14,7 +15,13 @@ from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, Failure
 
 from statlab.config import Settings
 from statlab.domains.base import NodeResult, NodeSpec
-from statlab.errors import EngineError, LlmCallError, PersistenceError, ToolCallError
+from statlab.errors import (
+    EngineError,
+    LlmCallError,
+    PersistenceError,
+    ToolCallError,
+    traceback_frames,
+)
 from statlab.events import EventBus
 from statlab.graph.candidates import (
     BoundaryStopError,
@@ -40,6 +47,8 @@ from statlab.persistence.repository import (
     update_run_status,
 )
 from statlab.storage import get_artifact, prune_intermediates
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RunTracker:
@@ -310,10 +319,10 @@ class RunLoop:
         if row is None:
             raise PersistenceError("run does not exist")
         state = await self.load_state(initial, row)
-        self.checkpointer.save(state)
         if row.status not in ("pending", "running") and state.status in ("pending", "running"):
             raise EngineError("SQL run status refuses execution")
         if state.status not in ("pending", "running"):
+            self.checkpointer.save(state)
             return state
         requested = self.control.status
         if requested is not None:
@@ -325,6 +334,7 @@ class RunLoop:
             return state
         if state.traversal is not None or self._fanout_enabled or len(state.branches) > 1:
             return await self._fanout(state)
+        self.checkpointer.save(state)
         if state.candidate is not None:
             ensure_candidate(
                 self.conn,
@@ -385,6 +395,12 @@ class RunLoop:
                 result = NodeResult(status="failed", error=exc.failure)
             except Exception as exc:
                 self.last_error = EngineError("node executor failed", cause=exc)
+                _LOGGER.error(
+                    "Node %s executor failed with %s\n%s",
+                    spec.name,
+                    type(exc).__name__,
+                    traceback_frames(exc),
+                )
                 result = NodeResult(
                     status="failed",
                     error=Failure(error_class="bug", message="Node execution failed"),
@@ -531,6 +547,12 @@ class RunLoop:
             result = NodeResult(status="failed", error=exc.failure)
         except Exception as exc:
             self.last_error = EngineError("node executor failed", cause=exc)
+            _LOGGER.error(
+                "Node %s executor failed with %s\n%s",
+                spec.name,
+                type(exc).__name__,
+                traceback_frames(exc),
+            )
             result = NodeResult(
                 status="failed", error=Failure(error_class="bug", message="Node execution failed")
             )
@@ -689,6 +711,7 @@ class RunLoop:
             CandidateSet(candidates=tuple(branch.spec for branch in state.branches))
         if start < end and not state.branches and self.candidate_planner is None:
             raise EngineError("per-candidate node requires a candidate")
+        self.checkpointer.save(state)
         for branch in state.branches:
             ensure_candidate(
                 self.conn,

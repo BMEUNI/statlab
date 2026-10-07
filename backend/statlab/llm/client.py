@@ -8,9 +8,9 @@ import logging
 import math
 import os
 import sqlite3
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from time import monotonic
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from pydantic import BaseModel, JsonValue, ValidationError
 from pydantic_core import from_json
@@ -51,13 +51,6 @@ _TRANSIENT_ERRORS = (
 )
 
 type ProseSink = Callable[[str, bool], Awaitable[None]]
-
-
-@runtime_checkable
-class _ProseStream(Protocol):
-    def __aiter__(self) -> AsyncIterator[ModelResponseStream]: ...
-
-    def aclose(self) -> Awaitable[None]: ...
 
 
 class CallRecovery(Protocol):
@@ -408,7 +401,8 @@ def _partial_text(content: str) -> str | None:
 async def _consume_prose(
     raw: object, *, sink: ProseSink, messages: list[dict[str, str]], model: str
 ) -> ModelResponse:
-    if not isinstance(raw, _ProseStream):
+    aclose = getattr(raw, "aclose", None)
+    if not isinstance(raw, AsyncIterable) or not callable(aclose):
         raise LlmCallError(Failure(error_class="bug", message="LLM returned a malformed stream"))
     chunks: list[ModelResponseStream] = []
     content = ""
@@ -481,7 +475,7 @@ async def _consume_prose(
             )
         return response
     finally:
-        await raw.aclose()
+        await aclose()
 
 
 def _capability_tier(model: str) -> str:

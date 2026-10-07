@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 from statlab.domains.base import NodeResult
-from statlab.errors import EngineError
-from statlab.graph.candidates import RunControl, TraversalPlan
+from statlab.errors import EngineError, PersistenceError
+from statlab.graph.candidates import BoundaryStopError, RunControl, TraversalPlan
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.lifecycle import RunLifecycle
-from statlab.persistence.repository import get_run, list_node_executions
+from statlab.graph.router import InterruptClass
+from statlab.graph.state import BoundaryResult, RunState
+from statlab.persistence.repository import (
+    create_node_execution,
+    get_run,
+    list_node_executions,
+)
+from statlab_contracts.candidate import CandidateSpec
+from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import Failure
 
 from tests.test_candidate_fanout import initial as fanout_initial
 from tests.test_candidate_fanout import loop as fanout_loop
+from tests.test_candidate_fanout import specs
+from tests.test_control_router import FakeClient, context
 from tests.test_graph_engine import World, artifact, complete, log_outputs
 from tests.test_graph_engine import engine_world as engine_world
 from tests.test_graph_state import node
@@ -227,3 +238,190 @@ async def test_paused_failed_candidates_anchor_real_halted_execution(engine_worl
     assert paused.status == "paused" and anchor.status == "failed"
     assert anchor.node_name == "fit" and anchor.run_id == paused.run_id
     assert len(list_node_executions(engine_world.conn, paused.run_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_run_and_unexecuted_terminal_run_reject_anchor(
+    engine_world: World,
+) -> None:
+    nodes = (node(),)
+    service = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    missing = service.initial.model_copy(update={"run_id": "r_missing"})
+    with pytest.raises(PersistenceError, match="run does not exist"):
+        await service.loop.ensure_audit_anchor(missing)
+    with pytest.raises(PersistenceError, match="run does not exist"):
+        await RunLifecycle(service.loop, missing).state()
+    await service.cancel()
+    with pytest.raises(EngineError, match="run cannot start from this status"):
+        await service.start()
+    with pytest.raises(EngineError, match="run has no declared execution for control audit"):
+        await service.audit_anchor()
+
+
+@pytest.mark.asyncio
+async def test_anchor_after_joined_candidates_uses_last_execution(engine_world: World) -> None:
+    nodes = (node("fit", candidate=True),)
+    loop = fanout_loop(engine_world, nodes, complete, traversal=TraversalPlan())
+    service = RunLifecycle(loop, fanout_initial(engine_world, nodes, count=2))
+    done = await service.start()
+    assert done.status == "completed"
+    loop.checkpointer.save(RunState.model_validate({**done.model_dump(), "status": "paused"}))
+    anchor = await service.audit_anchor()
+    assert anchor.id == list_node_executions(engine_world.conn, done.run_id)[-1].id
+    engine_world.conn.execute("DELETE FROM node_executions WHERE run_id = ?", (done.run_id,))
+    with pytest.raises(EngineError, match="run has no declared execution for control audit"):
+        await service.audit_anchor()
+
+
+@pytest.mark.asyncio
+async def test_candidate_node_anchor_requires_a_branch(engine_world: World) -> None:
+    nodes = (node("fit", candidate=True),)
+    loop = fanout_loop(engine_world, nodes, complete, traversal=TraversalPlan())
+    service = RunLifecycle(loop, fanout_initial(engine_world, nodes, count=0))
+    with pytest.raises(EngineError, match="control anchor requires current candidate"):
+        await service.audit_anchor()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["duplicate", "foreign"])
+async def test_anchor_rejects_duplicate_and_foreign_pending_executions(
+    engine_world: World, case: str
+) -> None:
+    nodes = (node(),)
+    loop = engine_world.loop(nodes, complete)
+    if case == "duplicate":
+        loop.checkpointer.save(engine_world.initial(nodes))
+        for attempt in (1, 2):
+            create_node_execution(
+                engine_world.conn,
+                run_id=engine_world.paths.run_id,
+                node_name="alpha",
+                seq=1,
+                attempt=attempt,
+                status="pending",
+            )
+        message = "duplicate active execution anchors"
+    else:
+        loop.checkpointer.save(
+            RunState.model_validate(
+                {
+                    **engine_world.initial(nodes).model_dump(),
+                    "status": "awaiting_user",
+                    "pending_result": BoundaryResult(
+                        node_name="alpha",
+                        execution_id="ne_foreign",
+                        result=NodeResult(status="awaiting_user"),
+                    ).model_dump(),
+                }
+            )
+        )
+        message = "control audit requires a same-run pending execution"
+    with pytest.raises(PersistenceError, match=message):
+        await RunLifecycle(loop, engine_world.initial(nodes)).audit_anchor()
+
+
+@pytest.mark.asyncio
+async def test_shared_budget_stop_becomes_failed_boundary(engine_world: World) -> None:
+    async def work(invocation: NodeInvocation) -> NodeResult:
+        raise BoundaryStopError("budget_exhausted")
+
+    nodes = (node(),)
+    state = await RunLifecycle(engine_world.loop(nodes, work), engine_world.initial(nodes)).start()
+    assert state.status == "failed"
+    assert state.pending_result is not None
+    assert state.pending_result.result.error == Failure(
+        error_class="data", message="Fit budget exhausted"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["cancel", "resume", "none", "binding"])
+async def test_lifecycle_callback_actions_and_binding(
+    engine_world: World, minimal_contract: DataContract, action: str
+) -> None:
+    nodes = (node(),)
+    service = RunLifecycle(engine_world.loop(nodes, complete), engine_world.initial(nodes))
+    ctx = context(engine_world.conn, minimal_contract, FakeClient())
+    if action != "binding":
+        ctx = dataclasses.replace(ctx, state=service.initial)
+    if action == "cancel":
+        response = await service.handle(
+            "stop", InterruptClass(category="lifecycle", lifecycle_action="cancel"), ctx
+        )
+        assert response.text == "Run cancelled."
+    elif action == "resume":
+        await service.pause()
+        response = await service.handle(
+            "go", InterruptClass(category="lifecycle", lifecycle_action="resume"), ctx
+        )
+        assert response.text == "Run completed."
+    elif action == "none":
+        with pytest.raises(EngineError, match="lifecycle callback requires an action"):
+            await service.handle("hm", InterruptClass(category="qa"), ctx)
+    else:
+        with pytest.raises(EngineError, match="lifecycle control binding mismatch"):
+            await service.handle(
+                "stop", InterruptClass(category="lifecycle", lifecycle_action="cancel"), ctx
+            )
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_running_and_pause_rejects_vanished_request(
+    engine_world: World,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def work(invocation: NodeInvocation) -> NodeResult:
+        entered.set()
+        await release.wait()
+        return NodeResult(status="completed")
+
+    nodes = (node(),)
+    service = RunLifecycle(engine_world.loop(nodes, work), engine_world.initial(nodes))
+    running = asyncio.create_task(service.start())
+    await entered.wait()
+    with pytest.raises(EngineError, match="run is already executing"):
+        await service.resume()
+    pausing = asyncio.create_task(service.pause())
+    await asyncio.sleep(0)
+    service.loop.control.resume()
+    release.set()
+    with pytest.raises(EngineError, match="lifecycle request disappeared before drain"):
+        await pausing
+    assert (await running).status == "completed"
+    control = RunControl()
+    control.request_cancel()
+    with pytest.raises(EngineError, match="cancelled control cannot resume"):
+        control.resume()
+
+
+@pytest.mark.asyncio
+async def test_anchor_after_all_candidates_failed_uses_failed_branch(
+    engine_world: World,
+) -> None:
+    nodes = (node("design"), node("fit", candidate=True))
+    control = RunControl()
+    loop = fanout_loop(
+        engine_world,
+        nodes,
+        complete,
+        traversal=TraversalPlan(design_node="design"),
+        control=control,
+    )
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        del state
+        if wave == 1:
+            return specs(1)
+        control.request_pause()
+        return specs(1, offset=1)
+
+    loop.candidate_planner = planner
+    service = RunLifecycle(loop, fanout_initial(engine_world, nodes, count=0))
+    state = await service.start()
+    assert state.status == "paused"
+    assert state.cursor == 1
+    assert [b.status for b in state.branches] == ["completed"]
+    anchor = await service.audit_anchor()
+    assert anchor.node_name == "fit"
+    assert anchor.status == "completed"

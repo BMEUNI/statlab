@@ -40,13 +40,10 @@ def create_app(
     mcp_session: object | None = None,
     llm_client: LlmClient | None = None,
 ) -> FastAPI:
-    active_resources: APIResources | None = None
     active_registry: RunRegistry | None = None
 
     def resources() -> APIResources:
-        if active_resources is None:
-            raise HTTPException(503, "application resources are unavailable")
-        return active_resources
+        return registry().resources
 
     def registry() -> RunRegistry:
         if active_registry is None:
@@ -59,7 +56,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        nonlocal active_resources, active_registry
+        nonlocal active_registry
         selected = settings if settings is not None else load_settings()
         ensure_writable(selected.data_dir)
         ensure_writable(selected.db_path.parent)
@@ -89,16 +86,17 @@ def create_app(
                 )
                 check_provider_environment(models, environment=environment)
                 os.environ.update(environment)
-                active_resources = APIResources(
-                    selected,
-                    conn,
-                    client,
-                    llm_client or LlmClient(selected),
-                    router,
-                    policy,
-                    environment,
+                active_registry = RunRegistry(
+                    APIResources(
+                        selected,
+                        conn,
+                        client,
+                        llm_client or LlmClient(selected),
+                        router,
+                        policy,
+                        environment,
+                    )
                 )
-                active_registry = RunRegistry(active_resources)
                 application.state.run_registry = active_registry
                 try:
                     await active_registry.boot()
@@ -109,7 +107,6 @@ def create_app(
                     finally:
                         application.state.run_registry = None
                         active_registry = None
-                        active_resources = None
         finally:
             conn.close()
 

@@ -59,12 +59,12 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B6 | 21 mcp_client + 25 llm_client | completed; full acceptance 2026-10-03; committed |
 | B7 | 22 engine core + 23 restart reconciliation | completed; accepted and committed 2026-10-04; M8a core/restart proved, fan-out proof accepted in B8 |
 | B8 | 24 candidate fan-out + 26 routing/skills | completed; accepted and committed 2026-10-04; M8a / M8b ✅; [receipt](./receipts/B8.md) |
-| B9 | 27a nodes 1–4 + 27b nodes 5–6 | implemented/reviewed; static acceptance 2026-10-04, exit 0; tests stopped by user, runtime/coverage unproved; [receipt](./receipts/B9.md) |
-| B10 | 28 nodes 7–11 (alone: the largest) | Implemented/reviewed 2026-10-04; static-only acceptance, runtime/coverage outstanding under user test stop. [Receipt](./receipts/B10.md). |
-| B11 | 29 nodes 12–13 + 30 control router | implemented/reviewed; static acceptance 2026-10-05, exit0; runtime/coverage outstanding under user test stop. [Receipt](./receipts/B11.md). |
-| B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11 |
-| B13 | 33 API projects + 34 API runs | implemented/reviewed; static acceptance 2026-10-05, exit0; runtime/coverage outstanding under user test stop; [receipt](./receipts/B13.md) |
-| B14 | 35 SSE + 36 frontend scaffold | implemented/reviewed; static acceptance 2026-10-05, exit0; frontend typecheck/build passed; M12 runtime/replay and coverage outstanding under user test stop; [receipt](./receipts/B14.md) |
+| B9 | 27a nodes 1–4 + 27b nodes 5–6 | implemented/reviewed; static 2026-10-04; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B9.md) |
+| B10 | 28 nodes 7–11 (alone: the largest) | implemented/reviewed 2026-10-04; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B10.md) |
+| B11 | 29 nodes 12–13 + 30 control router | implemented/reviewed; static 2026-10-05; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B11.md) |
+| B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)) |
+| B13 | 33 API projects + 34 API runs | implemented/reviewed; static 2026-10-05; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B13.md) |
+| B14 | 35 SSE + 36 frontend scaffold | implemented/reviewed; static 2026-10-05; frontend typecheck/build passed; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); M12 browser smoke still deferred; [receipt](./receipts/B14.md) |
 | B15 | 37 setup flow + 38 run workspace | |
 | B16 | 39 comparison + 40 report | M13 |
 

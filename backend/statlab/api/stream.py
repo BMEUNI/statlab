@@ -40,10 +40,10 @@ async def stream_events(
     if closing.is_set():
         return
     subscription = bus.subscribe(since)
-    next_event: asyncio.Task[Event] | None = asyncio.create_task(anext(subscription))
-    close_wait: asyncio.Task[bool] | None = asyncio.create_task(closing.wait())
+    next_event: asyncio.Task[Event] = asyncio.create_task(anext(subscription))
+    close_wait: asyncio.Task[bool] = asyncio.create_task(closing.wait())
     try:
-        while next_event is not None and close_wait is not None:
+        while True:
             done, _ = await asyncio.wait(
                 (next_event, close_wait),
                 timeout=_HEARTBEAT_SECONDS,
@@ -54,14 +54,11 @@ async def stream_events(
             if next_event not in done:
                 yield ": heartbeat\n\n"
                 continue
-            try:
-                event = next_event.result()
-            except StopAsyncIteration:
-                break
+            event = next_event.result()
             yield event_frame(event)
             next_event = asyncio.create_task(anext(subscription))
     finally:
-        remaining = tuple(task for task in (next_event, close_wait) if task is not None)
+        remaining = (next_event, close_wait)
         for task in remaining:
             if not task.done():
                 task.cancel()
@@ -96,8 +93,6 @@ def stream_router(registry: Callable[[], RunRegistry]) -> APIRouter:
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         owner = registry()
-        if owner.closing:
-            raise HTTPException(503, "application is closing")
         cursor = parse_cursor(since, last_event_id)
         binding = owner.run(run_id)
         return SseResponse(

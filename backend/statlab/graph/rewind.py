@@ -23,8 +23,8 @@ from statlab.persistence.ids import utc_now
 from statlab.persistence.repository import (
     create_run,
     ensure_candidate,
-    get_run,
     list_runs,
+    require_run,
     run_ancestry,
     set_test_fingerprint,
 )
@@ -153,9 +153,7 @@ class ForkService:
         self.conn, self.paths = parent.loop.conn, parent.loop.checkpointer.paths
 
     def _existing(self, request_id: str, *, target: str) -> ForkResult | None:
-        parent_row = get_run(self.conn, self.paths.run_id)
-        if parent_row is None:
-            raise PersistenceError("fork parent does not exist")
+        parent_row = require_run(self.conn, self.paths.run_id)
         for row in list_runs(self.conn, parent_row.project_id):
             if row.forked_from_run_id != parent_row.id:
                 continue
@@ -170,7 +168,9 @@ class ForkService:
                     raise EngineError("fork request target differs")
                 paths = RunPaths(self.paths.data_dir, self.paths.slug, row.id)
                 state = Checkpointer(paths).load(
-                    spine_id=self.parent.initial.spine_id, spine=self.parent.initial.spine
+                    allow_missing=True,
+                    spine_id=self.parent.initial.spine_id,
+                    spine=self.parent.initial.spine,
                 )
                 if state is None:
                     raise PersistenceError("published fork checkpoint is unavailable")
@@ -210,9 +210,7 @@ class ForkService:
                     )
                     return existing
             source = await self.parent.state()
-            parent_row = get_run(self.conn, source.run_id)
-            if parent_row is None:
-                raise PersistenceError("fork parent does not exist")
+            parent_row = require_run(self.conn, source.run_id)
             projection = project_frontier(source, target)
             retained = validate_checkpoint_ownership(self.conn, source.run_id, projection)
             if any(row.pruned_at is not None or not Path(row.path).is_file() for row in retained):
@@ -245,9 +243,7 @@ class ForkService:
                     path = self.paths.root / name
                     if path.is_file():
                         (paths.root / name).write_bytes(path.read_bytes())
-                linked = fork_artifacts(self.paths, paths, retained)
-                if frozenset(linked) != child_state.retained_refs:
-                    raise PersistenceError("fork did not link every retained artifact")
+                fork_artifacts(self.paths, paths, retained)
                 for branch in child_state.branches:
                     ensure_candidate(
                         self.conn,
@@ -304,9 +300,7 @@ class ForkService:
     async def _finish_parent(
         self, source: RunState, child_id: str, published: dict[str, JsonValue]
     ) -> None:
-        row = get_run(self.conn, source.run_id)
-        if row is None:
-            raise PersistenceError("fork parent does not exist")
+        row = require_run(self.conn, source.run_id)
         if row.status != "completed":
             halted = source.model_copy(update={"status": "superseded"})
             self.parent.loop.checkpointer.save(halted)

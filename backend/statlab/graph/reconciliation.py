@@ -94,7 +94,7 @@ class RestartReconciler:
                         if loop.gate_reconciler is not None:
                             state = await loop.gate_reconciler(state)
                             row = get_run(self.conn, row.id) or row
-                        if row.status in ("paused", "cancelled", "superseded"):
+                        if row.status in ("paused", "awaiting_user", "cancelled", "superseded"):
                             state = RunState.model_validate(
                                 {**state.model_dump(), "status": row.status}
                             )
@@ -182,17 +182,7 @@ class RestartReconciler:
                 spec=branch.spec,
                 wave=branch.wave,
             )
-            candidate = self.conn.execute(
-                "SELECT run_id, spec_json, wave FROM candidates WHERE id = ?",
-                (branch.database_id(state.run_id),),
-            ).fetchone()
-            if candidate is not None and (
-                candidate["run_id"] != state.run_id
-                or candidate["spec_json"] != branch.spec.model_dump_json()
-                or candidate["wave"] != branch.wave
-            ):
-                raise PersistenceError("candidate identity mismatch")
-            if candidate is not None and state.traversal is not None:
+            if state.traversal is not None:
                 update_candidate_status(self.conn, branch.database_id(state.run_id), branch.status)
         rows = {row.id: row for row in list_node_executions(self.conn, state.run_id)}
         boundaries = (

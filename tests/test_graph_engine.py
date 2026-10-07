@@ -227,7 +227,7 @@ async def test_halted_or_skipped_outcome(engine_world: World, outcome: str) -> N
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["tool", "llm", "bug"])
 async def test_exception_conversion_preserves_classes_and_hides_secrets(
-    engine_world: World, kind: str
+    engine_world: World, kind: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     failure = Failure(error_class="transient", message="Service unavailable")
     error = ToolCallError("fixture", failure) if kind == "tool" else LlmCallError(failure)
@@ -249,6 +249,12 @@ async def test_exception_conversion_preserves_classes_and_hides_secrets(
     )
     if kind == "bug":
         assert loop.last_error is not None and loop.last_error.cause is error_to_raise
+    if kind == "bug":
+        assert "Node alpha executor failed with ValueError" in caplog.text
+        assert "in execute" in caplog.text
+    else:
+        assert "executor failed" not in caplog.text
+    assert "secret credential" not in caplog.text
     assert "secret credential" not in engine_world.paths.state_json.read_text()
     assert "secret credential" not in engine_world.paths.events_jsonl.read_text()
 

@@ -622,14 +622,11 @@ def logged_calls(
                 raise PersistenceError("tool audit has duplicate artifact producers")
             producers[ref] = index
     selected: set[int] = set()
-    visiting: set[int] = set()
 
     def visit(ref: str, before: int) -> None:
         index = producers.get(ref)
         if index is None or index >= before:
             raise PersistenceError("tool audit is missing an earlier artifact producer")
-        if index in visiting:
-            raise PersistenceError("tool audit contains a producer cycle")
         row, call = stored[index], calls[index]
         artifact = get_artifact(conn, ref)
         if (
@@ -645,11 +642,9 @@ def logged_calls(
             raise PersistenceError("producer execution ownership mismatch")
         if index in selected:
             return
-        visiting.add(index)
         for value in call.arguments.values():
             for dependency in McpClient._refs_in(value):
                 visit(dependency, index)
-        visiting.remove(index)
         selected.add(index)
 
     try:

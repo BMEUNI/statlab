@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import traceback
+
 from statlab_contracts.envelope import ErrorClass, Failure
 from statlab_contracts.envelope import retry_budget as _retry_budget
 
@@ -158,3 +160,12 @@ class MigrationError(PersistenceError):
         super().__init__(message, cause=cause)
         self.version = version
         self.name = name
+
+
+def traceback_frames(exc: BaseException) -> str:
+    """Frame locations only; never source lines or the exception message.
+
+    The message may carry secrets or data values.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    return "\n".join(f"{frame.filename}:{frame.lineno} in {frame.name}" for frame in frames)

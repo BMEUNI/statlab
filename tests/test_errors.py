@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from statlab.errors import ConfigError, StatlabError
+from statlab.errors import ConfigError, StatlabError, traceback_frames
 
 
 def test_str_without_cause() -> None:
@@ -56,3 +56,16 @@ def test_catchable_as_exception() -> None:
     """E8."""
     with pytest.raises(Exception):  # noqa: B017 - deliberately asserting broad catchability
         raise StatlabError("boom")
+
+
+def test_traceback_frames_lists_locations_without_message_or_source() -> None:
+    def explode() -> None:
+        raise ValueError("hidden message")
+
+    try:
+        explode()
+    except ValueError as exc:
+        frames = traceback_frames(exc)
+    assert "in explode" in frames
+    assert "test_errors.py:" in frames
+    assert "hidden message" not in frames

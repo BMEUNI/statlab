@@ -13,6 +13,7 @@ def test_main_exits_2_on_tool_settings_error(
 ) -> None:
     """No `STATLAB_MCP_TOKEN` set -- `load_tool_settings` raises `ToolSettingsError`, `main()`
     prints the message to stderr and returns 2."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("STATLAB_MCP_TOKEN", raising=False)
     monkeypatch.setenv("STATLAB_DATA_DIR", str(tmp_path / "data"))
 
@@ -28,6 +29,7 @@ def test_main_exits_2_on_tool_settings_error(
 def test_main_runs_uvicorn_and_returns_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A valid configuration builds the app and calls `uvicorn.run` -- mocked here, since
     actually starting a server and blocking is not this test's concern."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("STATLAB_MCP_TOKEN", "main-test-token-not-a-real-secret")
     monkeypatch.setenv("STATLAB_DATA_DIR", str(tmp_path / "data"))
 
@@ -47,6 +49,7 @@ def test_main_runs_uvicorn_and_returns_0(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_main_uses_the_configured_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("STATLAB_MCP_TOKEN", "main-test-token-two")
     monkeypatch.setenv("STATLAB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("STATLAB_MCP_PORT", "9999")
@@ -69,6 +72,7 @@ def test_main_passes_the_built_app_to_uvicorn(
 ) -> None:
     """The object handed to `uvicorn.run` is a real Starlette app built by `create_app`, not a
     placeholder -- confirmed by checking it has the routes `create_app` is known to add."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("STATLAB_MCP_TOKEN", "main-test-token-three")
     monkeypatch.setenv("STATLAB_DATA_DIR", str(tmp_path / "data"))
 
@@ -93,6 +97,7 @@ def test_main_missing_data_dir_permission_also_exits_2(
     """A different `ToolSettingsError` cause (an unwritable data dir) still exits 2, not just
     the missing-token case -- confirms `main()` catches the base exception type, not one
     specific message."""
+    monkeypatch.chdir(tmp_path)
     unwritable = tmp_path / "exists_as_a_file"
     unwritable.write_text("x")
     monkeypatch.setenv("STATLAB_MCP_TOKEN", "main-test-token-four")

@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from statlab.domains.base import NodeResult
 from statlab.domains.candidate_models import CandidateModelExecutor
 from statlab.domains.candidate_search import CandidateSearchPlanner
 from statlab.domains.decisions import DesignDecision, SearchDecision
@@ -25,6 +26,7 @@ from statlab.persistence.repository import (
 )
 from statlab_contracts.candidate import CandidateSet, CandidateSpec, EstimatorSpec
 from statlab_contracts.contract import Constraints, DataContract
+from statlab_contracts.envelope import Failure
 
 from tests.test_nodes_candidate_pipeline import (
     candidate_harness,
@@ -210,3 +212,57 @@ async def test_search_cancellation_propagates(
     h.llm.cancel = True
     with pytest.raises(asyncio.CancelledError):
         await CandidateSearchPlanner(h.runtime)(h.state, 2)
+
+
+@pytest.mark.asyncio
+async def test_search_wave_order_budget_and_no_completed_branch(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    await joined(h)
+    runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=h.runtime.contract.target,
+            objective=h.runtime.contract.objective,
+            features=h.runtime.contract.features,
+            constraints=Constraints(max_search_waves=3),
+        ),
+    )
+    planner = CandidateSearchPlanner(runtime)
+    calls = len(h.llm.calls)
+    with pytest.raises(EngineError, match="search wave must follow the completed checkpoint wave"):
+        await planner(h.state, 3)
+    exhausted = RunState.model_validate(
+        {**h.state.model_dump(mode="json"), "budget": {"total_fit_ms": 10, "limit_ms": 10}}
+    )
+    assert await planner(exhausted, 2) == ()
+    b = h.state.branches[0]
+    assert [item.node_name for item in b.results[:4]] == [
+        "preprocessing",
+        "feature_engineering",
+        "model_training",
+        "model_evaluation",
+    ]
+    halted = CandidateProgress(
+        public_id=b.public_id,
+        spec=b.spec,
+        results=b.results[:4],
+        position=10,
+        status="failed",
+        pending_result=BoundaryResult(
+            node_name="model_interpretation",
+            execution_id="failed-interpretation",
+            result=NodeResult(
+                status="failed",
+                error=Failure(error_class="data", message="interpretation refused"),
+            ),
+        ),
+    )
+    failed = RunState.model_validate(
+        {**h.state.model_dump(mode="json"), "branches": [halted.model_dump(mode="json")]}
+    )
+    assert await planner(failed, 2) == ()
+    assert len(h.llm.calls) == calls

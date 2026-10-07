@@ -198,7 +198,7 @@ class GateService:
             evidence=evidence,
             reasoning=str(getattr(decision, "rationale", "Review proposal")),
             editable=() if invocation.after_action else tuple(type(decision).model_fields),
-            options=get_args(GateAction),
+            options=get_args(GateAction.__value__),
             context=self._context(invocation),
         )
         gate = create_gate(
@@ -249,6 +249,16 @@ class GateService:
 
     async def capture(self, invocation: NodeInvocation, result: NodeResult) -> None:
         if result.status != "awaiting_user":
+            for gate in list_gates(self.conn, self.run_id):
+                if (
+                    gate.status == "prepared"
+                    and gate.answer_json is not None
+                    and (question := self._validate(gate)).phase == "before"
+                    and question.node == invocation.spec.name
+                    and question.candidate_id == invocation.execution.candidate_id
+                    and question.context == self._context(invocation)
+                ):
+                    transition_gate(self.conn, gate, status="applied", answer_json=gate.answer_json)
             return
         for gate in list_gates(self.conn, self.run_id):
             if gate.node_execution_id == invocation.execution.id and gate.status == "pending":
@@ -319,7 +329,7 @@ class GateService:
             )
             await self._answer_event(gate, answer)
             if answer.action not in ("abort", "rewind"):
-                await self._prepare(gate, state)
+                await self._prepare(gate, state, answer)
                 return ControlResponse(
                     category="decision",
                     text="Proposal revised."
@@ -355,11 +365,8 @@ class GateService:
             )
         return ControlResponse(category="decision", text=text, new_run_id=child)
 
-    async def _prepare(self, gate: GateRow, state: RunState) -> RunState:
+    async def _prepare(self, gate: GateRow, state: RunState, answer: GateAnswer) -> RunState:
         question = self._validate(gate)
-        if gate.answer_json is None:
-            raise PersistenceError("accepted gate has no answer")
-        answer = GateAnswer.model_validate_json(gate.answer_json)
         await self._answer_event(gate, answer)
         if answer.action == "instruct":
             if self.revise is None or answer.instruction is None:
@@ -389,8 +396,6 @@ class GateService:
                 "gate.closed", {"gate_id": gate.id, "revision": answer.revision, "new_run_id": None}
             )
             await self._opened(gate)
-            return state
-        if answer.action in ("abort", "rewind"):
             return state
         if answer.action == "approve_all_remaining":
             # Durable answer is authority for repairing either side of a mode-write interruption.
@@ -434,12 +439,11 @@ class GateService:
                     }
                 )
             else:
-                position = owner.position if state.traversal is not None else state.cursor
-                end = (
-                    state.traversal.region(state.spine)[1]
-                    if state.traversal is not None
-                    else len(state.spine)
-                )
+                if state.traversal is not None:
+                    start, end = state.traversal.region(state.spine)
+                    position = max(start, owner.position)
+                else:
+                    position, end = state.cursor, len(state.spine)
                 changed = owner.model_copy(
                     update={
                         "pending_result": None,
@@ -466,7 +470,7 @@ class GateService:
                     state.pending_result is not None
                     or any(branch.status == "awaiting_user" for branch in state.branches)
                 )
-                else "running"
+                else "pending"
             )
             state = RunState.model_validate({**state.model_dump(), "status": status})
             # Checkpoint first; reconciliation can finish SQL/event writes without node replay.
@@ -529,9 +533,9 @@ class GateService:
                     await self._external(gate, answer)
                     state = await self.lifecycle.state()
                 else:
-                    state = await self._prepare(gate, state)
-            elif gate.status in ("prepared", "applied") and gate.answer_json is not None:
-                answer = GateAnswer.model_validate_json(gate.answer_json)
+                    state = await self._prepare(gate, state, answer)
+            else:
+                answer = GateAnswer.model_validate_json(gate.answer_json or "null")
                 await self._answer_event(gate, answer)
                 if answer.action in ("abort", "rewind"):
                     await self._external(gate, answer)
@@ -553,7 +557,9 @@ class GateService:
             None,
         )
         position = (
-            owner.position if owner is not None and state.traversal is not None else state.cursor
+            max(state.traversal.region(state.spine)[0], owner.position)
+            if owner is not None and state.traversal is not None
+            else state.cursor
         )
         repeated_design = (
             state.traversal is not None

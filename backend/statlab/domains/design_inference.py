@@ -204,7 +204,7 @@ class DesignInferenceExecutor:
         decision: InferenceDecision,
         registry: dict[str, JsonValue],
         problem: ProblemSpec,
-    ) -> dict[str, JsonValue]:
+    ) -> tuple[dict[str, JsonValue], str]:
         chosen = self.runtime.contract.modelling.inferential_model
         default = {
             "continuous": "ols",
@@ -252,7 +252,7 @@ class DesignInferenceExecutor:
         }
         if categorical - set(decision.reference_levels):
             raise _RefusalError("categorical inference predictors need explicit reference levels")
-        return entry
+        return entry, tool
 
     async def _inference(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
         problem = problem_from_state(invocation.state)
@@ -276,7 +276,7 @@ class DesignInferenceExecutor:
         approved = await self.runtime.approve(invocation, decision, (registry,))
         if approved is None:
             return evidence.result("awaiting_user", summary)
-        entry = self._validate_inference(invocation, approved, registry, problem)
+        entry, tool = self._validate_inference(invocation, approved, registry, problem)
         summary["decision"] = approved.model_dump(mode="json")
         split = shared_result(invocation.state, "data_splitting").summary
         matrix_output = await self._call(
@@ -295,9 +295,6 @@ class DesignInferenceExecutor:
         params: dict[str, JsonValue] = {"matrix": str(matrix), "target": problem.target}
         if entry.get("family") is not None:
             params["family"] = entry["family"]
-        tool = entry["tool"]
-        if not isinstance(tool, str):
-            raise EngineError("malformed registry fit tool")
         fit_output = await self._call(invocation, evidence, tool, params)
         fit = _artifact(fit_output, "inferential_fit")
         coefficient = await self._call(
@@ -328,10 +325,6 @@ class DesignInferenceExecutor:
             )
         if approved.model == "ols":
             tests: list[JsonValue] = ["normality", "heteroskedasticity"]
-            # Only a preserved temporal split would supply ordered residual context.
-            split_rules = _object(split.get("split"), "split rules")
-            if split_rules.get("strategy") == "temporal":
-                tests.append("autocorrelation")
             residuals = await self._call(
                 invocation, evidence, "test_residuals", {"fit": str(fit), "tests": tests}
             )

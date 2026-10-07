@@ -101,3 +101,52 @@ def test_setup_validation_reports_supplied_target_findings(tool_settings: object
     assert any(
         isinstance(item, dict) and item.get("field") == "target.column" for item in mismatches
     )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("root", "project root resolves outside the data directory"),
+        ("datasets", "datasets directory resolves outside the project"),
+    ],
+)
+def test_setup_rejects_project_and_datasets_directory_escape(
+    tool_settings: object, tmp_path: Path, case: str, message: str
+) -> None:
+    from statlab_tools.settings import ToolSettings
+    from statlab_tools.tool import ToolParamError
+
+    settings = tool_settings
+    assert isinstance(settings, ToolSettings)
+    paths = ProjectPaths(settings.data_dir, "demo")
+    outside = tmp_path / f"outside-{case}"
+    outside.mkdir()
+    if case == "root":
+        paths.root.parent.mkdir(parents=True, exist_ok=True)
+        paths.root.symlink_to(outside, target_is_directory=True)
+    else:
+        paths.root.mkdir(parents=True)
+        paths.datasets.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ToolParamError, match=message):
+        setup_dataset("demo", "a" * 64, options=DatasetOptions())
+
+
+def test_setup_warns_above_row_threshold(
+    tool_settings: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import statlab_tools.tools.intake as intake_module
+    from statlab_tools.settings import ToolSettings
+
+    settings = tool_settings
+    assert isinstance(settings, ToolSettings)
+    paths = ProjectPaths(settings.data_dir, "demo")
+    paths.datasets.mkdir(parents=True)
+    content = b"a,b\n1,2\n3,4\n"
+    digest = hashlib.sha256(content).hexdigest()
+    paths.dataset_csv(digest).write_bytes(content)
+    monkeypatch.setattr(intake_module, "ROW_WARNING_THRESHOLD", 1)
+
+    result = setup_dataset("demo", digest, options=DatasetOptions())
+
+    assert result.warnings == ("2 rows exceeds 1; fitting will be slow (D15)",)

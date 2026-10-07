@@ -19,7 +19,7 @@ from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError
 from statlab.graph.engine import NodeInvocation
 from statlab.persistence.models import ProjectRow
-from statlab.persistence.repository import create_node_execution
+from statlab.persistence.repository import create_node_execution, next_node_attempt
 
 from tests.test_nodes_champion import champion_harness, tail_invocation
 
@@ -49,14 +49,21 @@ async def test_dispatches_all_thirteen_declared_nodes(
 
     for executor_type in set(expected):
         monkeypatch.setattr(executor_type, "__call__", recording)
-    for node, executor_type in zip(TABULAR_SPINE, expected, strict=True):
+    for seq, (node, executor_type) in enumerate(zip(TABULAR_SPINE, expected, strict=True), 1):
         branch = h.state.branches[0] if node.kind == "PER_CANDIDATE" else None
+        candidate_id = branch.database_id(h.state.run_id) if branch else None
         execution = create_node_execution(
             migrated_db,
             run_id=h.state.run_id,
             node_name=node.name,
-            seq=1,
-            candidate_id=branch.database_id(h.state.run_id) if branch else None,
+            seq=seq,
+            candidate_id=candidate_id,
+            attempt=next_node_attempt(
+                migrated_db,
+                run_id=h.state.run_id,
+                node_name=node.name,
+                candidate_id=candidate_id,
+            ),
         )
         output = await dispatcher(NodeInvocation(h.state, node, execution, branch))
         assert output.summary == {"node": node.name}

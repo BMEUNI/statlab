@@ -16,6 +16,7 @@ from statlab.persistence.repository import (
     count_prior_test_scorings,
     create_contract,
     create_dataset,
+    create_gate,
     create_message,
     create_node_execution,
     create_project,
@@ -26,6 +27,7 @@ from statlab.persistence.repository import (
     get_champion_model,
     get_contract,
     get_dataset,
+    get_gate,
     get_message,
     get_model,
     get_project,
@@ -33,14 +35,21 @@ from statlab.persistence.repository import (
     get_run,
     get_session,
     latest_contract,
+    list_gates,
+    list_memory,
     list_messages,
     list_projects,
     list_runs,
     record_tool_call,
     remember_run_outcome,
+    require_project,
+    require_run,
+    run_ancestry,
     save_champion_model,
     set_test_fingerprint,
+    transition_gate,
     update_candidate_status,
+    update_run_mode,
     update_run_status,
 )
 from statlab.storage import create_artifact
@@ -1360,6 +1369,12 @@ def test_session_message_round_trip_limits_ownership_and_strict_metadata(
     assert corrupted is not None
     with pytest.raises(PersistenceError):
         corrupted.metadata()
+    with transaction(migrated_db):
+        migrated_db.execute("UPDATE messages SET meta_json = '[]' WHERE id = ?", (user.id,))
+    rewritten = get_message(migrated_db, user.id)
+    assert rewritten is not None
+    with pytest.raises(PersistenceError, match="invalid metadata JSON"):
+        rewritten.metadata()
     assert get_run(migrated_db, run.id) == run
 
 
@@ -1380,3 +1395,165 @@ def test_session_message_wrap_closed_connection(
         create_session(closed, project_id=project.id, title="Demo")
     with pytest.raises(PersistenceError):
         create_message(closed, session_id="s_missing", run_id="r_missing", role="user", content="x")
+
+
+def test_require_run_rejects_missing_run(migrated_db: sqlite3.Connection) -> None:
+    with pytest.raises(PersistenceError, match="run does not exist"):
+        require_run(migrated_db, "r_missing")
+
+
+def test_require_project_rejects_missing_project(migrated_db: sqlite3.Connection) -> None:
+    with pytest.raises(PersistenceError, match="project does not exist"):
+        require_project(migrated_db, "p_missing")
+
+
+def test_reuse_pending_execution_guards(
+    migrated_db: sqlite3.Connection, project: ProjectRow
+) -> None:
+    conn = migrated_db
+    run = champion_run(conn, project)
+    pending = create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1, status="pending")
+    reused = create_node_execution(
+        conn, run_id=run.id, node_name="alpha", seq=1, status="pending", reuse_pending=True
+    )
+    assert reused.id == pending.id
+    assert reused.status == "pending"
+    with pytest.raises(PersistenceError, match="pending execution topology mismatch"):
+        create_node_execution(conn, run_id=run.id, node_name="alpha", seq=2, reuse_pending=True)
+    create_node_execution(
+        conn, run_id=run.id, node_name="alpha", seq=1, attempt=2, status="pending"
+    )
+    with pytest.raises(PersistenceError, match="duplicate pending execution anchors"):
+        create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1, reuse_pending=True)
+
+
+def test_gate_persistence_guards(migrated_db: sqlite3.Connection, project: ProjectRow) -> None:
+    conn = migrated_db
+    run = champion_run(conn, project)
+    execution = create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1)
+    with pytest.raises(PersistenceError, match="gate execution ownership mismatch"):
+        create_gate(conn, run_id=run.id, execution_id="ne_missing", question={"phase": "a"})
+    first = create_gate(conn, run_id=run.id, execution_id=execution.id, question={"phase": "a"})
+    second = create_gate(conn, run_id=run.id, execution_id=execution.id, question={"phase": "b"})
+    assert second.id != first.id
+    assert (
+        create_gate(conn, run_id=run.id, execution_id=execution.id, question={"phase": "a"})
+        == first
+    )
+    with pytest.raises(PersistenceError, match="cannot persist gate"):
+        create_gate(
+            conn,
+            run_id=run.id,
+            execution_id=execution.id,
+            question={"phase": "c", "value": float("nan")},
+        )
+    transition_gate(conn, first, status="answered", answer_json="{}")
+    with pytest.raises(PersistenceError, match="stale or already applied"):
+        transition_gate(conn, first, status="answered", answer_json="{}")
+    with pytest.raises(PersistenceError, match="cannot transition gate"):
+        transition_gate(
+            conn,
+            second,
+            status="pending",
+            answer_json=None,
+            question={"phase": "b", "value": float("nan")},
+        )
+    with transaction(conn):
+        conn.execute("UPDATE gates SET ts = X'FF' WHERE id = ?", (second.id,))
+    with pytest.raises(PersistenceError, match="cannot read gate"):
+        get_gate(conn, second.id)
+    with pytest.raises(PersistenceError, match="cannot read gates"):
+        list_gates(conn, run.id)
+
+
+def test_run_mode_ancestry_and_memory_read_guards(
+    migrated_db: sqlite3.Connection, project: ProjectRow
+) -> None:
+    conn = migrated_db
+    run = champion_run(conn, project)
+    other = champion_run(conn, project)
+    with pytest.raises(PersistenceError, match="mode transition run does not exist"):
+        update_run_mode(conn, "r_missing", "guided")
+    remember_run_outcome(conn, project_id=project.id, run_id=run.id, value={"score": 1})
+    with transaction(conn):
+        conn.execute("UPDATE memory SET ts = X'FF'")
+    with pytest.raises(PersistenceError, match="could not read project memory"):
+        list_memory(conn, project.id)
+    with transaction(conn):
+        conn.execute("UPDATE runs SET started_at = X'FF' WHERE id = ?", (run.id,))
+    with pytest.raises(PersistenceError, match="cannot read run ancestry"):
+        run_ancestry(conn, run.id)
+    with transaction(conn):
+        conn.execute(
+            "CREATE TRIGGER reject_mode BEFORE UPDATE OF mode ON runs "
+            "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+        )
+    with pytest.raises(PersistenceError, match="cannot transition run mode"):
+        update_run_mode(conn, other.id, "guided")
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("ownership", "invalid champion model ownership"),
+        ("spec", "cannot resolve champion"),
+        ("model_row", "cannot read model"),
+        ("ancestry", "model fork ancestry crosses projects or is missing"),
+    ],
+)
+def test_b11_champion_resolution_rejects_corruption(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path, case: str, message: str
+) -> None:
+    conn = migrated_db
+    run = champion_run(conn, project)
+    candidate_id, spec, ref = fitted_champion_artifact(conn, run, tmp_path)
+    save_champion_model(
+        conn,
+        run_id=run.id,
+        candidate_id=candidate_id,
+        artifact_id=str(ref),
+        name=spec.estimator.name,
+        parameters={"fit_intercept": True},
+    )
+    if case == "ownership":
+        with transaction(conn):
+            conn.execute("UPDATE models SET candidate_id = NULL WHERE run_id = ?", (run.id,))
+    elif case == "spec":
+        with transaction(conn):
+            conn.execute("UPDATE candidates SET spec_json = '{}' WHERE id = ?", (candidate_id,))
+    elif case == "model_row":
+        with transaction(conn):
+            conn.execute("UPDATE models SET created_at = X'FF' WHERE run_id = ?", (run.id,))
+    else:
+        other = champion_run(conn, project)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        with transaction(conn):
+            conn.execute("UPDATE artifacts SET run_id = ? WHERE id = ?", (other.id, str(ref)))
+            conn.execute("UPDATE runs SET forked_from_run_id = 'r_missing' WHERE id = ?", (run.id,))
+        conn.execute("PRAGMA foreign_keys = ON")
+    with pytest.raises(PersistenceError, match=message):
+        get_champion_model(conn, run.id)
+
+
+def test_b11_non_finite_champion_and_outcome_are_refused(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    conn = migrated_db
+    run = champion_run(conn, project)
+    candidate_id, spec, ref = fitted_champion_artifact(conn, run, tmp_path)
+    with pytest.raises(PersistenceError, match="cannot preserve champion model"):
+        save_champion_model(
+            conn,
+            run_id=run.id,
+            candidate_id=candidate_id,
+            artifact_id=str(ref),
+            name=spec.estimator.name,
+            parameters={"alpha": float("nan")},
+        )
+    assert get_champion_model(conn, run.id) is None
+    with pytest.raises(PersistenceError, match="cannot preserve run outcome memory"):
+        remember_run_outcome(
+            conn, project_id=project.id, run_id=run.id, value={"score": float("nan")}
+        )
+    with pytest.raises(PersistenceError, match="run does not exist"):
+        get_champion_model(conn, "r_missing")

@@ -4,24 +4,32 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import JsonValue
 from statlab.errors import PersistenceError
+from statlab.persistence.db import transaction
 from statlab.persistence.ids import parse_ts
-from statlab.persistence.models import ArtifactRow, ProjectRow, RunRow
-from statlab.persistence.repository import create_contract, create_run
+from statlab.persistence.models import ArtifactRow, NodeExecutionRow, ProjectRow, RunRow
+from statlab.persistence.repository import create_contract, create_run, record_tool_call
 from statlab.storage import (
     create_artifact,
     ensure_run_layout,
     get_artifact,
     list_artifacts,
     mark_pruned,
+    validate_checkpoint_ownership,
 )
 from statlab_contracts.artifacts import ARTIFACT_ID_PATTERN, ArtifactMeta, ArtifactRef
 from statlab_contracts.contract import DataContract
+from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
+
+if TYPE_CHECKING:
+    from statlab.graph.state import RunState
 
 _CONTRACT = DataContract.model_validate({"target": {"column": "y"}})
 
@@ -761,23 +769,29 @@ def test_forked_test_artifact_keeps_split_and_derived_from_test(
     assert list_artifacts(migrated_db, child_run.id) == ()
 
 
-def test_fork_visibility_and_real_pruned_producer_closure(
-    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
-) -> None:
+@dataclass(frozen=True)
+class _ForkAudit:
+    child: RunRow
+    checkpoint: RunState
+    refs: tuple[ArtifactRef, ...]
+    metas: tuple[ArtifactMeta, ...]
+    arguments: tuple[dict[str, JsonValue], ...]
+    execution: NodeExecutionRow
+    current: NodeExecutionRow
+
+
+def _fork_audit_world(conn: sqlite3.Connection, run_paths: RunPaths, run: RunRow) -> _ForkAudit:
     from statlab.domains.base import NodeResult
     from statlab.graph.state import BoundaryResult, RunState
-    from statlab.mcp_client import logged_calls
     from statlab.persistence.repository import (
         create_node_execution,
         finish_node_execution,
         record_tool_call,
-        run_ancestry,
     )
     from statlab_contracts.envelope import ToolSuccess
 
     from tests.test_graph_state import node
 
-    conn = migrated_db
     nodes = (node(), node("beta"))
     execution = create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1)
     refs = tuple(ArtifactRef(f"a_000000000000001{i}") for i in range(4))
@@ -850,6 +864,26 @@ def test_fork_visibility_and_real_pruned_producer_closure(
         result_json=ToolSuccess(artifacts=(metas[3],)).model_dump_json(),
         duration_ms=1,
     )
+    return _ForkAudit(
+        child=child,
+        checkpoint=checkpoint,
+        refs=refs,
+        metas=metas,
+        arguments=arguments,
+        execution=execution,
+        current=current,
+    )
+
+
+def test_fork_visibility_and_real_pruned_producer_closure(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow
+) -> None:
+    from statlab.mcp_client import logged_calls
+    from statlab.persistence.repository import run_ancestry
+
+    conn = migrated_db
+    w = _fork_audit_world(conn, run_paths, run)
+    child, checkpoint, refs, arguments = w.child, w.checkpoint, w.refs, w.arguments
     assert [ancestor.id for ancestor in run_ancestry(conn, child.id)] == [child.id, run.id]
     assert {row.id for row in list_artifacts(conn, child.id, checkpoint=checkpoint)} == {
         str(refs[1]),
@@ -869,6 +903,90 @@ def test_fork_visibility_and_real_pruned_producer_closure(
     conn.execute("UPDATE runs SET forked_from_run_id = ? WHERE id = ?", (child.id, run.id))
     with pytest.raises(PersistenceError, match="cycle"):
         run_ancestry(conn, child.id)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("duplicate", "duplicate artifact producers"),
+        ("missing", "missing an earlier artifact producer"),
+        ("ownership", "artifact producer ownership mismatch"),
+        ("execution", "producer execution ownership mismatch"),
+        ("invalid_row", "cannot compose ancestor producer audit"),
+    ],
+)
+def test_fork_audit_rejects_corrupted_producers(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow, case: str, message: str
+) -> None:
+    from statlab.mcp_client import logged_calls
+
+    w = _fork_audit_world(migrated_db, run_paths, run)
+    conn = migrated_db
+    if case == "duplicate":
+        record_tool_call(
+            conn,
+            run_id=run.id,
+            node_execution_id=w.execution.id,
+            tool_name="duplicate",
+            args_json="{}",
+            result_json=ToolSuccess(artifacts=(w.metas[0],)).model_dump_json(),
+            duration_ms=1,
+        )
+    elif case == "missing":
+        record_tool_call(
+            conn,
+            run_id=w.child.id,
+            node_execution_id=w.current.id,
+            tool_name="dangling",
+            args_json=json.dumps({"df": "a_0000000000000099"}),
+            result_json=ToolSuccess().model_dump_json(),
+            duration_ms=1,
+        )
+    elif case == "ownership":
+        with transaction(conn):
+            conn.execute(
+                "UPDATE artifacts SET produced_by = 'other' WHERE id = ?", (str(w.refs[0]),)
+            )
+    elif case == "execution":
+        with transaction(conn):
+            conn.execute(
+                "UPDATE tool_calls SET node_execution_id = ? WHERE tool_name = 'load_csv'",
+                (w.current.id,),
+            )
+    else:
+        with transaction(conn):
+            conn.execute("UPDATE artifacts SET pruned_at = X'FF' WHERE id = ?", (str(w.refs[0]),))
+    with pytest.raises(PersistenceError, match=message):
+        logged_calls(conn, w.child.id, fork_aware=True, checkpoint=w.checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("artifact_owner", "checkpoint artifact ownership mismatch"),
+        ("invalid_artifact", "cannot validate checkpoint ownership"),
+    ],
+)
+def test_checkpoint_ownership_rejects_foreign_or_invalid_retained_artifact(
+    migrated_db: sqlite3.Connection, run_paths: RunPaths, run: RunRow, case: str, message: str
+) -> None:
+    conn = migrated_db
+    w = _fork_audit_world(conn, run_paths, run)
+    if case == "artifact_owner":
+        third = create_run(
+            conn,
+            project_id=run.project_id,
+            contract_id=run.contract_id,
+            mode="autonomous",
+            config_json="{}",
+        )
+        with transaction(conn):
+            conn.execute("UPDATE artifacts SET run_id = ? WHERE id = ?", (third.id, str(w.refs[1])))
+    else:
+        with transaction(conn):
+            conn.execute("UPDATE artifacts SET pruned_at = X'FF' WHERE id = ?", (str(w.refs[1]),))
+    with pytest.raises(PersistenceError, match=message):
+        validate_checkpoint_ownership(conn, w.child.id, w.checkpoint)
 
 
 def test_ancestry_missing_and_cross_project_are_domain_errors(

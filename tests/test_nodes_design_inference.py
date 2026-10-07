@@ -14,6 +14,7 @@ from statlab.domains.base import NodeResult
 from statlab.domains.decisions import DesignDecision, InferenceDecision
 from statlab.domains.design_inference import (
     DesignInferenceExecutor,
+    _artifact,
     candidate_set_from_state,
     initial_candidate_planner,
 )
@@ -647,3 +648,57 @@ async def test_missing_malformed_boundaries_and_deferred_nodes(
         await DesignInferenceExecutor(h.runtime)(h.invocation(6))
     with pytest.raises(ValidationError):
         InferenceDecision.model_validate({"model": "ols", "predictors": [], "rationale": "invalid"})
+
+
+def test_artifact_helper_requires_exactly_one_kind() -> None:
+    with pytest.raises(EngineError, match="tool did not return exactly one table artifact"):
+        _artifact(ToolSuccess(), "table")
+
+
+@pytest.mark.asyncio
+async def test_registry_without_family_fails_closed(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await prepared(migrated_db, project, tmp_path)
+    entries = tools.registry["estimators"]
+    assert isinstance(entries, dict)
+    entry = entries["linear_regression"]
+    assert isinstance(entry, dict)
+    del entry["family"]
+    with pytest.raises(EngineError, match="estimator registry omitted family"):
+        await design(h)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("missing", "inference model is not registered"),
+        ("target", "inference model is incompatible with target type"),
+        ("tool", "registry inference fit tool is unavailable"),
+    ],
+)
+async def test_inference_registry_refusals(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+    change: str,
+    message: str,
+) -> None:
+    h, tools = await prepared(migrated_db, project, tmp_path)
+    models = tools.registry["inferential_models"]
+    assert isinstance(models, dict)
+    if change == "missing":
+        del models["ols"]
+    elif change == "target":
+        models["ols"] = {"tool": "fit_ols", "target_types": ["binary"], "family": None}
+    else:
+        models["ols"] = {"tool": "fit_unknown", "target_types": ["continuous"], "family": None}
+    assert (await design(h)).status == "completed"
+    if change == "tool":
+        with pytest.raises(EngineError, match=message):
+            await DesignInferenceExecutor(h.runtime)(h.invocation(5))
+        return
+    output = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
+    assert output.status == "failed"
+    assert output.error is not None and output.error.message == message

@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import litellm
@@ -36,10 +37,12 @@ from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import (
     create_contract,
     create_dataset,
+    create_gate,
     create_node_execution,
     create_run,
     get_gate,
     list_gates,
+    transition_gate,
 )
 from statlab.storage import ensure_run_layout
 from statlab_contracts.contract import (
@@ -251,6 +254,13 @@ async def test_gate_revision_uses_captured_memory_and_exact_anchor(
         paths.contract_snapshot_json.write_text(contract_row.contract_json, encoding="utf-8")
         policy = load_skill(TABULAR_DOMAIN.skill_file, spine=TABULAR_DOMAIN.nodes, tools=mcp.tools)
         snapshot_skill(policy, paths.root)
+        policy = replace(
+            policy,
+            nodes=tuple(
+                replace(item, model="fixture/explicit-model") if item.node == "intake" else item
+                for item in policy.nodes
+            ),
+        )
         lockfile = paths.root / "uv.lock"
         lockfile.write_bytes(b"version = 1\n")
         remember(
@@ -363,6 +373,12 @@ async def test_gate_revision_uses_captured_memory_and_exact_anchor(
             ).fetchall()
             assert len(calls) == 2
             assert {row["node_execution_id"] for row in calls} == {gate.node_execution_id}
+            assert {
+                row["model"]
+                for row in migrated_db.execute(
+                    "SELECT model FROM llm_calls WHERE run_id = ?", (run.id,)
+                )
+            } == {"fixture/explicit-model"}
             assert all(row["run_id"] == run.id for row in calls)
             assert len(requests) == 2
             assert all(
@@ -394,3 +410,15 @@ async def test_gate_revision_uses_captured_memory_and_exact_anchor(
         with pytest.raises(PersistenceError):
             await binding.gates.revise(missing_question, "Revise", IntakeDecision)
         assert len(requests) == request_count
+
+        current = get_gate(migrated_db, gate.id)
+        assert current is not None
+        transition_gate(migrated_db, current, status="applied", answer_json=current.answer_json)
+        other = create_node_execution(
+            migrated_db, run_id=run.id, node_name="problem_definition", seq=2
+        )
+        create_gate(migrated_db, run_id=run.id, execution_id=other.id, question=current.question())
+        with pytest.raises(PersistenceError, match="revision gate execution ownership mismatch"):
+            await binding.gates.revise(
+                GateQuestion.model_validate(current.question()), "Revise", IntakeDecision
+            )

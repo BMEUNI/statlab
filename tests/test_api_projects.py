@@ -378,7 +378,7 @@ async def test_create_list_detail_and_csv_upload(
         assert (
             "secret" not in unsafe.text and "input" not in unsafe.text and "ctx" not in unsafe.text
         )
-        assert (await client.get("/api/projects/{}/".format("missing"))).status_code == 404
+        assert (await client.get("/api/projects/missing")).status_code == 404
 
         proposal_payload = {"dataset_id": row["id"], "contract": contract.model_dump(mode="json")}
         proposal = await client.post(
@@ -966,3 +966,210 @@ async def test_startup_failure_closes_mcp_and_database(
     assert exit_tasks[0] is asyncio.current_task()
     with pytest.raises(sqlite3.ProgrammingError):
         database_connections[0].execute("SELECT 1")
+
+
+def _write(db_path: Path, sql: str, params: tuple[str, ...]) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(sql, params)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "status"), [("abc", 422), ("-1", 422), (str(1024 + 65537), 413)])
+async def test_bounded_file_rejects_bad_content_length(value: str, status: int) -> None:
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [
+                (b"content-type", b"multipart/form-data; boundary=x"),
+                (b"content-length", value.encode()),
+            ],
+        },
+        receive,
+    )
+    with pytest.raises(HTTPException) as failure:
+        async with bounded_file(request, limit=1024):
+            pytest.fail("bad content length must not yield a file")
+    assert failure.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_project_creation_conflicts_and_metadata_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, _):
+        duplicate = await client.post("/api/projects", json={"slug": "demo", "name": "Again"})
+        assert duplicate.status_code == 409
+        locked = ProjectPaths(settings.data_dir, "locked")
+        for directory in (locked.root, locked.datasets, locked.contracts, locked.runs):
+            directory.mkdir(parents=True, exist_ok=True)
+        locked.root.chmod(0o500)
+        try:
+            failed = await client.post("/api/projects", json={"slug": "locked", "name": "Locked"})
+        finally:
+            locked.root.chmod(0o700)
+        assert failed.status_code == 500
+        assert failed.json()["detail"] == "project was created but metadata could not be written"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["slug", "escape"])
+async def test_stored_project_path_corruption_returns_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        if case == "slug":
+            _write(
+                settings.db_path,
+                "UPDATE projects SET slug = ? WHERE id = ?",
+                ("Bad Slug!", str(project["id"])),
+            )
+            detail = "stored project path is invalid"
+        else:
+            root = ProjectPaths(settings.data_dir, "demo").root
+            outside = tmp_path / "outside"
+            root.rename(outside)
+            root.symlink_to(outside, target_is_directory=True)
+            detail = "project path escapes data directory"
+        response = await client.get(f"/api/projects/{project['id']}")
+        assert response.status_code == 500
+        assert response.json()["detail"] == detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["path", "missing"])
+async def test_stored_dataset_corruption_and_missing_file_return_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        row = uploaded.json()
+        if case == "path":
+            _write(
+                settings.db_path,
+                "UPDATE datasets SET path = ? WHERE id = ?",
+                (str(tmp_path / "elsewhere.csv"), row["id"]),
+            )
+            detail = "stored dataset path is invalid"
+        else:
+            Path(row["path"]).unlink()
+            detail = "stored dataset file is missing"
+        response = await client.post(
+            f"/api/projects/{project['id']}/contracts/validate",
+            json={"dataset_id": row["id"], "contract": _contract().model_dump(mode="json")},
+        )
+        assert response.status_code == 500
+        assert response.json()["detail"] == detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["validate", "propose"])
+async def test_malformed_setup_summaries_are_internal_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, _, session, project):
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        row = uploaded.json()
+        if endpoint == "validate":
+            session.responses.append(
+                ToolSuccess(summary={"valid": True, "mismatches": ["not-an-object"]})
+            )
+        else:
+            session.responses.append(ToolSuccess(summary={"mismatches": "not-a-list"}))
+        response = await client.post(
+            f"/api/projects/{project['id']}/contracts/{endpoint}",
+            json={"dataset_id": row["id"], "contract": _contract().model_dump(mode="json")},
+        )
+        assert response.status_code == 500
+        assert response.json() == {"detail": "internal error"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["symlink", "corrupt", "dimensions", "unwritable"])
+async def test_upload_filesystem_corruption_and_bad_dimensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, session, project):
+        content = b"a,b\nz,9\n"
+        sha = hashlib.sha256(content).hexdigest()
+        datasets = ProjectPaths(settings.data_dir, "demo").datasets
+        datasets.mkdir(parents=True, exist_ok=True)
+        expected: dict[str, JsonValue] = {"detail": "internal error"}
+        if case == "symlink":
+            (tmp_path / "outside.csv").write_bytes(content)
+            (datasets / f"{sha}.csv").symlink_to(tmp_path / "outside.csv")
+            expected = {"detail": "dataset path escapes datasets directory"}
+        elif case == "corrupt":
+            (datasets / f"{sha}.csv").write_bytes(b"different")
+            expected = {"detail": "content-addressed dataset is corrupt"}
+        elif case == "dimensions":
+            session.responses.append(ToolSuccess(summary={"rows": 0, "cols": 3}))
+        else:
+            expected = {"detail": "could not store uploaded dataset"}
+            datasets.chmod(0o500)
+        try:
+            response = await client.post(
+                f"/api/projects/{project['id']}/datasets",
+                files={"file": ("data.csv", content, "text/csv")},
+            )
+        finally:
+            datasets.chmod(0o700)
+        assert response.status_code == 500
+        assert response.json() == expected
+        assert _readonly_count(settings.db_path, "datasets") == 0
+
+
+@pytest.mark.asyncio
+async def test_contract_write_failure_uses_os_error_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        contracts = ProjectPaths(settings.data_dir, "demo").contracts
+        contracts.mkdir(parents=True, exist_ok=True)
+        contracts.chmod(0o500)
+        try:
+            response = await client.post(
+                f"/api/projects/{project['id']}/contracts",
+                files={
+                    "file": (
+                        "partial.json",
+                        DataContract(target=TargetSpec(column="a")).model_dump_json(),
+                        "application/json",
+                    )
+                },
+            )
+        finally:
+            contracts.chmod(0o700)
+        assert response.status_code == 500
+        assert response.json() == {"detail": "internal error"}
+
+
+@pytest.mark.asyncio
+async def test_routes_before_lifespan_are_unavailable(tmp_path: Path) -> None:
+    app = create_app(
+        Settings(
+            mcp_token=SecretStr("test-token"),
+            data_dir=tmp_path / "data",
+            db_path=tmp_path / "db.sqlite",
+            max_concurrent_llm=1,
+        )
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (await client.get("/api/projects")).status_code == 503
+        assert (await client.get("/api/runs/r_missing")).status_code == 503

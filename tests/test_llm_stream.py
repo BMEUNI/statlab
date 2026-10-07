@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 from litellm import ModelResponse
@@ -28,6 +29,14 @@ llm_context = llm_helpers.llm_context
 
 class StreamResult(BaseModel):
     text: str = Field(min_length=1)
+
+
+class NoText(BaseModel):
+    value: str
+
+
+class IntText(BaseModel):
+    text: int
 
 
 @dataclass(slots=True)
@@ -163,9 +172,12 @@ async def test_one_repair_resets_stream_and_keeps_attempt_rows(
     assert all(stream.closed for stream in stream_list)
 
 
+@pytest.mark.parametrize("output", (NoText, IntText))
 @pytest.mark.asyncio
 async def test_stream_output_without_text_field_rejects_before_provider(
-    llm_context: tuple[sqlite3.Connection, str, str], tmp_path: Path
+    output: type[BaseModel],
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
 ) -> None:
     conn, run_id, execution_id = llm_context
     calls = 0
@@ -175,9 +187,6 @@ async def test_stream_output_without_text_field_rejects_before_provider(
         calls += 1
         return _response("{}")
 
-    class NoText(BaseModel):
-        value: str
-
     with pytest.raises(LlmCallError, match="prose output has no text field"):
         await LlmClient(_settings(tmp_path), acompletion=provider).complete_prose(
             conn,
@@ -185,7 +194,7 @@ async def test_stream_output_without_text_field_rejects_before_provider(
             node_execution_id=execution_id,
             model="test-model",
             messages=(),
-            output=NoText,
+            output=output,
             sink=_empty_sink,
         )
     assert calls == 0
@@ -255,9 +264,14 @@ def test_partial_text_decodes_only_complete_string_values(
     assert _partial_text(content) == text
 
 
-@pytest.mark.parametrize("content", ('{"text":"\\u00', '{"other":"value"'))
-def test_partial_text_waits_for_incomplete_or_non_text_values(content: str) -> None:
-    assert _partial_text(content) is None
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    (('{"text":"\\u00', ""), ('{"other":"value"', None), ('["text"]', None)),
+)
+def test_partial_text_waits_for_incomplete_or_non_text_values(
+    content: str, expected: str | None
+) -> None:
+    assert _partial_text(content) == expected
 
 
 @pytest.mark.asyncio
@@ -344,6 +358,44 @@ async def test_sink_persistence_error_propagates_and_closes(
     assert len(_rows(conn)) == 1
     assert _rows(conn)[0][0] == "StreamResult"
     assert _rows(conn)[0][2:5] == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_sink_and_record_persistence_failures_keep_sink_error(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    stream = FakeStream((chunk('{"text":"visible"}'), chunk(None, usage=True)))
+    failure = PersistenceError("event append failed")
+
+    async def provider(**kwargs: object) -> object:
+        del kwargs
+        return stream
+
+    async def sink(text: str, reset: bool) -> None:
+        if text:
+            raise failure
+
+    conn.execute(
+        "CREATE TRIGGER reject_llm_call BEFORE INSERT ON llm_calls "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    with pytest.raises(PersistenceError) as error:
+        await LlmClient(_settings(tmp_path), acompletion=provider).complete_prose(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="test-model",
+            messages=(),
+            output=StreamResult,
+            sink=sink,
+        )
+    assert error.value is failure
+    assert stream.closed
+    assert len(_rows(conn)) == 0
+    assert "Could not record failed prose request" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -652,7 +704,7 @@ async def test_two_invalid_streams_raise_output_error_after_one_repair(
     (
         ((), (0, 0)),
         ((None,), (3, 2)),
-        (('{"text": invalid}',), (0, 0)),
+        (('{"text": invalid}', None), (3, 2)),
     ),
 )
 @pytest.mark.asyncio
@@ -751,3 +803,73 @@ async def test_reasoning_content_never_reaches_prose_sink(
     assert "".join(text for text, reset in seen if not reset) == "visible"
     assert "SECRET_REASONING" not in str(seen)
     assert stream.closed
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("foreign_item", "LLM returned a malformed stream"),
+        ("second_choice", "LLM returned a malformed stream"),
+        ("non_text_fragment", "LLM returned a malformed stream"),
+        ("malformed_usage", "LLM returned malformed usage metadata"),
+        ("builder_mismatch", "LLM returned a malformed stream"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_malformed_stream_items_fail_without_repair(
+    case: str,
+    message: str,
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    chunks: tuple[ModelResponseStream, ...]
+    if case == "foreign_item":
+        chunks = (cast(ModelResponseStream, object()),)
+    elif case == "second_choice":
+        chunks = (
+            ModelResponseStream(
+                choices=[StreamingChoices(index=1, delta=Delta(content='{"text":"x"}'))],
+                model="test-model",
+            ),
+        )
+    elif case == "non_text_fragment":
+        chunks = (
+            ModelResponseStream(
+                choices=[StreamingChoices(index=0, delta=Delta(content=["x"]))],
+                model="test-model",
+            ),
+        )
+    elif case == "malformed_usage":
+        chunks = (ModelResponseStream(choices=[], model="test-model", usage="bad"),)
+    else:
+        chunks = (chunk('{"text":"x"}'), chunk(None, usage=True))
+
+        def no_response(chunks: object, messages: object) -> None:
+            del chunks, messages
+
+        monkeypatch.setattr("statlab.llm.client.stream_chunk_builder", no_response)
+    stream = FakeStream(chunks)
+    calls = 0
+
+    async def provider(**kwargs: object) -> object:
+        nonlocal calls
+        del kwargs
+        calls += 1
+        return stream
+
+    with pytest.raises(LlmCallError, match=message) as error:
+        await LlmClient(_settings(tmp_path), acompletion=provider).complete_prose(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="test-model",
+            messages=(),
+            output=StreamResult,
+            sink=_empty_sink,
+        )
+    assert error.value.failure.error_class == "bug"
+    assert calls == 1
+    assert stream.closed
+    assert len(_rows(conn)) == 1

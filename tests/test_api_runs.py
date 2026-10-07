@@ -3,34 +3,37 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
 import sqlite3
 from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 import litellm
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from litellm.exceptions import APIConnectionError
-from pydantic import JsonValue, SecretStr, TypeAdapter
+from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
 from statlab.api.projects import APIResources
-from statlab.api.runs import RunConfig, RunRegistry
+from statlab.api.runs import ControlRequest, RunConfig, RunCreate, RunRegistry
 from statlab.config import Settings
 from statlab.domains.base import NodeResult
 from statlab.domains.decisions import IntakeDecision
 from statlab.domains.runtime import DomainRuntime
 from statlab.domains.tabular import TABULAR_DOMAIN
-from statlab.errors import ConfigError, PersistenceError
+from statlab.errors import ConfigError, EngineError, PersistenceError
 from statlab.graph.control import ConversationTurn, QaAnswer
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.gates import GateQuestion
 from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.router import InterruptClass
 from statlab.graph.state import RunState
+from statlab.memory import read_memory, remember
 from statlab.persistence.db import connect as persistence_connect
 from statlab.persistence.models import GateRow, MemoryRow, RunMode
 from statlab.persistence.repository import (
@@ -44,8 +47,9 @@ from statlab.persistence.repository import (
     list_messages,
     list_node_executions,
     list_runs,
+    update_run_status,
 )
-from statlab_contracts.contract import DataContract
+from statlab_contracts.contract import DataContract, TargetSpec
 from statlab_contracts.gates import GateAction, GateAnswer, RewindIntent
 from statlab_contracts.layout import RunPaths
 
@@ -214,8 +218,8 @@ async def _open_run_api(
         selected, mcp_session=session, llm_client=LlmClient(selected, acompletion=complete)
     )
     async with (
-        app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+        app.router.lifespan_context(app),
     ):
         if setup:
             created = await client.post("/api/projects", json={"slug": "demo", "name": "Demo"})
@@ -527,7 +531,8 @@ async def test_gate_action_outcomes(
             assert row is not None and row.status == "cancelled"
             state = await binding.lifecycle.state()
             assert state.status == "cancelled"
-            assert run_id not in api.registry.execution_tasks
+            task = api.registry.execution_tasks.get(run_id)
+            assert task is None or task.done()
             applied = next(
                 gate_row for gate_row in list_gates(api.conn, run_id) if gate_row.id == gate.id
             )
@@ -1372,9 +1377,8 @@ async def test_memory_snapshot_restart_and_shutdown_pause(
         tmp_path, monkeypatch, records=FixtureRecords(), setup=False, existing_run_id=run_id
     ) as api:
         assert run_id not in api.registry.execution_tasks
-        assert run_id not in api.records.executors
         assert second_id not in api.registry.execution_tasks
-        assert second_id not in api.records.executors
+        assert api.records.requests == []
         assert (await api.registry.bindings[run_id].lifecycle.state()).status == "awaiting_user"
         assert tuple(item.id for item in api.registry.bindings[run_id].runtime.memory) == tuple(
             item.id for item in captured.memory
@@ -1426,7 +1430,7 @@ async def test_autonomous_paused_restart(tmp_path: Path, monkeypatch: pytest.Mon
         assert restarted.registry.bindings[run_id].lifecycle.initial.mode == "autonomous"
         assert restarted.registry.bindings[run_id].runtime.memory == captured_memory
         assert run_id not in restarted.registry.execution_tasks
-        assert run_id not in restarted.records.executors
+        assert restarted.records.requests == []
 
 
 @pytest.mark.parametrize("failure", ("old_model", "missing_skill", "changed_contract"))
@@ -1506,6 +1510,159 @@ async def test_historical_restart_rejects_invalid_snapshot(
         assert not skill_path.exists()
     else:
         assert paths.contract_snapshot_json.read_bytes() == changed_contract
+
+
+def _tamper(db_path: Path, sql: str, params: tuple[str, ...]) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_RESTART_CASES: dict[str, str] = {
+    "run_id": "stored run id is invalid",
+    "config": "stored run config is invalid",
+    "contract_owner": "run contract ownership mismatch",
+    "dataset_owner": "run dataset ownership mismatch",
+    "session_owner": "run session ownership mismatch",
+    "memory_owner": "run memory ownership mismatch",
+    "run_root": "run path escapes project runs",
+    "run_child": "run child path escapes run root",
+    "contract_path": "stored contract path is invalid",
+    "contract_bytes": "stored contract file differs from SQL",
+    "dataset_hash": "run dataset hash differs from SQL",
+    "dataset_path": "stored dataset path is invalid",
+    "dataset_bytes": "stored dataset bytes differ from run config",
+    "incomplete": "stored run contract is incomplete",
+    "skill": "run skill snapshot is invalid",
+    "new_model": "",
+}
+
+
+@pytest.mark.parametrize("case", tuple(_RESTART_CASES))
+@pytest.mark.asyncio
+async def test_restart_rejects_corrupted_run_reconstruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    foreign_memory: list[JsonValue] = []
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api)
+        assert created.status_code == 201
+        run_id = str(created.json()["run_id"])
+        await _gate(api, run_id)
+        paths = RunPaths(api.settings.data_dir, "demo", run_id)
+        row = get_run(api.conn, run_id)
+        assert row is not None
+        dataset_row = get_dataset(api.conn, api.dataset_id)
+        contract_row = get_contract(api.conn, api.contract_id)
+        assert dataset_row is not None and contract_row is not None
+        if case == "memory_owner":
+            other = await api.client.post("/api/projects", json={"slug": "other", "name": "Other"})
+            assert other.status_code == 201
+            other_id = str(other.json()["id"])
+            remember(api.conn, project_id=other_id, key="foreign", value="fact")
+            foreign_memory = [m.model_dump(mode="json") for m in read_memory(api.conn, other_id)]
+        db = api.settings.db_path
+    config = json.loads(row.config_json)
+
+    def set_config(**changes: object) -> None:
+        _tamper(
+            db,
+            "UPDATE runs SET config_json = ? WHERE id = ?",
+            (json.dumps({**config, **changes}), run_id),
+        )
+
+    skill_path = paths.skill_snapshot_md
+    if case == "run_id":
+        _tamper(
+            db,
+            "INSERT INTO runs (id, project_id, contract_id, mode, status, started_at, config_json)"
+            " SELECT 'bad id', project_id, contract_id, mode, status, started_at, config_json"
+            " FROM runs WHERE id = ?",
+            (run_id,),
+        )
+    elif case == "config":
+        _tamper(db, "UPDATE runs SET config_json = '{}' WHERE id = ?", (run_id,))
+    elif case == "contract_owner":
+        _tamper(db, "UPDATE runs SET contract_id = 'ct_missing' WHERE id = ?", (run_id,))
+    elif case == "dataset_owner":
+        set_config(dataset_id="ds_missing")
+    elif case == "session_owner":
+        set_config(session_id="ss_missing")
+    elif case == "memory_owner":
+        set_config(memory=foreign_memory)
+    elif case == "run_root":
+        moved = tmp_path / "moved-run"
+        paths.root.rename(moved)
+        paths.root.symlink_to(moved)
+    elif case == "run_child":
+        moved = tmp_path / "moved-artifacts"
+        paths.artifacts.rename(moved)
+        paths.artifacts.symlink_to(moved)
+    elif case == "contract_path":
+        elsewhere = tmp_path / "elsewhere.json"
+        shutil.copyfile(contract_row.path, elsewhere)
+        _tamper(
+            db,
+            "UPDATE contracts SET path = ? WHERE id = ?",
+            (str(elsewhere), contract_row.id),
+        )
+    elif case == "contract_bytes":
+        stored = Path(contract_row.path)
+        stored.write_bytes(stored.read_bytes() + b" ")
+    elif case == "dataset_hash":
+        set_config(dataset_sha256="0" * 64)
+    elif case == "dataset_path":
+        elsewhere = tmp_path / "elsewhere.csv"
+        shutil.copyfile(dataset_row.path, elsewhere)
+        _tamper(db, "UPDATE datasets SET path = ? WHERE id = ?", (str(elsewhere), dataset_row.id))
+    elif case == "dataset_bytes":
+        Path(dataset_row.path).write_bytes(b"a,b\n9,9\n")
+    elif case == "incomplete":
+        incomplete = DataContract(target=TargetSpec(column="a")).model_dump_json()
+        _tamper(
+            db,
+            "UPDATE contracts SET json = ? WHERE id = ?",
+            (incomplete, contract_row.id),
+        )
+        Path(contract_row.path).write_text(incomplete)
+    elif case == "skill":
+        skill_path.write_bytes(b"not a skill policy\n")
+    else:
+        original = skill_path.read_bytes()
+        assert original.count(b"## problem_definition") == 1
+        skill_path.write_bytes(
+            original.replace(
+                b"## problem_definition",
+                b"### Model\n\nopenai/new-test\n\n## problem_definition",
+            )
+        )
+    restart_records = FixtureRecords()
+    if case == "new_model":
+        async with _open_run_api(
+            tmp_path,
+            monkeypatch,
+            records=restart_records,
+            setup=False,
+            existing_run_id=run_id,
+            reject_old_model=True,
+        ) as restarted:
+            models, _environment = restart_records.provider_checks[-1]
+            assert "openai/new-test" in models
+            assert run_id in restarted.registry.bindings
+        return
+    with pytest.raises(PersistenceError, match=_RESTART_CASES[case]):
+        async with _open_run_api(
+            tmp_path,
+            monkeypatch,
+            records=restart_records,
+            setup=False,
+            existing_run_id=run_id,
+        ):
+            pytest.fail("corrupted run reconstruction unexpectedly yielded an API")
 
 
 @pytest.mark.asyncio
@@ -1600,7 +1757,7 @@ async def test_shutdown_drains_setup_upload_and_retrieves_failed_task(
 
 @pytest.mark.asyncio
 async def test_failed_start_is_recorded_and_shutdown_closes_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     records = FixtureRecords(replies=deque([_decision()]))
     api_ref: list[RunAPI] = []
@@ -1623,6 +1780,9 @@ async def test_failed_start_is_recorded_and_shutdown_closes_resources(
         snapshot = await api.client.get(f"/api/runs/{run_id}")
         assert snapshot.status_code == 200
         assert snapshot.json()["execution_failed"] is True
+        assert f"Run {run_id} execution failed with PersistenceError" in caplog.text
+        assert "in fail_start" in caplog.text
+        assert "fixture start failed" not in caplog.text
         failed_row = get_run(api.conn, run_id)
         assert failed_row is not None and failed_row.status in ("pending", "running")
     api = api_ref[0]
@@ -1640,3 +1800,186 @@ async def test_failed_start_is_recorded_and_shutdown_closes_resources(
         await _gate(restarted, run_id)
         snapshot = await restarted.client.get(f"/api/runs/{run_id}")
         assert snapshot.status_code == 200 and snapshot.json()["execution_failed"] is False
+
+
+@pytest.mark.parametrize(
+    ("model", "payload", "message"),
+    (
+        (
+            RunCreate,
+            {"mode": "guided", "dataset_ids": [" "], "contract_id": "ct"},
+            "dataset id must not be blank",
+        ),
+        (
+            RunCreate,
+            {"mode": "guided", "dataset_ids": ["ds"], "contract_id": " "},
+            "contract id must not be blank",
+        ),
+        (
+            RunConfig,
+            {"dataset_id": " ", "dataset_sha256": "0" * 64, "session_id": "ss", "memory": []},
+            "identifier must not be blank",
+        ),
+        (
+            ControlRequest,
+            {"action": "pause", "target": "intake"},
+            "target and request_id are rewind only",
+        ),
+    ),
+)
+def test_run_request_models_reject_blank_and_misplaced_fields(
+    model: type[BaseModel], payload: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        model.model_validate(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ("engine", "tolerated", "foreign"))
+async def test_shutdown_pause_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    expectation = (
+        pytest.raises(EngineError, match="fixture pause refused")
+        if case == "engine"
+        else pytest.raises(RuntimeError, match="fixture disk failure")
+        if case == "foreign"
+        else nullcontext()
+    )
+    with expectation:
+        async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+            created = await _create_run(
+                api, mode="autonomous", flags=ExecutorFlags(before_block=True)
+            )
+            run_id = str(created.json()["run_id"])
+            executor = api.records.executors[run_id]
+            await executor.first_entered.wait()
+
+            async def failing_pause() -> RunState:
+                executor.first_release.set()
+                executor.next_release.set()
+                if case == "tolerated":
+                    update_run_status(api.conn, run_id, status="paused", current_node=None)
+                if case == "foreign":
+                    raise RuntimeError("fixture disk failure")
+                raise EngineError("fixture pause refused")
+
+            monkeypatch.setattr(api.registry.bindings[run_id].lifecycle, "pause", failing_pause)
+
+
+@pytest.mark.asyncio
+async def test_registry_launch_guards_and_cancelled_task_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api, mode="autonomous", flags=ExecutorFlags(before_block=True))
+        run_id = str(created.json()["run_id"])
+        executor = api.records.executors[run_id]
+        await executor.first_entered.wait()
+        binding = api.registry.bindings[run_id]
+        assert api.registry._launch(binding, deduplicate=True) is False
+        with pytest.raises(HTTPException) as busy:
+            api.registry._launch(binding)
+        assert busy.value.status_code == 409
+        task = api.registry.execution_tasks[run_id]
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        snapshot = await api.client.get(f"/api/runs/{run_id}")
+        assert snapshot.status_code == 200
+        assert snapshot.json()["execution_failed"] is True
+        assert f"Run {run_id} execution task was cancelled" in caplog.text
+        api.registry.begin_shutdown()
+        with pytest.raises(HTTPException) as closing:
+            api.registry._launch(binding)
+        assert closing.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_settle_gate_task_waits_for_live_task_with_pending_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api)
+        run_id = str(created.json()["run_id"])
+        await _gate(api, run_id)
+        live = asyncio.create_task(asyncio.sleep(0))
+        api.registry.execution_tasks[run_id] = cast("asyncio.Task[RunState]", live)
+        await api.registry._settle_gate_task(api.registry.bindings[run_id])
+        assert live.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ("contract", "dataset", "lockfile", "closing"))
+async def test_create_rejects_tampered_inputs_and_missing_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async with _open_run_api(tmp_path, monkeypatch) as api:
+        if case == "contract":
+            contract = get_contract(api.conn, api.contract_id)
+            assert contract is not None
+            stored = Path(contract.path)
+            stored.write_bytes(stored.read_bytes() + b" ")
+        elif case == "dataset":
+            dataset = get_dataset(api.conn, api.dataset_id)
+            assert dataset is not None
+            Path(dataset.path).write_bytes(b"a,b\n9,9\n")
+        elif case == "lockfile":
+            monkeypatch.chdir(tmp_path)
+        if case == "closing":
+            api.session.block_next = True
+            task = asyncio.create_task(_create_run(api))
+            await api.session.entered.wait()
+            api.registry.begin_shutdown()
+            api.session.release.set()
+            assert (await task).status_code == 503
+        else:
+            assert (await _create_run(api)).status_code == 500
+        if case == "lockfile":
+            (only,) = list_runs(api.conn, api.project_id)
+            assert only.status == "cancelled"
+        assert api.registry.execution_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_awaiting_run_and_router_engine_error_is_409(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = FixtureRecords(
+        replies=deque(
+            [
+                _decision(),
+                InterruptClass(category="decision").model_dump_json(),
+                GateAnswer(gate_id="g_missing", action="approve").model_dump_json(),
+            ]
+        )
+    )
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api)
+        run_id = str(created.json()["run_id"])
+        await _gate(api, run_id)
+        resumed = await api.client.post(f"/api/runs/{run_id}/control", json={"action": "resume"})
+        assert resumed.status_code == 409
+        message = await api.client.post(f"/api/runs/{run_id}/messages", json={"text": "approve it"})
+        assert message.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_skill_snapshot_failure_maps_to_application_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(policy: object, root: object) -> None:
+        del policy, root
+        raise ConfigError("could not snapshot skill policy")
+
+    async with _open_run_api(tmp_path, monkeypatch) as api:
+        monkeypatch.setattr("statlab.api.runs.snapshot_skill", fail)
+        response = await _create_run(api)
+        assert response.status_code == 503
+        assert response.json() == {"detail": "application unavailable"}
+        rows = list_runs(api.conn, api.project_id)
+        assert len(rows) == 1
+        assert rows[0].status == "cancelled"
