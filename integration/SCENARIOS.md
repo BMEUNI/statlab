@@ -10,6 +10,8 @@ Run it:
 ```sh
 # offline dry-run: scripted stand-in LLM, no network, no cost
 .venv/bin/python -m integration.run_scenarios --llm offline
+# rich offline dry-run: same, but the stand-in also takes the optional branches
+.venv/bin/python -m integration.run_scenarios --llm offline-rich
 # live: real DeepSeek calls, stops the suite once total cost reaches $2.00
 .venv/bin/python -m integration.run_scenarios --llm live --budget-usd 2.0
 # subset
@@ -24,6 +26,21 @@ of `report.md`, `pipeline.py`, `manifest.json` when produced.
 
 The harness uses an isolated data directory and database inside that folder; it never touches
 `projects/` or `statlab.db`. Machine-readable definitions: [scenarios.toml](./scenarios.toml).
+
+The plain offline stand-in gives the smallest valid answer to every LLM question. The rich mode
+(`offline-rich`) follows fixed rules instead:
+
+- Profiling: picks columns and two plots.
+- Training: grid-tunes the baseline.
+- Retuning: retunes the baseline once.
+- Evaluation: requests curves and a decision threshold for binary targets, and train CV plus a
+  learning curve for the baseline.
+- Interpretation: requests coefficients, partial dependence and error segments.
+- Search: proposes one wave-2 variant of the baseline, except when a scenario pins its candidate
+  count.
+- Report: adds a "Stand-in methodology note" section.
+
+Neither offline mode judges the data.
 
 ## Checks applied to every scenario (unless the scenario says otherwise)
 
@@ -175,7 +192,9 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   the API (graceful shutdown), start a fresh API on the same database and data directory; if
   the run is `paused` send `resume`.
 - **Expect:** run `completed` after restart; no execution duplicated as two `completed` rows for
-  the same node/candidate/attempt; restart did not re-run completed shared nodes.
+  the same node/candidate/attempt; restart did not re-run completed shared nodes. The one
+  exception is `experiment_design`, which may complete once per search wave, because each new
+  wave re-confirms the cumulative shortlist.
 
 ### S17 — Invalid setup is rejected cleanly (no LLM)
 - **Input:** D1. (a) contract whose target column `does_not_exist`; (b) incomplete contract

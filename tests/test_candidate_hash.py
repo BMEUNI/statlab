@@ -51,12 +51,12 @@ def test_h2_key_order_irrelevant() -> None:
         {
             "label": "c",
             "rationale": "a rationale that is at least twenty characters long",
-            "estimator": {"name": "logistic_regression", "params": {"a": 1, "b": 2}},
+            "estimator": {"name": "logistic_regression", "params": {"C": 1, "max_iter": 2}},
         }
     )
     b = CandidateSpec.model_validate(
         {
-            "estimator": {"params": {"b": 2, "a": 1}, "name": "logistic_regression"},
+            "estimator": {"params": {"max_iter": 2, "C": 1}, "name": "logistic_regression"},
             "rationale": "a rationale that is at least twenty characters long",
             "label": "c",
         }

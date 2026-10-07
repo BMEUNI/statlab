@@ -593,6 +593,8 @@ def test_get_model_params_reports_metadata(run_paths: RunPaths) -> None:
     assert gm.summary["seed"] == 3
     assert gm.summary["task"] == "classification"
     assert "params" in gm.summary
+    assert gm.summary["features"] == 2
+    assert gm.summary["feature_names"] == ["f1", "f2"]
 
 
 def test_wrong_type_ref_is_tool_param(run_paths: RunPaths) -> None:

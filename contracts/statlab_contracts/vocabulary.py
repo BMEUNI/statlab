@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from typing import Literal, get_args
 
 TargetType = Literal["binary", "multiclass", "continuous", "count"]
@@ -118,3 +120,138 @@ mechanisms."""
 
 # Owned by the tools: n_jobs (D17), random_state (D34e).
 RESERVED_ESTIMATOR_PARAMS: frozenset[str] = frozenset({"n_jobs", "random_state"})
+
+TunableKind = Literal[
+    "positive_number",
+    "nonnegative_number",
+    "positive_int",
+    "positive_int_or_none",
+    "int_at_least_2",
+    "int_at_least_2_or_none",
+    "bool",
+    "max_features",
+]
+
+TUNABLE_PARAM_KINDS: dict[str, TunableKind] = {
+    "C": "positive_number",
+    "tol": "positive_number",
+    "max_iter": "positive_int",
+    "fit_intercept": "bool",
+    "positive": "bool",
+    "alpha": "nonnegative_number",
+    "n_estimators": "positive_int",
+    "max_depth": "positive_int_or_none",
+    "min_samples_split": "int_at_least_2",
+    "min_samples_leaf": "positive_int",
+    "max_features": "max_features",
+    "bootstrap": "bool",
+    "learning_rate": "positive_number",
+    "max_leaf_nodes": "int_at_least_2_or_none",
+    "l2_regularization": "nonnegative_number",
+}
+
+# v1 tunable hyperparameters per registry estimator; combo-prone ones (penalty/solver/criterion)
+# are excluded. tests/test_registry.py proves each is a real get_params() key.
+TUNABLE_PARAMS: dict[str, frozenset[str]] = {
+    "logistic_regression": frozenset({"C", "tol", "max_iter", "fit_intercept"}),
+    "linear_regression": frozenset({"fit_intercept", "positive"}),
+    "ridge": frozenset({"alpha", "fit_intercept", "tol"}),
+    "random_forest_classifier": frozenset(
+        {
+            "n_estimators",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "max_features",
+            "bootstrap",
+        }
+    ),
+    "random_forest_regressor": frozenset(
+        {
+            "n_estimators",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "max_features",
+            "bootstrap",
+        }
+    ),
+    "hist_gb_classifier": frozenset(
+        {
+            "learning_rate",
+            "max_iter",
+            "max_leaf_nodes",
+            "max_depth",
+            "min_samples_leaf",
+            "l2_regularization",
+        }
+    ),
+    "hist_gb_regressor": frozenset(
+        {
+            "learning_rate",
+            "max_iter",
+            "max_leaf_nodes",
+            "max_depth",
+            "min_samples_leaf",
+            "l2_regularization",
+        }
+    ),
+}
+
+
+def _number_at_least(value: ParamValue, floor: float, strict: bool) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and (value > floor if strict else value >= floor)
+
+
+def _int_at_least(value: ParamValue, floor: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= floor
+
+
+def _matches_kind(value: ParamValue, kind: TunableKind) -> bool:
+    match kind:
+        case "positive_number":
+            return _number_at_least(value, 0, True)
+        case "nonnegative_number":
+            return _number_at_least(value, 0, False)
+        case "positive_int":
+            return _int_at_least(value, 1)
+        case "positive_int_or_none":
+            return value is None or _int_at_least(value, 1)
+        case "int_at_least_2":
+            return _int_at_least(value, 2)
+        case "int_at_least_2_or_none":
+            return value is None or _int_at_least(value, 2)
+        case "bool":
+            return isinstance(value, bool)
+        case _:
+            return (
+                value is None
+                or (isinstance(value, str) and value in ("sqrt", "log2"))
+                or _int_at_least(value, 1)
+                or (isinstance(value, float) and math.isfinite(value) and 0 < value <= 1)
+            )
+
+
+def tunable_param_errors(
+    params: Mapping[str, ParamValue], allowed: frozenset[str] | None
+) -> list[str]:
+    errors: list[str] = []
+    for key in sorted(params):
+        value = params[key]
+        if key not in TUNABLE_PARAM_KINDS or (allowed is not None and key not in allowed):
+            options = sorted(allowed if allowed is not None else TUNABLE_PARAM_KINDS)
+            errors.append(f"{key!r} is not a tunable parameter here; allowed: {options}")
+        elif not _matches_kind(value, TUNABLE_PARAM_KINDS[key]):
+            kind = TUNABLE_PARAM_KINDS[key].replace("_", " ")
+            errors.append(f"{key}={value!r} is not a valid {kind}")
+    return errors
+
+
+def tunable_grid_errors(grid: Mapping[str, tuple[ParamValue, ...]]) -> list[str]:
+    errors: list[str] = []
+    for key in sorted(grid):
+        for value in grid[key]:
+            errors.extend(tunable_param_errors({key: value}, None))
+    return list(dict.fromkeys(errors))

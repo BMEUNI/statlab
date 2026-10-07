@@ -19,6 +19,16 @@ from statlab_contracts.candidate import (
 )
 from statlab_contracts.contract import MissingPolicy
 
+
+def test_estimator_params_must_be_tunable() -> None:
+    with pytest.raises(ValidationError, match="'penalty' is not a tunable parameter"):
+        EstimatorSpec.model_validate({"name": "logistic_regression", "params": {"penalty": "l1"}})
+    with pytest.raises(ValidationError, match="alpha=-1 is not a valid nonnegative number"):
+        EstimatorSpec.model_validate({"name": "ridge", "params": {"alpha": -1}})
+    spec = EstimatorSpec.model_validate({"name": "fixture", "params": {"choice": 1}})
+    assert spec.params == {"choice": 1}
+
+
 # --- Defaults, one test per model --------------------------------------------------------
 
 

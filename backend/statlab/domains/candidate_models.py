@@ -6,6 +6,7 @@ import math
 
 from pydantic import JsonValue, ValidationError
 from statlab_contracts.envelope import Failure, ToolSuccess
+from statlab_contracts.vocabulary import TUNABLE_PARAMS
 
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_pipeline import (
@@ -135,16 +136,25 @@ class CandidateModelExecutor:
         previous: tuple[JsonValue, ...] = ()
         if branch.retune_count:
             previous = (candidate_result(branch, "model_evaluation").summary,)
-        decision = await self.runtime.decide(
-            invocation,
-            TrainingDecision,
-            evidence=(pipeline.model_dump(mode="json"), *previous),
-            question="Fit the approved estimator on original prepared train only. Choose direct "
+        tunable = TUNABLE_PARAMS.get(branch.spec.estimator.name)
+        question = (
+            "Fit the approved estimator on original prepared train only. Choose direct "
             "fit or bounded grid. Keep estimator/class weight/calibration/methodology fixed. "
             "Use prior validation and retune reason for parameter retunes, never for fitting. "
             "Prepared-frame CV has leakage caveats; respect explicit tuning method. "
             "For the initial direct fit leave params empty; "
-            "the approved candidate parameters are used.",
+            "the approved candidate parameters are used."
+        )
+        if tunable is not None:
+            question += (
+                f" Tunable parameters for {branch.spec.estimator.name}: "
+                f"{', '.join(sorted(tunable))}."
+            )
+        decision = await self.runtime.decide(
+            invocation,
+            TrainingDecision,
+            evidence=(pipeline.model_dump(mode="json"), *previous),
+            question=question,
         )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:
@@ -158,6 +168,13 @@ class CandidateModelExecutor:
         ):
             raise _RefusalError("training method conflicts with explicit tuning method")
         estimator = branch.spec.estimator
+        if tunable is not None:
+            unknown = sorted((set(decision.params) | set(decision.param_grid or {})) - tunable)
+            if unknown:
+                raise _RefusalError(
+                    f"parameters {unknown!r} are not tunable for {estimator.name}; "
+                    f"allowed: {sorted(tunable)!r}"
+                )
         params = _object(estimator.model_dump(mode="json")["params"], "approved parameters")
         if decision.params:
             if (
@@ -482,7 +499,9 @@ class CandidateModelExecutor:
             question="Use validation permutation importance and error segmentation for predictive "
             "diagnostics. Coefficients require supported uncalibrated linear estimators. "
             "Optional PDP uses declared model features; no inferential refits or test diagnostics. "
-            "Skip only with an explicit reason; declare material exceptions.",
+            "Skip only with an explicit reason; declare material exceptions."
+            " Partial dependence columns and error segments must be entries of "
+            "model_summary.feature_names.",
         )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:

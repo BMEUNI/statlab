@@ -703,6 +703,7 @@ def get_model_params(paths: RunPaths, model: _Model) -> ToolSuccess:
         "task": fitted.task,
         "target": fitted.target,
         "features": json_scalar(len(fitted.features)),
+        "feature_names": [json_scalar(f) for f in fitted.features],
         "classes": [json_scalar(c) for c in fitted.classes],
         "class_weight": fitted.class_weight,
         "calibrated": fitted.calibrated,

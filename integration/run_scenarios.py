@@ -57,7 +57,7 @@ def _sql_scalar(db_path: Path, sql: str, params: tuple[str, ...] = ()) -> float:
 
 def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="integration.run_scenarios")
-    parser.add_argument("--llm", choices=("live", "offline"), required=True)
+    parser.add_argument("--llm", choices=("live", "offline", "offline-rich"), required=True)
     parser.add_argument("--only", nargs="*", default=[])
     parser.add_argument("--budget-usd", type=float, default=2.0)
     parser.add_argument("--scenarios", type=Path, default=Path("integration/scenarios.toml"))
@@ -344,7 +344,7 @@ async def _suite(scenarios: tuple[Scenario, ...], args: argparse.Namespace) -> i
             db_path=workspace.db_path.resolve(),
             api_port=api_port,
         )
-        provider = OfflineProvider() if args.llm == "offline" else None
+        provider = OfflineProvider(rich=args.llm == "offline-rich") if args.llm != "live" else None
         llm_client = LlmClient(settings, acompletion=provider) if provider is not None else None
         server = ApiServer(settings=settings, llm_client=llm_client)
         api = server

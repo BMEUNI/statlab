@@ -1024,3 +1024,395 @@ Checks: Ruff check/format, mypy on `integration`; manual abort probe (offline, f
 `.venv/bin/python -m integration.run_scenarios --llm offline --only S01` in the background, after
 8 s send SIGINT to that python process, then report: exit code (expect 130), whether any
 `statlab_tools` process started by it is still alive 5 s later (expect none), and the stderr line.
+
+F5/H3-G accepted and committed (`236a47e`): make check 3014 passed/1 skip/100%; offline
+`20261007T114213Z-offline` 19/19 PASS. User asked (2026-10-07) for two free pre-live steps:
+F6 (validate LLM-proposed hyperparameters early) and H4 (rich offline stand-in).
+
+## Fix F6 — curated tunable hyperparameters, validated at the LLM boundary
+Problem: `experiment_design` checks estimator NAMES against the registry but never parameter
+names/values (`design_inference.py:95-170`); a bad name/value only fails at `train_estimator`
+(tool_param/data) → candidate failure gate → run halts. Fix: a curated table in
+`statlab_contracts` (stdlib only) checked by Pydantic validators, so a bad LLM decision gets the
+client's repair round with an actionable message. Combo-prone params (`penalty`, `solver`,
+`l1_ratio`, `criterion`) are deliberately not tunable in v1.
+
+Owned files: `contracts/statlab_contracts/vocabulary.py`, `contracts/statlab_contracts/candidate.py`,
+`backend/statlab/domains/decisions.py`, `tests/test_candidate_vocabulary.py`,
+`tests/test_candidate_models.py`, `tests/test_nodes_candidate_models.py`, `tests/test_registry.py`,
+`tests/test_candidate_hash.py`, `tests/test_candidate_set.py`, `tests/test_nodes_design_inference.py`.
+
+### vocabulary.py (after `RESERVED_ESTIMATOR_PARAMS`)
+- `TunableKind = Literal["positive_number", "nonnegative_number", "positive_int",
+  "positive_int_or_none", "int_at_least_2", "int_at_least_2_or_none", "bool", "max_features"]`.
+- `TUNABLE_PARAM_KINDS: dict[str, TunableKind]` = `C` positive_number; `tol` positive_number;
+  `max_iter` positive_int; `fit_intercept` bool; `positive` bool; `alpha` nonnegative_number;
+  `n_estimators` positive_int; `max_depth` positive_int_or_none; `min_samples_split`
+  int_at_least_2; `min_samples_leaf` positive_int; `max_features` max_features; `bootstrap` bool;
+  `learning_rate` positive_number; `max_leaf_nodes` int_at_least_2_or_none; `l2_regularization`
+  nonnegative_number.
+- `TUNABLE_PARAMS: dict[str, frozenset[str]]` = `logistic_regression` {C, tol, max_iter,
+  fit_intercept}; `linear_regression` {fit_intercept, positive}; `ridge` {alpha, fit_intercept,
+  tol}; `random_forest_classifier` and `random_forest_regressor` {n_estimators, max_depth,
+  min_samples_split, min_samples_leaf, max_features, bootstrap}; `hist_gb_classifier` and
+  `hist_gb_regressor` {learning_rate, max_iter, max_leaf_nodes, max_depth, min_samples_leaf,
+  l2_regularization}. Comment: "v1 tunable hyperparameters per registry estimator; combo-prone
+  ones (penalty/solver/criterion) are excluded. tests/test_registry.py proves each is a real
+  get_params() key."
+- `def _matches_kind(value: ParamValue, kind: TunableKind) -> bool` — `number` means
+  `isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)`;
+  `integer` means `isinstance(value, int) and not isinstance(value, bool)`:
+  positive_number → number and > 0; nonnegative_number → number and ≥ 0; positive_int → integer
+  and ≥ 1; positive_int_or_none → None or (integer ≥ 1); int_at_least_2 → integer ≥ 2;
+  int_at_least_2_or_none → None or (integer ≥ 2); bool → `isinstance(value, bool)`;
+  max_features → None, `"sqrt"`, `"log2"`, integer ≥ 1, or (`isinstance(value, float)` and
+  finite and 0 < value ≤ 1). Implement as a `match kind:` with one case per literal.
+- `def tunable_param_errors(params: Mapping[str, ParamValue], allowed: frozenset[str] | None)
+  -> list[str]`: for each key in sorted order: if key not in `TUNABLE_PARAM_KINDS` or (allowed
+  is not None and key not in allowed) → message `f"{key!r} is not a tunable parameter here;
+  allowed: {sorted(allowed if allowed is not None else TUNABLE_PARAM_KINDS)}"`; elif not
+  `_matches_kind(value, TUNABLE_PARAM_KINDS[key])` → `f"{key}={value!r} is not a valid
+  {TUNABLE_PARAM_KINDS[key].replace('_', ' ')}"`. Return the list.
+- `def tunable_grid_errors(grid: Mapping[str, tuple[ParamValue, ...]]) -> list[str]`: for each
+  key in sorted order, for each value: extend with `tunable_param_errors({key: value}, None)`;
+  return de-duplicated messages in first-seen order.
+(`math` and `collections.abc.Mapping` imports are stdlib.)
+
+### candidate.py `EstimatorSpec`
+Add a second `@model_validator(mode="after")` `_tunable_params(self) -> EstimatorSpec`, declared
+AFTER `_no_tool_fixed_params` (so reserved keys keep their F5 message): `allowed =
+TUNABLE_PARAMS.get(self.name)`; if `allowed is None` return self (unregistered names are
+refused later by the design node; test fixtures use such names); `errors =
+tunable_param_errors(self.params, allowed)`; non-empty → `ValueError(f"estimator {self.name!r}:
+" + "; ".join(errors))`.
+
+### decisions.py `TrainingDecision`
+Add `@model_validator(mode="after")` `_tunable_params(self) -> TrainingDecision` declared after
+`_no_tool_fixed_params`: `errors = [*tunable_param_errors(self.params, None),
+*tunable_grid_errors(self.param_grid or {})]`; non-empty → `ValueError("; ".join(errors))`.
+
+### Tests
+- `tests/test_candidate_vocabulary.py`:
+  - B5/B6/B7 (`test_param_value_*`): estimator name `"logistic_regression"` → `"fixture"`
+    (they test ParamValue typing, not tunables).
+  - `test_tunable_kinds_accept` parametrized `(key, value)` over: ("C", 0.5), ("C", 2),
+    ("alpha", 0.0), ("max_iter", 100), ("max_depth", None), ("max_depth", 3),
+    ("min_samples_split", 2), ("max_leaf_nodes", None), ("max_leaf_nodes", 15),
+    ("fit_intercept", False), ("max_features", "sqrt"), ("max_features", None),
+    ("max_features", 0.5), ("max_features", 3): assert `tunable_param_errors({key: value}, None)
+    == []`.
+  - `test_tunable_kinds_reject` over: ("C", 0), ("C", -1.0), ("C", True), ("C", float("inf")),
+    ("C", "1"), ("alpha", -0.1), ("max_iter", 0), ("max_iter", 1.5), ("max_iter", True),
+    ("max_depth", 0), ("min_samples_split", 1), ("max_leaf_nodes", 1), ("fit_intercept", 1),
+    ("max_features", "auto"), ("max_features", 1.5), ("max_features", 0.0),
+    ("max_features", (1, 2)): assert `tunable_param_errors({key: value}, None) == [f"{key}={value!r}
+    is not a valid {TUNABLE_PARAM_KINDS[key].replace('_', ' ')}"]`.
+  - `test_tunable_unknown_and_disallowed_keys`: `tunable_param_errors({"penalty": "l1"}, None)`
+    has one message containing "'penalty' is not a tunable parameter"; `tunable_param_errors({"alpha":
+    1.0}, TUNABLE_PARAMS["logistic_regression"])` one message containing "'alpha' is not a tunable
+    parameter" and "allowed: ['C', 'fit_intercept', 'max_iter', 'tol']".
+  - `test_tunable_grid_errors`: `tunable_grid_errors({"C": (0.5, 1.0)}) == []`;
+    `tunable_grid_errors({"C": (0.5, -1.0, -1.0)}) == ["C=-1.0 is not a valid positive number"]`.
+- `tests/test_candidate_models.py`: `test_estimator_params_must_be_tunable`: `with
+  pytest.raises(ValidationError, match="'penalty' is not a tunable parameter"):
+  EstimatorSpec.model_validate({"name": "logistic_regression", "params": {"penalty": "l1"}})`;
+  `with pytest.raises(ValidationError, match="alpha=-1 is not a valid nonnegative number"):
+  EstimatorSpec.model_validate({"name": "ridge", "params": {"alpha": -1}})`; and
+  `EstimatorSpec.model_validate({"name": "fixture", "params": {"choice": 1}}).params == {"choice":
+  1}`.
+- `tests/test_nodes_candidate_models.py`:
+  - new `test_training_decision_rejects_untunable_params` parametrized `payload` over
+    `({"rationale": "r", "params": {"penalty": "l1"}}, {"rationale": "r", "method": "grid",
+    "param_grid": {"C": (0.5, -1.0)}})`: `pytest.raises(ValidationError)` on
+    `TrainingDecision.model_validate(payload)`.
+  - existing lines ~460-472: `params={"choice": 1}` → `params={"C": 2.0}`; `params={"choice":
+    0}` → `params={"C": 1.0}`; `param_grid={"choice": (0, 1)}` → `param_grid={"C": (0.5, 1.0)}`.
+    (Expected refusal messages unchanged.)
+- `tests/test_registry.py`: new `test_tunable_params_match_registry`: `assert set(TUNABLE_PARAMS)
+  == set(estimators())`; for each `name, entry in estimators().items()`: `keys =
+  set(entry.build(0, "none").get_params())`; `assert TUNABLE_PARAMS[name] <= keys`; `assert
+  set(entry.default_grid) <= TUNABLE_PARAMS[name]`; for each grid key/value tuple assert
+  `tunable_param_errors({k: v}, TUNABLE_PARAMS[name]) == []` for every value (default-grid values
+  are tuples of scalars; pass each scalar).
+- `tests/test_candidate_hash.py` H2: params `{"a": 1, "b": 2}` → `{"C": 1, "max_iter": 2}` and
+  `{"b": 2, "a": 1}` → `{"max_iter": 2, "C": 1}`.
+- `tests/test_candidate_set.py` lines ~159 and ~245: `{"distinct": 1}` → `{"C": 2.0}`.
+- `tests/test_nodes_design_inference.py`:
+  - add module helper `_variant(name: str, i: int) -> dict[str, ParamValue]`: `i == 0` → `{}`;
+    `"logistic_regression"` → `{"C": float(i)}`; `"ridge"` → `{"alpha": float(i)}`;
+    `"linear_regression"` → `({}, {"fit_intercept": False}, {"positive": True},
+    {"fit_intercept": False, "positive": True})[i]`; any other name → `{"n_estimators": 100 + i}`.
+    `shortlist` uses `params=_variant(name, i)`.
+  - the violation test (line ~309): name becomes `"logistic_regression" if violation ==
+    "explicit" else "ridge" if violation == "max" else "linear_regression"` (the max check runs
+    before any registry lookup; 9 distinct ridge alphas keep hashes unique).
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_vocabulary.py
+tests/test_candidate_models.py tests/test_nodes_candidate_models.py tests/test_registry.py
+tests/test_candidate_hash.py tests/test_candidate_set.py tests/test_nodes_design_inference.py
+tests/test_nodes_candidate_pipeline.py tests/test_candidate_fanout.py
+tests/test_candidate_fanout_tools.py tests/test_graph_state.py tests/test_control_qa_status.py
+tests/test_tools_training.py tests/test_nodes_champion.py tests/test_control_rewind.py'`; Ruff
+check, Ruff format --check, mypy on the owned source files and changed test files.
+Stop rule: any OTHER test failing because it builds a registry-named EstimatorSpec/
+TrainingDecision with non-tunable params → stop and report file:line and the params (main
+extends this list); do not change it yourself.
+
+### F6 addendum A — baseline-params refusal fixture (2026-10-07)
+
+Receipt: only `tests/test_nodes_candidate_models.py::test_training_refusals_and_exception_wait`
+failed. Cause: `_variant(name, 0)` returns `{}`, but the "approved parameters require an explicit
+grid" refusal is reachable only when the approved candidate has nonempty params. Keep `_variant`.
+Correction (test only): in that test pass
+`estimator=EstimatorSpec(name="linear_regression", params={"fit_intercept": True})` to
+`candidate_harness(...)`, and change the line-435 assertion to
+`== {"fit_intercept": True}`. Expected refusals after the change: `{"C": 2.0}` direct differs from
+approved; grid with `params={"C": 1.0}` hits "grid decision must put fixed parameters"; grid with
+no `param_grid` hits "approved parameters require an explicit grid"; direct with `param_grid` hits
+"direct fitting cannot accept a parameter grid". Checks: the 15-file focused run again, plus Ruff
+check/format and mypy on `tests/test_nodes_candidate_models.py`.
+
+F6 acceptance (2026-10-07): focused 15-file run 466 passed / 0 failed (`/tmp/f6_tests2.log`),
+Ruff check/format and mypy on the 10 owned files exit 0. Global gate deferred to batch acceptance.
+
+## Fix F7 — the LLM can see model feature names and per-estimator tunable parameters
+
+Goal: remove two live-run failure modes found while specifying H4. (1) `model_interpretation`
+asks the LLM for partial-dependence columns and error segments, but its evidence carries only the
+feature *count* (`get_model_params` summary `features`), so a real LLM must guess encoded feature
+names; a wrong guess fails the node and, in autonomous mode, aborts the run. (2) `TrainingDecision`
+validates parameter names against the global F6 table only; a name valid for another estimator
+(for example `C` for a random forest) reaches sklearn and fails as a tool error.
+Non-goals: no new validation of PDP/error columns in the backend (the tool already returns a clear
+`tool_param` failure); no change to `TrainingDecision` or F6 tables.
+
+Owned files: `mcp_server/statlab_tools/tools/training.py`,
+`backend/statlab/domains/candidate_models.py`, `tests/test_tools_training.py`,
+`tests/test_nodes_candidate_models.py`.
+
+Recipe:
+1. `training.py` `get_model_params`: add summary key `"feature_names"` with value
+   `[json_scalar(f) for f in fitted.features]`, placed right after `"features"`. Keep `"features"`
+   (the count) unchanged.
+2. `candidate_models.py`:
+   - Import `TUNABLE_PARAMS` from `statlab_contracts.vocabulary`.
+   - In `_training`, before `self.runtime.decide(...)`, set
+     `tunable = TUNABLE_PARAMS.get(branch.spec.estimator.name)`. Append to the existing question
+     string, when `tunable is not None`, the text
+     `f" Tunable parameters for {branch.spec.estimator.name}: {', '.join(sorted(tunable))}."`
+     (nothing appended otherwise).
+   - Directly after the existing line `estimator = branch.spec.estimator` (after the tuning-method
+     refusals, before the `if decision.params:` block), when `tunable is not None`, compute
+     `unknown = sorted((set(decision.params) | set(decision.param_grid or {})) - tunable)`; if
+     nonempty raise `_RefusalError(f"parameters {unknown!r} are not tunable for {estimator.name}; allowed: {sorted(tunable)!r}")`.
+   - In `_interpretation`, append to the question string the sentence
+     `" Partial dependence columns and error segments must be entries of model_summary.feature_names."`
+3. `tests/test_tools_training.py::test_get_model_params_reports_metadata`: add
+   `assert gm.summary["features"] == 2` and `assert gm.summary["feature_names"] == ["f1", "f2"]`.
+4. `tests/test_nodes_candidate_models.py::test_training_refusals_and_exception_wait` (approved
+   candidate is `linear_regression` with `{"fit_intercept": True}` since F6 addendum A):
+   - `params={"C": 2.0}` becomes `params={"fit_intercept": False}` (still "initial direct
+     parameters differ from approved candidate").
+   - grid `params={"C": 1.0}` becomes `params={"fit_intercept": True}` (still "grid decision must
+     put fixed parameters in param_grid").
+   - direct `param_grid={"C": (0.5, 1.0)}` becomes `param_grid={"positive": (True, False)}` (still
+     "direct fitting cannot accept a parameter grid").
+   - Add, after that case and before `names = ...`: response
+     `TrainingDecision(rationale="Grid over a foreign parameter", method="grid", param_grid={"C": (0.5, 1.0)})`;
+     `_failed(await _run(h, 8), "parameters ['C'] are not tunable for linear_regression; allowed: ['fit_intercept', 'positive']")`.
+   - The final "no train/tune call" assertion stays.
+5. Same file, `test_bounded_grid_and_cv_keep_reserved_effective_parameters_out_of_calls`: right
+   after `fit = await ...` add
+   `messages = next(m for output, _, m in h.llm.calls if output is TrainingDecision)` and
+   `assert "Tunable parameters for linear_regression: fit_intercept, positive." in messages[-1]["content"]`.
+
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_tools_training.py tests/test_nodes_candidate_models.py tests/test_nodes_candidate_pipeline.py tests/test_nodes_champion.py'`;
+Ruff check, Ruff format --check and mypy on the four owned files. Stop and report on any other
+failure; do not adjust other tests.
+
+F7 acceptance (2026-10-07): focused 4-file run 109 passed / 0 failed (`/tmp/f7_tests.log`); Ruff
+check/format and mypy on the 4 owned files exit 0; read-only coverage probe of
+`statlab.domains.candidate_models` over the 3 node test files: 209 statements / 84 branches, 100%.
+
+## H4 — rich offline stand-in (`--llm offline-rich`)
+
+Goal: exercise, offline and for free, the LLM-driven branches the minimal stand-in never takes, so
+backend defects surface before any paid run: profile selections and plots, bounded grid tuning,
+one retune loop, classification curves/threshold/CV/learning curve, interpretation (coefficients,
+partial dependence, error segments), a second search wave, and champion report sections.
+Non-goals: no data judgement (choices are fixed rules), no metric override, no preprocessing or
+feature-engineering changes, no new scenario expectations, no change to `--llm offline` output.
+
+Prerequisite: F7 (the stand-in reads `model_summary.feature_names`).
+
+Owned files: `integration/offline_llm.py`, `integration/run_scenarios.py`.
+Main owns `integration/SCENARIOS.md` (one paragraph on the mode).
+
+### Prompt facts the stand-in relies on (verified)
+
+- The first `user` message content is `canonical(state_summary) + "\n\n" +
+  canonical(list(evidence)) + "\n\n" + question` (`backend/statlab/llm/prompts.py`
+  `PromptContext.messages`). Canonical JSON never contains a raw newline, so
+  `content.split("\n\n", 2)` yields `[state_json, evidence_json, question]`. Repair messages are
+  appended later; always parse the first `user` message.
+- `state_summary["candidate"]` is the `CandidateProgress` dump (keys `public_id`, `spec`, `wave`,
+  `retune_count`, ...) or `null`; `spec` has `is_baseline` and `estimator`
+  (`name`, `params`, `calibrate`, `class_weight`).
+- Evidence for `ProfileDecision` is a list of `{"tool": name, "result": ToolSuccess dump}`; the
+  `profile_schema` entry has `result.summary.columns` = `{column: {"dtype": str, ...}}`.
+- Evidence for `TrainingDecision`, `EvaluationActions`, `InterpretationDecision`: element 0 is the
+  pipeline dump (training) or the training summary (evaluation, interpretation). The training
+  summary has `model_summary` = `get_model_params` summary with `task`, `classes` (list) and,
+  since F7, `feature_names` (list of str).
+- Evidence for `SearchDecision`: element 0 is `{"comparison": [{"candidate", "spec",
+  "validation", "retune_count"}], "next_wave": int, "remaining_candidates": int, ...}`.
+- Engine retunes only while `retune_count < constraints.max_retune_loops`; the planner asks for a
+  wave only up to `max_search_waves` and once per wave. Baselines are always linear estimators.
+
+### Fixed rule tables (module constants in `offline_llm.py`)
+
+- `_GRID: dict[str, dict[str, list[JsonValue]]]`: `logistic_regression` `{"C": [0.5, 1.0]}`,
+  `linear_regression` `{"fit_intercept": [True, False]}`, `ridge` `{"alpha": [0.5, 1.0]}`.
+- `_RETUNE: dict[str, dict[str, JsonValue]]`: `logistic_regression` `{"C": 2.0}`,
+  `linear_regression` `{"fit_intercept": True}`, `ridge` `{"alpha": 2.0}`.
+- `_VARIANT: dict[str, dict[str, JsonValue]]`: `logistic_regression` `{"C": 0.5}`,
+  `linear_regression` `{"fit_intercept": False}`, `ridge` `{"alpha": 0.5}`.
+- `_LINEAR = frozenset({"logistic_regression", "linear_regression", "ridge"})`.
+- `REPORT_HEADING = "Stand-in methodology note"`.
+
+### offline_llm.py recipe
+
+1. `OfflineProvider.__init__(self, *, rich: bool = False)`; store `self.rich`.
+2. In `__call__`, keep everything; additionally pass the first user message content (the
+   `content` of the first message whose role is `user`; `RuntimeError("offline provider: no user
+   message")` if none) to `_answer` as `first_user: str`. `_answer` signature becomes
+   `_answer(self, title, user_text, first_user, scenario)`.
+3. In `_answer`, before the `_RATIONALE_ONLY` check: if `self.rich` and `title` is one of
+   `ProfileDecision`, `TrainingDecision`, `EvaluationActions`, `ValidationConclusion`,
+   `InterpretationDecision`, `SearchDecision`, `ChampionChoice`, parse with
+   `_parts(first_user) -> tuple[dict[str, JsonValue], list[JsonValue]]` (split as above,
+   `json.loads` both; `RuntimeError("offline provider: unexpected prompt layout")` if fewer than 3
+   parts or the decoded types are not dict/list) and return the matching rich builder below.
+   `ChampionChoice` returns `_champion(user_text)` plus key `"sections"` =
+   `[{"heading": REPORT_HEADING, "body": "Choices in this run came from fixed offline rules."}]`.
+4. Helpers: `_obj(value: JsonValue, what: str) -> dict[str, JsonValue]` and
+   `_list(value: JsonValue, what: str) -> list[JsonValue]` raise
+   `RuntimeError(f"offline provider: malformed {what}")` on the wrong type.
+   `_candidate(state) -> dict[str, JsonValue]` = `_obj(state.get("candidate"), "candidate")`.
+5. `_rich_profile(evidence, contract) -> dict`: find the first evidence entry with
+   `tool == "profile_schema"` (`RuntimeError` if none); `columns` = its
+   `result.summary.columns` dict, in insertion order. Excluded: `contract.target.column`,
+   `contract.features.id_columns`, `contract.features.exclude`. Numeric = dtype string lowercased
+   starts with `int`, `uint`, `float` or `decimal`, then overridden by `contract.features.roles`
+   (`"numeric"` adds, any other role removes), exactly like
+   `FoundationExecutor._validate_profile`. Lists over non-excluded columns: `num` and `cat`
+   (= the rest). Return `{"rationale": RATIONALE, "numeric": num[:2], "categorical": cat[:2],
+   "correlations": num[:2] if len(num) >= 2 else [], "outliers": num[:1], "plots": plots}` where
+   `plots` = `[{"kind": "distribution", "column": target}]` plus, when `num + cat` is nonempty,
+   `{"kind": "target_relation", "column": (num + cat)[0]}`.
+6. `_rich_training(state, contract) -> dict`: `spec = _obj(candidate["spec"])`,
+   `estimator = _obj(spec["estimator"])`, `name = str(estimator["name"])`,
+   `retune = int(candidate["retune_count"])`, `baseline = spec["is_baseline"] is True`,
+   `wave = int(candidate["wave"])`. Explicit method: `tuning = contract.modelling.tuning`,
+   `explicit = "method" in tuning.model_fields_set`.
+   - If explicit and `tuning.method == "grid"`: grid `_GRID[name]` if `name in _GRID` else
+     direct (below).
+   - Else if explicit (method `none` or `random`): direct.
+   - Else if `baseline and wave == 1 and retune == 0 and name in _GRID`: grid.
+   - Else: direct.
+   Grid answer: `{"rationale": RATIONALE, "method": "grid", "param_grid": _GRID[name]}`.
+   Direct answer: `{"rationale": RATIONALE, "method": "direct", "params": _RETUNE[name] if
+   retune > 0 and name in _RETUNE else {}}`.
+7. `_rich_evaluation(state, evidence) -> dict`: `trained = _obj(evidence[0])`,
+   `summary = _obj(trained["model_summary"])`, `task = summary["task"]`,
+   `classes = _list(summary["classes"])`; spec/estimator as above. Classification with
+   `len(classes) == 2`: `curves = ["confusion", "roc", "pr", "calibration"]`,
+   `threshold_objective = "f1"`. Classification otherwise: `curves = ["confusion"]`,
+   `threshold_objective = None`. Regression: `curves = []`, `None`.
+   `diagnostics = baseline and estimator["calibrate"] is not True`. Return rationale, `curves`,
+   `threshold_objective`, `cross_validation = diagnostics`, `learning_curve = diagnostics`.
+8. `_rich_conclusion(state, contract) -> dict`: retune when `baseline and wave == 1 and
+   retune_count == 0 and contract.constraints.max_retune_loops >= 1 and name in _RETUNE`:
+   `{"rationale": RATIONALE, "retune": True, "retune_reason": "Offline rule: one bounded retune of the baseline."}`;
+   otherwise `{"rationale": RATIONALE}`.
+9. `_rich_interpretation(state, evidence) -> dict`: `features` = list of str from
+   `trained["model_summary"]["feature_names"]`. Return rationale,
+   `coefficients = name in _LINEAR and estimator["calibrate"] is not True`,
+   `partial_dependence = features[:1]`, `error_by = features[:1]`.
+10. `_rich_search(evidence, scenario) -> dict`: `context = _obj(evidence[0])`. Return
+    `{"rationale": RATIONALE}` (empty proposal) when `scenario.expect.candidate_count is not None`
+    (the scenario pins its count), or `remaining_candidates < 1`, or no comparison item has
+    `spec.is_baseline is True`, or the baseline estimator name is not in `_VARIANT`.
+    Otherwise: `base = CandidateSpec.model_validate(baseline_spec)`;
+    `draft = CandidateSpec.model_validate({**baseline_spec, "label": f"{name} variant",
+    "rationale": "Offline stand-in variant of the baseline.", "is_baseline": False,
+    "estimator": {**baseline_estimator, "params": _VARIANT[name]},
+    "varies_from_baseline": []})`; `final = draft.model_copy(update={"varies_from_baseline":
+    tuple(sorted(changed_dimensions(base, draft)))})` then re-validate with
+    `CandidateSpec.model_validate(final.model_dump(mode="json"))`. Return
+    `{"rationale": RATIONALE, "candidates": [final dump], "family_justifications":
+    {"linear": "Offline stand-in variant of the linear baseline."}}`.
+11. Everything else (non-rich titles, or `self.rich` false) keeps the current behaviour.
+
+### run_scenarios.py recipe
+
+- `--llm` choices become `("live", "offline", "offline-rich")`.
+- `provider = OfflineProvider(rich=args.llm == "offline-rich") if args.llm != "live" else None`.
+- No other change (`live=args.llm == "live"`; output dir and summary already use `args.llm`).
+
+### Edge cases
+
+- `candidate` null for a rich candidate title: `RuntimeError` via `_obj` (a backend contract
+  change, not a stand-in choice).
+- `feature_names` empty: PDP and `error_by` are empty lists.
+- Multiclass/regression never request ROC/PR/calibration/threshold (tool constraints: binary only).
+- A pinned `candidate_count` suppresses wave 2 (S05).
+
+### Checks (implementer)
+
+- `.venv/bin/python -m ruff check integration/offline_llm.py integration/run_scenarios.py`
+- `.venv/bin/python -m ruff format --check integration/offline_llm.py integration/run_scenarios.py`
+- `.venv/bin/python -m mypy integration/offline_llm.py integration/run_scenarios.py`
+- Smoke: `.venv/bin/python -m integration.run_scenarios --llm offline-rich --only S01 > /tmp/h4_s01.log 2>&1`;
+  report the exit and the summary table line. A FAIL is reported, not fixed.
+- Plain-mode regression: `.venv/bin/python -m integration.run_scenarios --llm offline --only S01 > /tmp/h4_plain.log 2>&1`, report exit.
+
+Main then runs the full rich suite and diagnoses failures (stand-in rule vs backend defect).
+
+### H4 addendum A — cumulative design confirmation (2026-10-07)
+
+Rich S01 (`integration/out/20261007T143553Z-offline-rich`) ended `cancelled`: after the wave-2
+proposal the engine re-ran `experiment_design`, which by accepted design (chunk 28 lines 38/121)
+must confirm the exact checkpointed cumulative set; the stand-in rebuilt the contract shortlist and
+was refused ("approved shortlist must match existing candidate specifications"). Stand-in gap, not
+a backend defect.
+
+Correction (`integration/offline_llm.py`, both modes): for title `DesignDecision`, first parse
+`state, _ = _parts(first_user)`. If `state.get("checkpointed_candidates")` is a nonempty list,
+return `{"rationale": RATIONALE, "candidate_set": {"candidates": <that list unchanged>},
+"family_justifications": {"linear": J, "random_forest": J, "hist_gradient_boosting": J}}` with
+`J = "Offline stand-in confirmation of the checkpointed cumulative set."`. Otherwise keep the
+existing `_design(...)` path unchanged (the `revised_candidates` branch included).
+Checks: Ruff check/format and mypy on `integration/offline_llm.py`; rerun both S01 smokes
+(`--llm offline-rich --only S01 > /tmp/h4_s01b.log`, `--llm offline --only S01 > /tmp/h4_plainb.log`).
+
+### H4 addendum B — shared-once check counts design per wave (2026-10-07)
+
+Full rich suite `integration/out/20261007T144021Z-offline-rich`: 18/19 PASS; S16 failed only
+`E-shared_completed_once` with `experiment_design: 2`. The second completion is the accepted
+wave-2 cumulative confirmation (chunk 28), not a restart re-run. Check fix in
+`integration/checks.py` (`expect.shared_completed_once` block): query
+`SELECT COALESCE(MAX(wave), 1) FROM candidates WHERE run_id = ?` for `main_run_id` (via
+`_db_rows`; value `waves`, an int). Allowed completions per node: `waves` for
+`experiment_design`, 1 for every other shared node. Pass iff every `per_node` count is within its
+allowance and `duplicates == 0`; detail string becomes `f"per_node={per_node} waves={waves} duplicates={duplicates}"`.
+Checks: Ruff check/format and mypy on `integration/checks.py`; rerun
+`--llm offline-rich --only S16` and `--llm offline --only S16`.
+
+### F6 addendum B — exhaustive match branch (2026-10-07)
+
+`make check` (F6+F7+H4 candidate) exit 2: coverage 11385 statements / 3284 branches, one partial
+branch `contracts/statlab_contracts/vocabulary.py 228->exit` (the implicit no-case-matched exit
+of `match kind` in `_matches_kind`; unreachable since `TunableKind` is closed). Correction: change
+the final `case "max_features":` to `case _:` (body unchanged; mypy narrows `kind` to the
+remaining literal). Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_vocabulary.py tests/test_candidate_models.py'`;
+Ruff check/format and mypy on `contracts/statlab_contracts/vocabulary.py`.

@@ -187,6 +187,11 @@ async def test_bounded_grid_and_cv_keep_reserved_effective_parameters_out_of_cal
     )
     invocation = candidate_invocation(h, 8)
     fit = await CandidateModelExecutor(h.runtime)(invocation)
+    messages = next(m for output, _, m in h.llm.calls if output is TrainingDecision)
+    assert (
+        "Tunable parameters for linear_regression: fit_intercept, positive."
+        in messages[-1]["content"]
+    )
     save_result(h, invocation, fit)
     assert fit.summary["cv_caveat"]
     h.llm.responses[EvaluationActions] = EvaluationActions(
@@ -430,9 +435,14 @@ async def test_training_refusals_and_exception_wait(
     project: ProjectRow,
     tmp_path: Path,
 ) -> None:
-    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    h, tools = await candidate_harness(
+        migrated_db,
+        project,
+        tmp_path,
+        estimator=EstimatorSpec(name="linear_regression", params={"fit_intercept": True}),
+    )
     await prepare_candidate(h)
-    assert h.state.branches[0].spec.estimator.params == {"choice": 0}
+    assert h.state.branches[0].spec.estimator.params == {"fit_intercept": True}
     contract = h.runtime.contract
     _mode(h, "guided")
     h.llm.responses[TrainingDecision] = TrainingDecision(
@@ -457,11 +467,11 @@ async def test_training_refusals_and_exception_wait(
     _failed(await _run(h, 8), "random search has no supported tool")
     h.runtime = replace(h.runtime, contract=contract)
     h.llm.responses[TrainingDecision] = TrainingDecision(
-        rationale="Change params directly", params={"choice": 1}
+        rationale="Change params directly", params={"fit_intercept": False}
     )
     _failed(await _run(h, 8), "initial direct parameters differ from approved candidate")
     h.llm.responses[TrainingDecision] = TrainingDecision(
-        rationale="Grid with fixed params", method="grid", params={"choice": 0}
+        rationale="Grid with fixed params", method="grid", params={"fit_intercept": True}
     )
     _failed(await _run(h, 8), "grid decision must put fixed parameters in param_grid")
     h.llm.responses[TrainingDecision] = TrainingDecision(
@@ -469,11 +479,31 @@ async def test_training_refusals_and_exception_wait(
     )
     _failed(await _run(h, 8), "approved parameters require an explicit grid")
     h.llm.responses[TrainingDecision] = TrainingDecision(
-        rationale="Direct with grid", param_grid={"choice": (0, 1)}
+        rationale="Direct with grid", param_grid={"positive": (True, False)}
     )
     _failed(await _run(h, 8), "direct fitting cannot accept a parameter grid")
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Grid over a foreign parameter", method="grid", param_grid={"C": (0.5, 1.0)}
+    )
+    _failed(
+        await _run(h, 8),
+        "parameters ['C'] are not tunable for linear_regression; "
+        "allowed: ['fit_intercept', 'positive']",
+    )
     names = [name for _, name, _ in tools.calls]
     assert "train_estimator" not in names and "tune_estimator" not in names
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"rationale": "r", "params": {"penalty": "l1"}},
+        {"rationale": "r", "method": "grid", "param_grid": {"C": (0.5, -1.0)}},
+    ],
+)
+def test_training_decision_rejects_untunable_params(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        TrainingDecision.model_validate(payload)
 
 
 @pytest.mark.asyncio

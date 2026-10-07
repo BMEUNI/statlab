@@ -47,3 +47,29 @@ subset expectation.
 - Full offline suite `integration/out/20261007T114213Z-offline`: 19/19 PASS (only soft warning:
   S12 x4 inference). 452 stand-in LLM calls.
 - User rule: no paid run without explicit confirmation of that run.
+
+## Addendum — F6, F7, H4 (rich offline stand-in), 2026-10-07
+
+Candidate: parent `236a47e` plus the working-tree diff committed with this receipt. sha256 prefixes:
+`vocabulary.py bf8e93f7168adf2a`, `candidate.py 1a811233bd679e31`, `decisions.py 3bf902b3867bfb9b`,
+`candidate_models.py d2de5456096aa7a4`, `tools/training.py 095396c92a852fbf`,
+`integration/offline_llm.py 9bfa79aeb2a9f273`, `integration/run_scenarios.py c06adddb5d17df0a`,
+`integration/checks.py 62edfc44069ee6a2`.
+
+- F6: curated per-estimator tunable parameters, validated on `EstimatorSpec` and
+  `TrainingDecision` (LLM boundary, so one repair round sees the error).
+- F7: `get_model_params` exposes `feature_names`; training prompt lists the estimator's tunable
+  parameters; training refuses parameters foreign to the estimator before any tool call.
+- H4: `--llm offline-rich` stand-in (spec in `plan/integration_harness.md`, addenda A/B).
+- `make check` exit 0: 3051 passed, 1 designed skip; TOTAL 11385 stmts / 3282 branches 100%;
+  mypy 188 files; Ruff clean; 197 formatted. (First attempt exit 2 at 99.99%: partial branch
+  `vocabulary.py 228->exit`, fixed by F6 addendum B.)
+- Full rich suite `integration/out/20261007T144021Z-offline-rich`: 18/19 PASS; S16 failed only the
+  shared-once check (wave-2 design confirmation), fixed by H4 addendum B; S16 rerun PASS in both
+  modes (`20261007T145213Z-offline-rich`, `20261007T145251Z-offline`). Rich S01 exercised
+  `tune_estimator`, one retune, a wave-2 candidate (4 candidates), ROC/PR/calibration curves,
+  threshold selection, train CV and learning curve, coefficients, partial dependence, error
+  segments, profile plots, and the report section. No tool errors or LLM repairs in any rich
+  scenario. Only node failures: expected lifecycle interrupts (S07/S08/S16) and fit budget (S13).
+- Full plain suite after all edits `integration/out/20261007T150428Z-offline`: 19/19 PASS (soft:
+  S12 x4 inference only).

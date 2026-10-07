@@ -156,7 +156,7 @@ def test_s4_duplicate_label_whitespace_only_fails(shortlist_dict: dict[str, Any]
     padded = {
         **candidates[1],
         "label": f"  {candidates[0]['label']}  ",
-        "estimator": {**candidates[1]["estimator"], "params": {"distinct": 1}},
+        "estimator": {**candidates[1]["estimator"], "params": {"C": 2.0}},
     }
     with pytest.raises(ValidationError, match="duplicate label"):
         CandidateSet.model_validate({"candidates": [*candidates, padded]})
@@ -242,7 +242,7 @@ def test_e7_duplicate_label_whitespace_only_rejected(shortlist_dict: dict[str, A
     padded = {
         **candidates[1],
         "label": f"  {candidates[0]['label']}  ",
-        "estimator": {**candidates[1]["estimator"], "params": {"distinct": 1}},
+        "estimator": {**candidates[1]["estimator"], "params": {"C": 2.0}},
     }
     with pytest.raises(ValidationError, match="duplicate label"):
         CandidateSet.model_validate({"candidates": [*candidates, padded]})

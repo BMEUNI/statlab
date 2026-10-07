@@ -7,6 +7,7 @@ the seed into every estimator that has `random_state`, and that every forest is 
 
 from __future__ import annotations
 
+from statlab_contracts.vocabulary import TUNABLE_PARAMS, tunable_param_errors
 from statlab_tools.registry import estimators, greater_is_better, is_binary_only, scorer_for
 
 
@@ -53,6 +54,17 @@ def test_every_default_grid_key_is_a_real_param() -> None:
         valid = set(_params(entry.build(0, "none")))
         for key in entry.default_grid:
             assert key in valid, f"{name}: {key!r} not a real param"
+
+
+def test_tunable_params_match_registry() -> None:
+    assert set(TUNABLE_PARAMS) == set(estimators())
+    for name, entry in estimators().items():
+        keys = set(_params(entry.build(0, "none")))
+        assert TUNABLE_PARAMS[name] <= keys
+        assert set(entry.default_grid) <= TUNABLE_PARAMS[name]
+        for key, values in entry.default_grid.items():
+            for value in values:
+                assert tunable_param_errors({key: value}, TUNABLE_PARAMS[name]) == []
 
 
 def test_build_passes_seed_to_estimators_with_random_state() -> None:

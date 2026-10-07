@@ -44,7 +44,7 @@ from statlab_contracts.contract import (
     TargetSpec,
 )
 from statlab_contracts.envelope import Failure, ToolSuccess
-from statlab_contracts.vocabulary import TargetType
+from statlab_contracts.vocabulary import ParamValue, TargetType
 
 from tests.test_nodes_foundation import TEST, TRAIN, VALID, Harness, OfflineTools, harness
 
@@ -95,6 +95,24 @@ def registry() -> dict[str, JsonValue]:
     }
 
 
+def _variant(name: str, i: int) -> dict[str, ParamValue]:
+    if i == 0:
+        return {}
+    if name == "logistic_regression":
+        return {"C": float(i)}
+    if name == "ridge":
+        return {"alpha": float(i)}
+    if name == "linear_regression":
+        variants: tuple[dict[str, ParamValue], ...] = (
+            {},
+            {"fit_intercept": False},
+            {"positive": True},
+            {"fit_intercept": False, "positive": True},
+        )
+        return variants[i]
+    return {"n_estimators": 100 + i}
+
+
 def shortlist(name: str = "linear_regression", count: int = 1) -> DesignDecision:
     return DesignDecision(
         rationale="Compare interpretable approaches using observed profiling.",
@@ -104,7 +122,7 @@ def shortlist(name: str = "linear_regression", count: int = 1) -> DesignDecision
                     label=f"Approach {i}",
                     rationale="Observed numeric feature supports this approach.",
                     is_baseline=i == 0,
-                    estimator=EstimatorSpec(name=name, params={"choice": i}),
+                    estimator=EstimatorSpec(name=name, params=_variant(name, i)),
                     varies_from_baseline=() if i == 0 else ("hyperparameters",),
                 )
                 for i in range(count)
@@ -306,7 +324,11 @@ async def test_candidate_set_valid_external_refusals(
         target_type="binary" if violation == "explicit" else "continuous",
     )
     proposed = shortlist(
-        name="logistic_regression" if violation == "explicit" else "linear_regression",
+        name="logistic_regression"
+        if violation == "explicit"
+        else "ridge"
+        if violation == "max"
+        else "linear_regression",
         count=9 if violation == "max" else 3 if violation == "family" else 1,
     ).model_dump(mode="json")
     candidates = proposed["candidate_set"]["candidates"]

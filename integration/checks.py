@@ -587,12 +587,22 @@ def extra_checks(
         )
         per_node = {node: sum(1 for r in rows if r[0] == node) for node in _SHARED_NODES}
         duplicates = len(rows) - len(set(rows))
+        wave_value = _db_rows(
+            db_path,
+            "SELECT COALESCE(MAX(wave), 1) FROM candidates WHERE run_id = ?",
+            (main_run_id,),
+        )[0][0]
+        waves = int(str(wave_value))
         results.append(
             _must(
                 "E-shared_completed_once",
                 "shared nodes completed at most once, no duplicate completions",
-                all(n <= 1 for n in per_node.values()) and duplicates == 0,
-                f"per_node={per_node} duplicates={duplicates}",
+                all(
+                    n <= (waves if node == "experiment_design" else 1)
+                    for node, n in per_node.items()
+                )
+                and duplicates == 0,
+                f"per_node={per_node} waves={waves} duplicates={duplicates}",
             )
         )
     return results

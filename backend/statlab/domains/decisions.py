@@ -18,6 +18,8 @@ from statlab_contracts.vocabulary import (
     SplitStrategy,
     TargetType,
     Task,
+    tunable_grid_errors,
+    tunable_param_errors,
 )
 
 MetricRule = Literal["explicit", "classification_auto", "regression_auto", "override"]
@@ -179,6 +181,16 @@ class TrainingDecision(CandidateDecision):
                 f"training params {reserved!r} are fixed by the tools "
                 "(n_jobs by D17, random_state by D34e); omit them"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _tunable_params(self) -> TrainingDecision:
+        errors = [
+            *tunable_param_errors(self.params, None),
+            *tunable_grid_errors(self.param_grid or {}),
+        ]
+        if errors:
+            raise ValueError("; ".join(errors))
         return self
 
 

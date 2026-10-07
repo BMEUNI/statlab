@@ -18,6 +18,7 @@ from statlab_contracts.contract import MissingPolicy
 from statlab_contracts.vocabulary import (
     DIMENSION_FOR_FIELD,
     RESERVED_ESTIMATOR_PARAMS,
+    TUNABLE_PARAMS,
     CategoricalEncoding,
     ClassWeight,
     DatetimePart,
@@ -26,6 +27,7 @@ from statlab_contracts.vocabulary import (
     ParamValue,
     ScalingMethod,
     VariationDimension,
+    tunable_param_errors,
 )
 
 # --- FeatureSelection ------------------------------------------------------------------------
@@ -167,6 +169,16 @@ class EstimatorSpec(BaseModel):
                 f"estimator params {reserved!r} are fixed by the tools "
                 "(n_jobs by D17, random_state by D34e); omit them"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _tunable_params(self) -> EstimatorSpec:
+        allowed = TUNABLE_PARAMS.get(self.name)
+        if allowed is None:
+            return self
+        errors = tunable_param_errors(self.params, allowed)
+        if errors:
+            raise ValueError(f"estimator {self.name!r}: " + "; ".join(errors))
         return self
 
 
