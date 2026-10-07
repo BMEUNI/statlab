@@ -88,3 +88,14 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
   mypy 188 files; Ruff clean; 197 formatted.
 - Full rich suite `integration/out/20261007T184133Z-offline-rich`: 19/19 PASS (soft: S12 x4).
 - Full plain suite `integration/out/20261007T185211Z-offline`: 19/19 PASS (soft: S12 x4).
+
+## Addendum — live run 3 finding and F9, 2026-10-07
+
+- Live S01 (paid, user-confirmed) `integration/out/20261007T190758Z-live`: $0.2191, 39 calls;
+  every wave-1 node completed; the wave-2 cumulative `DesignDecision` request failed in 91 ms
+  with an unlogged non-transient provider exception -> abort. Balance OK ($5.04).
+- F9: provider failures log exception class + HTTP status (never text); litellm
+  `InternalServerError`/`BadGatewayError` are transient. Focused: 72 passed.
+- `make check` exit 0: 3057 passed, 1 designed skip; TOTAL 11403 stmts / 3286 branches 100%;
+  mypy 188; Ruff clean; 197 formatted. Offline suites not rerun: F9 only changes the
+  provider-exception path, which the stand-in never takes.

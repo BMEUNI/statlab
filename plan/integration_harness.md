@@ -1536,3 +1536,39 @@ joins every user message, and the client's repair message starts with "Repair th
 Checks: Ruff check/format and mypy on `integration/offline_llm.py`;
 `.venv/bin/python -m integration.run_scenarios --llm offline-rich --only S01 S04 > /tmp/h5.log 2>&1`
 (exit and both summary rows). Main verifies two `llm_calls` rows for the profiling execution.
+
+## Live run 3 finding (2026-10-07, `integration/out/20261007T190758Z-live`, S01, $0.2191, 39 calls)
+
+Profiling now passes (F8). All 5 wave-1 candidates completed training/evaluation/interpretation;
+the LLM proposed 2 wave-2 candidates (`SearchDecision`, 54k prompt tokens, OK). The cumulative
+`experiment_design` re-run's single `DesignDecision` request failed inside `acompletion` within
+91 ms with a non-transient exception -> `LlmCallError(bug, "LLM client failed")` -> failure gate ->
+abort. Balance was fine ($5.04 via the free balance endpoint); the design prompt is smaller than
+the search prompt that succeeded, so context length is unlikely. The exception type/status is
+discarded, so the cause is unknown. Cost note: S01 live is ~$0.22 (5 candidates; interpretation
+prompts ~40k tokens each), not ~$0.15.
+
+## Fix F9 — provider failures are diagnosable; HTTP 500/502 are transient
+
+Goal: the next failure names its provider exception class and HTTP status in the API log (never
+the provider text, which may echo secrets — existing tests assert that), and server-side 500/502
+errors get the bounded transient retry like 503. Extends chunk 25 V6's transient list.
+
+Owned files: `backend/statlab/llm/client.py`, `tests/test_llm_client.py`.
+
+Recipe:
+1. Import `InternalServerError` and `BadGatewayError` from `litellm.exceptions` (beside the
+   existing imports) and add both to `_TRANSIENT_ERRORS`.
+2. In `_request`, in the final `except Exception as exc:` handler, after computing `error_class`
+   and before `raise LlmCallError(...)`, add
+   `_LOGGER.warning("LLM request failed: %s status=%s class=%s", type(exc).__name__, getattr(exc, "status_code", None), error_class)`.
+3. `tests/test_llm_client.py::test_provider_exception_is_safely_wrapped_and_logged`:
+   - add parametrize rows `("internal", "transient")` and `("bad_gateway", "transient")`, built as
+     `InternalServerError(credential, "provider", "request")` and
+     `BadGatewayError(credential, "provider", "request")` (same positional pattern as
+     `ServiceUnavailableError`; import both);
+   - add a `caplog: pytest.LogCaptureFixture` parameter; assert
+     `f"LLM request failed: {type(cause).__name__}" in caplog.text`, `"SECRET_KEY" not in caplog.text`,
+     and for `rate_limit` additionally `"status=429" in caplog.text`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_control_recovery.py'`
+Ruff check/format and mypy on the two files.

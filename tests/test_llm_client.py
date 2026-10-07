@@ -17,6 +17,8 @@ import pytest
 from litellm import ModelResponse
 from litellm.exceptions import (
     APIConnectionError,
+    BadGatewayError,
+    InternalServerError,
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
@@ -756,6 +758,8 @@ async def test_empty_content_is_repaired(
         ("timeout", "transient"),
         ("connection", "transient"),
         ("service", "transient"),
+        ("internal", "transient"),
+        ("bad_gateway", "transient"),
         ("bug", "bug"),
     ],
 )
@@ -765,6 +769,7 @@ async def test_provider_exception_is_safely_wrapped_and_logged(
     tmp_path: Path,
     error_name: str,
     expected_class: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     conn, run_id, execution_id = llm_context
     credential = "SECRET_KEY=do-not-show"
@@ -778,6 +783,10 @@ async def test_provider_exception_is_safely_wrapped_and_logged(
         cause = APIConnectionError(credential, "provider", "request")
     elif error_name == "service":
         cause = ServiceUnavailableError(credential, "provider", "request")
+    elif error_name == "internal":
+        cause = InternalServerError(credential, "provider", "request")
+    elif error_name == "bad_gateway":
+        cause = BadGatewayError(credential, "provider", "request")
     else:
         cause = RuntimeError(credential)
 
@@ -797,6 +806,10 @@ async def test_provider_exception_is_safely_wrapped_and_logged(
     assert error.value.retry_budget == (3 if expected_class == "transient" else 0)
     assert "SECRET_KEY" not in str(error.value)
     assert error.value.cause is cause
+    assert f"LLM request failed: {type(cause).__name__}" in caplog.text
+    assert "SECRET_KEY" not in caplog.text
+    if error_name == "rate_limit":
+        assert "status=429" in caplog.text
     assert _rows(conn) == [("Result", "deepseek/test", 0, 0, 0, 0.0)]
 
 

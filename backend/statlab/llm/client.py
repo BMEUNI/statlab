@@ -21,6 +21,8 @@ import litellm
 from litellm import ModelResponse
 from litellm.exceptions import (
     APIConnectionError,
+    BadGatewayError,
+    InternalServerError,
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
@@ -47,6 +49,8 @@ _TRANSIENT_ERRORS = (
     Timeout,
     APIConnectionError,
     ServiceUnavailableError,
+    InternalServerError,
+    BadGatewayError,
     TimeoutError,
 )
 
@@ -331,6 +335,12 @@ class LlmClient:
                 )
                 label = (
                     "provider request failed" if error_class == "transient" else "LLM client failed"
+                )
+                _LOGGER.warning(
+                    "LLM request failed: %s status=%s class=%s",
+                    type(exc).__name__,
+                    getattr(exc, "status_code", None),
+                    error_class,
                 )
                 raise LlmCallError(
                     Failure(error_class=error_class, message=label), cause=exc
