@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from statlab_contracts.contract import MissingPolicy
 from statlab_contracts.vocabulary import (
     DIMENSION_FOR_FIELD,
+    RESERVED_ESTIMATOR_PARAMS,
     CategoricalEncoding,
     ClassWeight,
     DatetimePart,
@@ -157,6 +158,16 @@ class EstimatorSpec(BaseModel):
     params: dict[str, ParamValue] = Field(default_factory=dict)
     class_weight: ClassWeight = "none"
     calibrate: bool = False
+
+    @model_validator(mode="after")
+    def _no_tool_fixed_params(self) -> EstimatorSpec:
+        reserved = sorted(set(self.params) & RESERVED_ESTIMATOR_PARAMS)
+        if reserved:
+            raise ValueError(
+                f"estimator params {reserved!r} are fixed by the tools "
+                "(n_jobs by D17, random_state by D34e); omit them"
+            )
+        return self
 
 
 # --- CandidateSpec --------------------------------------------------------------------------

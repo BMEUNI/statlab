@@ -46,7 +46,7 @@ class Trigger(_Frozen):
 
 class Action(_Frozen):
     when: Trigger
-    do: Literal["pause", "resume", "cancel", "message", "rewind"]
+    do: Literal["pause", "resume", "cancel", "message", "rewind", "restart_api"]
     text: str | None = None
     target: str | None = None
     request_id: str | None = None
@@ -84,6 +84,14 @@ class Expect(_Frozen):
     tools_used: tuple[str, ...] = ()
     events_include: tuple[str, ...] = ()
     messages_answered: int = 0
+    fork_idempotent: bool = False
+    child_status: RunStatus | None = None
+    child_report_contains: tuple[str, ...] = ()
+    child_not_rerun: tuple[str, ...] = ()
+    proposal_complete: bool = False
+    memory_rows_min: int = 0
+    second_run_memory: bool = False
+    shared_completed_once: bool = False
 
 
 class Soft(_Frozen):
@@ -95,11 +103,14 @@ class Soft(_Frozen):
 
 class Setup(_Frozen):
     invalid_cases: bool = False
+    propose: bool = False
+    runs: int = Field(default=1, ge=1, le=2)
 
 
 class OfflineHints(_Frozen):
     reference_levels: dict[str, str] = {}
     revised_candidates: tuple[str, ...] = ()
+    proposed_contract: dict[str, JsonValue] = {}
 
 
 class Scenario(_Frozen):

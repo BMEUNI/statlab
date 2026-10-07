@@ -645,3 +645,15 @@ async def test_grid_without_explicit_grid_uses_registry_default(
     assert tune[0]["metric"] == "rmse"
     assert train[0]["params"] == {"fit_intercept": False}
     assert output.summary["cv_caveat"] == CV_CAVEAT
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"rationale": "r", "params": {"random_state": 1}},
+        {"rationale": "r", "method": "grid", "param_grid": {"n_jobs": [1]}},
+    ),
+)
+def test_training_decision_rejects_tool_fixed_params(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="fixed by the tools"):
+        TrainingDecision.model_validate(payload)

@@ -33,3 +33,17 @@ subset expectation.
 - Not yet built: S09 rewind/fork, S14 propose, S15 memory, S16 API restart (stage H3).
 - Live run ($2 cap) not yet executed.
 - Existing DBs keep full-dump contracts (all fields explicit); new uploads are sparse.
+
+## Addendum 2026-10-07 — H3, F5, abort; live-run readiness
+- Live run 1 (`20261007T112809Z-live`, stopped by main): exposed F5 (LLM put `random_state` in
+  candidate params). Spend recorded $0.1781 / 44 calls.
+- F5: `RESERVED_ESTIMATOR_PARAMS` in `statlab_contracts.vocabulary`; validators on
+  `EstimatorSpec` and `TrainingDecision`; tool reuses the constant; training prompt hint.
+- H3: S09 fork, S14 propose, S15 memory, S16 API restart; addendum A (harness shutdown calls
+  `begin_shutdown`, mirrors `statlab.main._RunServer`); addendum G (Ctrl-C/TERM abort → exit 130,
+  services and MCP stopped; probe: no leftover process).
+- `make check` (with F5) exit 0: 3014 passed, 1 designed skip; TOTAL 11315 stmts / 3244
+  branches 100%; mypy 188 files; Ruff clean; 197 formatted.
+- Full offline suite `integration/out/20261007T114213Z-offline`: 19/19 PASS (only soft warning:
+  S12 x4 inference). 452 stand-in LLM calls.
+- User rule: no paid run without explicit confirmation of that run.

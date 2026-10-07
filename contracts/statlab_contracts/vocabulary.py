@@ -115,3 +115,6 @@ declared `varies_from_baseline` against the actual diff (chunk 04 §3.4). Three 
 `derived_features` because interactions, datetime parts and binning are one axis from a
 reader's point of view -- "this candidate engineered features" -- even though they are three
 mechanisms."""
+
+# Owned by the tools: n_jobs (D17), random_state (D34e).
+RESERVED_ESTIMATOR_PARAMS: frozenset[str] = frozenset({"n_jobs", "random_state"})

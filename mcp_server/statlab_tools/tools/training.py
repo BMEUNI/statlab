@@ -39,7 +39,13 @@ from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
-from statlab_contracts.vocabulary import ClassWeight, Metric, ParamValue, Task
+from statlab_contracts.vocabulary import (
+    RESERVED_ESTIMATOR_PARAMS,
+    ClassWeight,
+    Metric,
+    ParamValue,
+    Task,
+)
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe, save_model
 from statlab_tools.registry import (
@@ -78,7 +84,6 @@ _FALLBACK_BUDGET_SECONDS = 300
 """Likewise for `max_fit_seconds`."""
 
 # `n_jobs` and `random_state` are owned by D17 and D34e; naming either in `params` is `tool_param`.
-_RESERVED_PARAMS = frozenset({"n_jobs", "random_state"})
 
 _Train = Annotated[ArtifactRef, Field(description="The train split frame; fits happen here only.")]
 _Model = Annotated[ArtifactRef, Field(description="A fitted model from train_estimator.")]
@@ -158,7 +163,7 @@ def _reject_class_weight(entry: EstimatorEntry, class_weight: ClassWeight) -> No
 def _validate_params(entry: EstimatorEntry, keys: tuple[str, ...]) -> None:
     """Every `params` key must be a real `get_params()` key of the estimator, and neither
     `n_jobs` nor `random_state` (D17/D34e own those). Otherwise `tool_param` (§3.1)."""
-    reserved = [k for k in keys if k in _RESERVED_PARAMS]
+    reserved = [k for k in keys if k in RESERVED_ESTIMATOR_PARAMS]
     if reserved:
         raise ToolParamError(
             f"params {reserved!r} are fixed by the tool (n_jobs by D17, random_state by D34e)",

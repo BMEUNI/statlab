@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import uvicorn
+from fastapi import FastAPI
 from pydantic import SecretStr
+from statlab.api.runs import RunRegistry
 from statlab.config import Settings
 from statlab.llm.client import LlmClient
 from statlab.main import create_app
@@ -76,15 +80,24 @@ class McpProcess:
             proc.wait()
 
 
+class _HarnessServer(uvicorn.Server):
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        """Leave SIGINT/SIGTERM to the harness so Ctrl-C reaches its cleanup."""
+        yield
+
+
 class ApiServer:
     def __init__(self, *, settings: Settings, llm_client: LlmClient | None) -> None:
         self._settings = settings
         self._llm_client = llm_client
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
+        self._app: FastAPI | None = None
 
     async def start(self) -> str:
         app = create_app(self._settings, llm_client=self._llm_client)
+        self._app = app
         config = uvicorn.Config(
             app,
             host="127.0.0.1",
@@ -93,7 +106,7 @@ class ApiServer:
             access_log=False,
             lifespan="on",
         )
-        server = uvicorn.Server(config)
+        server = _HarnessServer(config)
         self._server = server
         task = asyncio.create_task(server.serve())
         self._task = task
@@ -110,6 +123,9 @@ class ApiServer:
     async def stop(self) -> None:
         if self._server is None or self._task is None:
             return
+        registry = getattr(self._app.state, "run_registry", None) if self._app else None
+        if isinstance(registry, RunRegistry):
+            registry.begin_shutdown()
         self._server.should_exit = True
         await asyncio.wait_for(self._task, 120)
         self._server = None

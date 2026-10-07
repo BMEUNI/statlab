@@ -126,10 +126,11 @@ families, inference questions, notes), the run mode, gate answers and chat messa
 ### S09 — Rewind creates a fork
 - **Input:** D1, S01 contract; autonomous; after `completed`, control `rewind` target
   `experiment_design` with request id `s09-fork`. Then repeat the same request.
-- **Expect:** first request returns 201 with a new run id; parent becomes `superseded`; the
-  repeat returns the same child id (idempotent); child completes; child report discloses the
-  prior test exposure (prior test scorings ≥ 1); child inherits shared results before
-  `experiment_design` (no re-execution of intake..data_splitting in the child).
+- **Expect:** first request returns 201 with a new run id; the repeat returns the same child
+  id (idempotent); a completed parent stays `completed` (only an unfinished parent becomes
+  `superseded`, D36b); child completes; child report discloses the prior test exposure ("The
+  test set has been scored N time(s) in prior runs"); child inherits shared results before
+  `experiment_design` (no execution of intake..data_splitting in the child).
 
 ### S10 — Temporal data is refused cleanly (v1 limit)
 - **Input:** D5; target `units` continuous, metric `mae`, split strategy `temporal`, time column

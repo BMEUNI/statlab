@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import secrets
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -19,10 +20,17 @@ from pathlib import Path
 
 import httpx
 from statlab.llm.client import LlmClient
+from statlab.persistence.models import RunStatus
 
-from integration.checks import CheckResult, expectation_checks, global_checks, soft_checks
+from integration.checks import (
+    CheckResult,
+    expectation_checks,
+    extra_checks,
+    global_checks,
+    soft_checks,
+)
 from integration.driver import Budget, Driver, HarnessError, RunOutcome, Workspace
-from integration.evidence import collect
+from integration.evidence import Evidence, collect
 from integration.model import Scenario, load_scenarios
 from integration.offline_llm import OfflineProvider
 from integration.services import ApiServer, McpProcess, build_settings, free_port
@@ -67,6 +75,53 @@ def _setup_logging(api_log: Path) -> None:
     root.addHandler(console)
 
 
+async def _evaluate(
+    label: str,
+    scenario: Scenario,
+    run_id: str,
+    outcome: RunOutcome,
+    run_dir: Path,
+    *,
+    expect_status: RunStatus | None,
+    full: bool,
+    workspace: Workspace,
+    mcp: McpProcess,
+    live: bool,
+    log_before: int,
+) -> tuple[list[CheckResult], Evidence]:
+    evidence = collect(
+        db_path=workspace.db_path,
+        data_dir=workspace.data_dir,
+        slug=scenario.id.lower(),
+        run_id=run_id,
+        scenario_dir=run_dir,
+    )
+    with workspace.api_log.open("rb") as handle:
+        handle.seek(log_before)
+        log_slice = handle.read().decode("utf-8", errors="replace")
+    adjusted = scenario.model_copy(
+        update={"expect": scenario.expect.model_copy(update={"status": expect_status})}
+    )
+    checks = global_checks(
+        scenario=adjusted,
+        outcome=outcome,
+        evidence=evidence,
+        api_log_slice=log_slice,
+        mcp_alive=mcp.alive(),
+        live=live,
+    )
+    if full:
+        checks.extend(
+            expectation_checks(
+                scenario=scenario, outcome=outcome, evidence=evidence, scenario_dir=run_dir
+            )
+        )
+        checks.extend(soft_checks(scenario=scenario, evidence=evidence))
+    if label != "main":
+        checks = [dataclasses.replace(c, id=f"{label}-{c.id}") for c in checks]
+    return checks, evidence
+
+
 async def _run_one(
     scenario: Scenario,
     *,
@@ -82,6 +137,7 @@ async def _run_one(
     log_before = workspace.api_log.stat().st_size
     started = time.monotonic()
     outcome: RunOutcome | None = None
+    run2_id: str | None = None
     http_start = len(driver.http_log)
     try:
         if scenario.setup.invalid_cases:
@@ -90,41 +146,88 @@ async def _run_one(
             prepared = await driver.setup(scenario, scenario_dir)
             outcome = await driver.run(scenario, prepared.run_id, scenario_dir, budget=budget)
             record.budget_stopped = outcome.budget_stopped
-            evidence = collect(
-                db_path=workspace.db_path,
-                data_dir=workspace.data_dir,
-                slug=scenario.id.lower(),
-                run_id=prepared.run_id,
-                scenario_dir=scenario_dir,
+            checks, _ = await _evaluate(
+                "main",
+                scenario,
+                prepared.run_id,
+                outcome,
+                scenario_dir,
+                expect_status=scenario.expect.status,
+                full=True,
+                workspace=workspace,
+                mcp=mcp,
+                live=live,
+                log_before=log_before,
             )
-            with workspace.api_log.open("rb") as handle:
-                handle.seek(log_before)
-                log_slice = handle.read().decode("utf-8", errors="replace")
-            record.checks.extend(
-                global_checks(
-                    scenario=scenario,
-                    outcome=outcome,
-                    evidence=evidence,
-                    api_log_slice=log_slice,
-                    mcp_alive=mcp.alive(),
-                    live=live,
+            record.checks.extend(checks)
+            if scenario.setup.runs == 2:
+                run2_id = await driver.create_run(
+                    prepared.project_id, prepared.dataset_id, prepared.contract_id, scenario.mode
                 )
-            )
+                run2_dir = scenario_dir / "run2"
+                run2_dir.mkdir(exist_ok=True)
+                outcome2 = await driver.run(
+                    scenario.model_copy(update={"actions": (), "gates": ()}),
+                    run2_id,
+                    run2_dir,
+                    budget=budget,
+                )
+                checks, _ = await _evaluate(
+                    "run2",
+                    scenario,
+                    run2_id,
+                    outcome2,
+                    run2_dir,
+                    expect_status=scenario.expect.status,
+                    full=False,
+                    workspace=workspace,
+                    mcp=mcp,
+                    live=live,
+                    log_before=log_before,
+                )
+                record.checks.extend(checks)
+            if outcome.child_run_id:
+                child_dir = scenario_dir / "child"
+                child_dir.mkdir(exist_ok=True)
+                outcome_child = await driver.run(
+                    scenario.model_copy(update={"actions": (), "gates": ()}),
+                    outcome.child_run_id,
+                    child_dir,
+                    budget=budget,
+                )
+                checks, _ = await _evaluate(
+                    "child",
+                    scenario,
+                    outcome.child_run_id,
+                    outcome_child,
+                    child_dir,
+                    expect_status=scenario.expect.child_status,
+                    full=False,
+                    workspace=workspace,
+                    mcp=mcp,
+                    live=live,
+                    log_before=log_before,
+                )
+                record.checks.extend(checks)
             record.checks.extend(
-                expectation_checks(
+                extra_checks(
                     scenario=scenario,
                     outcome=outcome,
-                    evidence=evidence,
+                    db_path=workspace.db_path,
+                    project_slug=scenario.id.lower(),
+                    main_run_id=prepared.run_id,
+                    child_run_id=outcome.child_run_id,
+                    run2_id=run2_id,
+                    proposal=prepared.proposal,
                     scenario_dir=scenario_dir,
                 )
             )
-            record.checks.extend(soft_checks(scenario=scenario, evidence=evidence))
             record.cost = _sql_scalar(
                 workspace.db_path,
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE run_id = ?",
                 (prepared.run_id,),
             )
-    except (HarnessError, httpx.HTTPError) as exc:
+    except (HarnessError, httpx.HTTPError, TimeoutError) as exc:
         record.checks.append(CheckResult("H-error", "harness error", "must", False, str(exc)))
     record.duration = time.monotonic() - started
     failed_must = [c for c in record.checks if c.severity == "must" and not c.passed]
@@ -133,6 +236,9 @@ async def _run_one(
         "id": scenario.id,
         "title": scenario.title,
         "run_id": outcome.run_id if outcome else None,
+        "child_run_id": outcome.child_run_id if outcome else None,
+        "run2_id": run2_id,
+        "fork_responses": outcome.fork_responses if outcome else [],
         "final_status": outcome.final_status if outcome else None,
         "duration_s": round(record.duration, 2),
         "cost_usd": record.cost,
@@ -240,9 +346,15 @@ async def _suite(scenarios: tuple[Scenario, ...], args: argparse.Namespace) -> i
         )
         provider = OfflineProvider() if args.llm == "offline" else None
         llm_client = LlmClient(settings, acompletion=provider) if provider is not None else None
-        api = ApiServer(settings=settings, llm_client=llm_client)
-        base_url = await api.start()
-        driver = Driver(base_url=base_url, workspace=workspace)
+        server = ApiServer(settings=settings, llm_client=llm_client)
+        api = server
+        base_url = await server.start()
+
+        async def restart() -> None:
+            await server.stop()
+            await server.start()
+
+        driver = Driver(base_url=base_url, workspace=workspace, restart=restart)
         budget = Budget(workspace.db_path, args.budget_usd)
         stop = False
         for scenario in scenarios:
@@ -293,7 +405,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"unknown scenario ids: {unknown}", file=sys.stderr)
             return 2
         scenarios = tuple(s for s in scenarios if s.id in args.only)
-    return asyncio.run(_suite(scenarios, args))
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        return asyncio.run(_suite(scenarios, args))
+    except KeyboardInterrupt:
+        print("interrupted; services stopped", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

@@ -807,3 +807,220 @@ attempts and touches accepted engine/recovery semantics.
 2. `integration/checks.py` soft `summary_mentions`: search each `node_executions` row's
    `summary` AND `error` text (case-insensitive).
 Checks: Ruff check/format, mypy on `integration` (report mypy's own exit, not a pipe's).
+
+## Stage H3 — fork, propose, memory, restart scenarios (S09, S14, S15, S16)
+
+Verified backend facts:
+- Rewind: `POST /api/runs/{id}/control {"action":"rewind","target","request_id"}` → 201
+  `{"new_run_id"}`; same `request_id` again returns the existing child (`rewind.py:199-211`). A
+  COMPLETED parent stays `completed`; only a non-completed parent becomes `superseded`
+  (`rewind.py:288`, consistent with D36b "parent halted by a rewind fork"). The child is
+  launched automatically (`runs.py` `_continue`). Child report states prior test exposure:
+  "The test set has been scored {n} time(s) in prior runs" (`tools/reporting.py:312`).
+- Propose: `POST /api/projects/{pid}/contracts/propose` body `{"dataset_id", "contract"}` → 200
+  `ContractProposal{contract, reasoning}` (LLM via `complete_setup`, no `llm_calls` row).
+- Memory: `artifact_persistence` writes a `memory` row (`remember_outcome`); a new run's
+  `runs.config_json` carries `"memory": [...]` (`RunConfig.memory`).
+- Restart: `ApiServer.stop()` resets its server/task, so `start()` can run again (new app, boot
+  recovery re-launches `pending`/`running` runs, interrupted executions get "process terminated").
+
+Owned files: `integration/model.py`, `integration/driver.py`, `integration/run_scenarios.py`,
+`integration/checks.py`, `integration/offline_llm.py`, `integration/scenarios.toml`.
+
+### model.py
+- `Action.do` literal gains `"restart_api"` (no extra fields; validator unchanged otherwise).
+- `Setup` gains `propose: bool = False` and `runs: int = Field(default=1, ge=1, le=2)`.
+- `OfflineHints` gains `proposed_contract: dict[str, JsonValue] = {}`.
+- `Expect` gains: `fork_idempotent: bool = False`; `child_status: RunStatus | None = None`;
+  `child_report_contains: tuple[str, ...] = ()`; `child_not_rerun: tuple[str, ...] = ()`;
+  `proposal_complete: bool = False`; `memory_rows_min: int = 0`; `second_run_memory: bool =
+  False`; `shared_completed_once: bool = False`.
+
+### offline_llm.py
+`ContractProposal` answer: `contract = scenario.offline.proposed_contract or scenario.contract`.
+
+### driver.py
+- `RunOutcome` gains `fork_responses: list[dict[str, JsonValue]]` (default empty) and
+  `child_run_id: str | None = None`.
+- `Driver.__init__` gains keyword `restart: Callable[[], Awaitable[None]] | None = None`
+  stored as `self._restart`.
+- `_fire`: `rewind` posts the same body TWICE (both expected {200, 201}); append both response
+  bodies (with `status_code`) to `outcome.fork_responses`; `outcome.child_run_id =
+  _str(first_body["new_run_id"])`; record the action as today with the first response.
+  `restart_api`: `self._restart` None → `HarnessError("restart_api needs a restart hook")`;
+  else `await self._restart()`; record `{index, do, status_code: 0, body: {}}`.
+- `setup`: when `scenario.setup.propose`: after the dataset upload, `POST
+  /api/projects/{pid}/contracts/propose` `{"dataset_id", "contract": scenario.contract}` →
+  {200}; `proposal = _obj(body)`; write `scenario_dir / "proposal.json"`; the contract used for
+  the local pre-check, validate and upload becomes `_obj(proposal["contract"])` instead of
+  `scenario.contract`. `SetupResult` gains `proposal: dict[str, JsonValue] | None = None`.
+- New `async def create_run(self, project_id, dataset_id, contract_id, mode) -> str` (the
+  existing step-5 call, reused by `setup`).
+
+### run_scenarios.py
+- `api` restart hook: inside `_suite` define `async def restart() -> None: await api.stop();
+  await api.start()` (same settings, same `llm_client`, same port) and pass
+  `restart=restart` to `Driver`.
+- Refactor the per-run evaluation of `_run_one` into `async def _evaluate(label: str, scenario,
+  run_id, outcome, run_dir, *, expect_status, full: bool) -> list[CheckResult]`: collect
+  evidence for `run_id` into `run_dir`, global checks (with `scenario.model_copy(update={"expect":
+  scenario.expect.model_copy(update={"status": expect_status})})` so G2 uses `expect_status`),
+  and when `full` also expectation + soft checks; prefix every check id with `f"{label}-"` when
+  `label != "main"`. The api.log slice for G1 spans the whole scenario (taken once, as today).
+- `_run_one` normal path: `prepared = setup`; `outcome = run(...)`; checks += `_evaluate("main",
+  ..., expect_status=scenario.expect.status, full=True)`. Then:
+  - if `scenario.setup.runs == 2`: `run2 = await driver.create_run(prepared.project_id,
+    prepared.dataset_id, prepared.contract_id, scenario.mode)`; `outcome2 = await
+    driver.run(scenario.model_copy(update={"actions": (), "gates": ()}), run2, scenario_dir /
+    "run2", budget=budget)` (create the dir); checks += `_evaluate("run2", ...,
+    expect_status=scenario.expect.status, full=False)`.
+  - if `outcome.child_run_id`: same with label `"child"`, dir `scenario_dir / "child"`,
+    `expect_status=scenario.expect.child_status`, `full=False`.
+  - new scenario-level must-checks (in checks.py, function `extra_checks(*, scenario, outcome,
+    db_path, project_slug, main_run_id, child_run_id, run2_id, proposal, scenario_dir)`):
+    - `fork_idempotent`: two fork responses, both `new_run_id` equal and non-empty
+      (`E-fork_idempotent`).
+    - `child_report_contains`: child run dir report (`data_dir/slug/runs/<child>/report/report.md`,
+      via the child evidence) contains each string (`E-child_report:<s>`).
+    - `child_not_rerun`: no `node_executions` row of the child run for each node
+      (`E-child_not_rerun:<node>`).
+    - `proposal_complete`: proposal contract has non-null `target.type`, `objective.task`,
+      `objective.primary_metric`, `split.strategy` and non-blank `reasoning`
+      (`E-proposal_complete`).
+    - `memory_rows_min`: read-only `SELECT COUNT(*) FROM memory WHERE project_id = (SELECT
+      project_id FROM runs WHERE id = ?)` with the main run id ≥ N (`E-memory_rows`).
+    - `second_run_memory`: run2 `runs.config_json` parsed → `memory` is a non-empty list
+      (`E-second_run_memory`).
+    - `shared_completed_once`: for main run, for each of the 6 shared nodes plus
+      `champion_selection`, `artifact_persistence`: count of `completed` rows ≤ 1, and no
+      `(node_name, candidate_id, attempt)` appears twice with status `completed`
+      (`E-shared_completed_once`).
+  Child/run2 evidence objects come from `_evaluate`; make `_evaluate` return `(checks,
+  evidence)`.
+- `result.json` gains `child_run_id`, `run2_id`, `fork_responses`.
+
+### scenarios.toml (append; S01 contract and offline reference levels unless stated)
+- S09 "Rewind creates an idempotent fork": dataset churn; autonomous; action (status
+  `completed` → rewind target `experiment_design`, request_id `s09-fork`). Expect: `status =
+  "completed"`, `fork_idempotent = true`, `child_status = "completed"`, `child_report_contains
+  = ["time(s) in prior runs"]`, `child_not_rerun = ["intake", "problem_definition",
+  "data_profiling", "data_splitting"]`, `champion = true`. `timeout_s = 1800`, `max_cost_usd =
+  0.40`.
+- S14 "Contract proposed by the agent": dataset churn; contract `{target = {column =
+  "churned"}}` only; `setup.propose = true`; offline `proposed_contract` = the full S01
+  contract. Expect: `proposal_complete = true`, `status = "completed"`, `champion = true`.
+- S15 "Project memory across runs": S01 contract; `setup.runs = 2`. Expect: `status =
+  "completed"`, `memory_rows_min = 1`, `second_run_memory = true`. `max_cost_usd = 0.40`.
+- S16 "API restart mid-run": S01 contract; actions (event `node.completed` node
+  `model_evaluation` → restart_api), (status `paused` → resume). Expect: `status =
+  "completed"`, `champion = true`, `shared_completed_once = true`, `test_scored = true`.
+
+### H3 checks
+Ruff check/format, mypy on `integration` (mypy's own exit); parse smoke → 19;
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S09 S14 S15 S16` — report
+the summary table and every failed check verbatim; failures are NOT fixed by the implementer
+(main diagnoses). No live runs.
+
+## Live run 1 (2026-10-07, `integration/out/20261007T112809Z-live`) — stopped early
+S01 live: cancelled after 67 s. The design LLM put `random_state: 42` into every candidate's
+`estimator.params` at `experiment_design`; nothing rejects it there, so every `train_estimator`
+call failed `tool_param` "params ['random_state'] are fixed by the tool (n_jobs by D17,
+random_state by D34e)" (`mcp_server/statlab_tools/tools/training.py:161`); one candidate also
+refused "initial direct parameters differ from approved candidate" (the training LLM most likely
+dropped that same key). All failures escalated → harness abort. Main stopped the suite to save
+budget (S02 in progress). Spend: $0.1781 / 44 calls. Harness hazard noted: SIGINT is captured by
+the in-process uvicorn, so stopping needed TERM and left the MCP child orphaned (killed by main).
+
+## Fix F5 — tool-fixed estimator params rejected at the decision boundary
+Resolution (D17/D34e): `n_jobs` and `random_state` are owned by the tools; an LLM decision that
+sets them must fail Pydantic validation so `LlmClient` runs its one repair round with the error,
+instead of failing later at the tool.
+Owned files: `contracts/statlab_contracts/vocabulary.py`, `contracts/statlab_contracts/candidate.py`,
+`backend/statlab/domains/decisions.py`, `backend/statlab/domains/candidate_models.py`,
+`mcp_server/statlab_tools/tools/training.py`, `tests/test_candidate_models.py`,
+`tests/test_nodes_candidate_models.py`.
+Recipe:
+1. `vocabulary.py`: add module constant `RESERVED_ESTIMATOR_PARAMS: frozenset[str] =
+   frozenset({"n_jobs", "random_state"})` with a one-line comment "Owned by the tools: n_jobs
+   (D17), random_state (D34e)." (place after the other module-level constants).
+2. `candidate.py` `EstimatorSpec`: import the constant; add `@model_validator(mode="after")`
+   `_no_tool_fixed_params(self) -> EstimatorSpec`: `reserved = sorted(set(self.params) &
+   RESERVED_ESTIMATOR_PARAMS)`; non-empty → `ValueError(f"estimator params {reserved!r} are
+   fixed by the tools (n_jobs by D17, random_state by D34e); omit them")`; return self.
+3. `decisions.py` `TrainingDecision`: add `@model_validator(mode="after")`
+   `_no_tool_fixed_params(self) -> TrainingDecision`: `keys = set(self.params) |
+   set(self.param_grid or {})`; `reserved = sorted(keys & RESERVED_ESTIMATOR_PARAMS)`; non-empty →
+   same message wording with "training params" instead of "estimator params"; return self.
+4. `training.py`: delete the local `_RESERVED_PARAMS` definition (line 81); import
+   `RESERVED_ESTIMATOR_PARAMS` from `statlab_contracts.vocabulary` and use it at line 161.
+   Tool behaviour/message unchanged.
+5. `candidate_models.py` training `question` (line 142-145): append the sentence " For the
+   initial direct fit leave params empty; the approved candidate parameters are used." after
+   "respect explicit tuning method." (keep one space between sentences).
+Tests:
+- `tests/test_candidate_models.py`: `test_estimator_params_reject_tool_fixed_keys` parametrized
+  `key` over `("n_jobs", "random_state")`: `with pytest.raises(ValidationError, match="fixed by
+  the tools"): EstimatorSpec.model_validate({"name": "ridge", "params": {key: 1}})`.
+- `tests/test_nodes_candidate_models.py`: `test_training_decision_rejects_tool_fixed_params`
+  parametrized `payload` over `({"rationale": "r", "params": {"random_state": 1}}, {"rationale":
+  "r", "method": "grid", "param_grid": {"n_jobs": [1]}})`: `with pytest.raises(ValidationError,
+  match="fixed by the tools"): TrainingDecision.model_validate(payload)`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_models.py
+tests/test_nodes_candidate_models.py tests/test_tools_training.py tests/test_registry.py
+tests/test_candidate_hash.py tests/test_candidate_vocabulary.py
+tests/test_nodes_candidate_pipeline.py tests/test_candidate_fanout_tools.py'`; Ruff check, Ruff
+format --check, mypy on the seven owned files.
+Hazard: stored candidate specs that already contain `random_state` (only possible from a live
+run before F5) no longer validate; none exist outside `integration/out`.
+
+### H3 receipt (partial) and addendum A (`integration/out/20261007T113129Z-offline`)
+S09 PASS (fork idempotent, child completed, prior exposure disclosed, no shared re-run). S15
+PASS (memory row, run2 config memory). S14 cancelled; S16 crashed the suite.
+- S16: `ApiServer.stop()` sets `should_exit` only; uvicorn graceful shutdown waits forever on the
+  open SSE stream. Production `statlab.main._RunServer.handle_exit` first calls
+  `RunRegistry.begin_shutdown()`, which sets `streams_closing` (`api/runs.py:396-397`) and ends
+  every SSE generator. The `TimeoutError` from `asyncio.wait_for` then escaped `_run_one`.
+- S14: the stand-in built the design from S14's sparse contract (no candidates) → RuntimeError →
+  "LLM client failed" at experiment_design. The proposal (full contract, all fields explicit —
+  accepted proposals are explicit choices; no product change) also makes `tuning.method="grid"`
+  explicit, which the stand-in's direct fit would violate.
+Recipe (owned: `integration/services.py`, `integration/run_scenarios.py`,
+`integration/offline_llm.py`, `integration/scenarios.toml`):
+1. `services.py` `ApiServer`: keep the app created in `start()` as `self._app`; in `stop()`,
+   before setting `should_exit`, `registry = getattr(self._app.state, "run_registry", None)` and
+   if `isinstance(registry, RunRegistry)` (import from `statlab.api.runs`) call
+   `registry.begin_shutdown()` (mirrors `_RunServer.handle_exit`).
+2. `run_scenarios.py` `_run_one`: the caught exception tuple also includes `TimeoutError`.
+3. `offline_llm.py` `_answer`: `contract = DataContract.model_validate(
+   scenario.offline.proposed_contract or scenario.contract)`.
+4. `scenarios.toml` S14: inside `[scenario.offline.proposed_contract]` add `modelling.tuning`
+   with `method = "none"` (TOML table `[scenario.offline.proposed_contract.modelling.tuning]`).
+Checks: Ruff check/format, mypy on `integration`; `LOKY_MAX_CPU_COUNT=1 .venv/bin/python -m
+integration.run_scenarios --llm offline --only S14 S16` (report summary + failed checks; do not
+fix scenario failures).
+
+H3 addendum A accepted: `integration/out/20261007T113715Z-offline` S14 PASS 9/9, S16 PASS 10/10.
+F5 implemented (focused tests exit 0, statics exit 0); acceptance pending `make check`.
+
+User instruction (2026-10-07): no paid/live run until the user explicitly confirms; prepare and
+verify everything first.
+
+### H3 addendum G — safe abort of a (paid) run
+Live run 1 showed Ctrl-C does not stop the suite: the in-process `uvicorn.Server.serve()`
+installs its own SIGINT/SIGTERM handlers (`capture_signals`), so the harness never sees the
+signal; TERM then killed the process without `finally`, orphaning the MCP child.
+Recipe (owned: `integration/services.py`, `integration/run_scenarios.py`):
+1. `services.py`: add `class _HarnessServer(uvicorn.Server)` overriding `capture_signals` with a
+   `@contextlib.contextmanager` that only `yield`s (docstring: "Leave SIGINT/SIGTERM to the
+   harness so Ctrl-C reaches its cleanup."); `ApiServer.start` builds `_HarnessServer(config)`
+   instead of `uvicorn.Server(config)`.
+2. `run_scenarios.py` `main`: before `asyncio.run`, `signal.signal(signal.SIGTERM,
+   signal.default_int_handler)` (TERM behaves like Ctrl-C). `_suite` already stops driver, API
+   (which calls `begin_shutdown` → active runs cancelled, no further LLM calls) and MCP in
+   `finally`.
+3. `run_scenarios.py` `main`: wrap `asyncio.run(...)` in `try/except KeyboardInterrupt:` print
+   `"interrupted; services stopped"` to stderr and return 130.
+Checks: Ruff check/format, mypy on `integration`; manual abort probe (offline, free): start
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S01` in the background, after
+8 s send SIGINT to that python process, then report: exit code (expect 130), whether any
+`statlab_tools` process started by it is still alive 5 s later (expect none), and the stderr line.

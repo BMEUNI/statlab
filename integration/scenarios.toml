@@ -702,3 +702,212 @@ metric_max = 5.0
 
 [scenario.offline]
 reference_levels = {origin = "1"}
+
+[[scenario]]
+id = "S09"
+title = "Rewind creates an idempotent fork"
+dataset = "churn"
+mode = "autonomous"
+timeout_s = 1800
+max_cost_usd = 0.40
+
+[[scenario.actions]]
+do = "rewind"
+target = "experiment_design"
+request_id = "s09-fork"
+
+[scenario.actions.when]
+status = "completed"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+fork_idempotent = true
+child_status = "completed"
+child_report_contains = ["time(s) in prior runs"]
+child_not_rerun = ["intake", "problem_definition", "data_profiling", "data_splitting"]
+champion = true
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S14"
+title = "Contract proposed by the agent"
+dataset = "churn"
+mode = "autonomous"
+max_cost_usd = 0.25
+
+[scenario.setup]
+propose = true
+
+[scenario.contract.target]
+column = "churned"
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[scenario.offline.proposed_contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.offline.proposed_contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.offline.proposed_contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.offline.proposed_contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.offline.proposed_contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.offline.proposed_contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.offline.proposed_contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.offline.proposed_contract.modelling.tuning]
+method = "none"
+
+[scenario.expect]
+proposal_complete = true
+status = "completed"
+champion = true
+
+[[scenario]]
+id = "S15"
+title = "Project memory across runs"
+dataset = "churn"
+mode = "autonomous"
+max_cost_usd = 0.40
+
+[scenario.setup]
+runs = 2
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+memory_rows_min = 1
+second_run_memory = true
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S16"
+title = "API restart mid-run"
+dataset = "churn"
+mode = "autonomous"
+
+[[scenario.actions]]
+do = "restart_api"
+
+[scenario.actions.when]
+event = "node.completed"
+node = "model_evaluation"
+
+[[scenario.actions]]
+do = "resume"
+
+[scenario.actions.when]
+status = "paused"
+
+[scenario.contract.target]
+column = "churned"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["subscriber_id"]
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "roc_auc"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does plan affect churn?"
+predictors = ["plan"]
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does region affect churn?"
+predictors = ["region"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+champion = true
+shared_completed_once = true
+test_scored = true
+
+[scenario.offline]
+reference_levels = {plan = "premium", region = "north"}

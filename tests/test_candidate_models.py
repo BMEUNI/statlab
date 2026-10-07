@@ -447,3 +447,9 @@ def test_c20_duplicate_varies_from_baseline_rejected() -> None:
                 "varies_from_baseline": ["encoding", "encoding"],
             }
         )
+
+
+@pytest.mark.parametrize("key", ("n_jobs", "random_state"))
+def test_estimator_params_reject_tool_fixed_keys(key: str) -> None:
+    with pytest.raises(ValidationError, match="fixed by the tools"):
+        EstimatorSpec.model_validate({"name": "ridge", "params": {key: 1}})

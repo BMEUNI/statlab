@@ -7,6 +7,7 @@ import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,6 +63,7 @@ class SetupResult:
     contract_id: str
     run_id: str
     validation: dict[str, JsonValue]
+    proposal: dict[str, JsonValue] | None = None
 
 
 @dataclass
@@ -76,6 +78,8 @@ class RunOutcome:
     events: list[dict[str, JsonValue]] = field(default_factory=list)
     started_at: str = ""
     ended_at: str = ""
+    fork_responses: list[dict[str, JsonValue]] = field(default_factory=list)
+    child_run_id: str | None = None
 
 
 def _obj(value: object) -> dict[str, JsonValue]:
@@ -95,7 +99,14 @@ def _now() -> str:
 
 
 class Driver:
-    def __init__(self, *, base_url: str, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        workspace: Workspace,
+        restart: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._restart = restart
         self.workspace = workspace
         self.client = httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(120, read=300))
         self.http_log: list[dict[str, JsonValue]] = []
@@ -143,14 +154,39 @@ class Driver:
         )
         return project_id, _str(_obj(uploaded.json())["id"])
 
+    async def create_run(
+        self, project_id: str, dataset_id: str, contract_id: str, mode: str
+    ) -> str:
+        run = await self._call(
+            "POST",
+            f"/api/projects/{project_id}/runs",
+            expected={201},
+            json={"mode": mode, "dataset_ids": [dataset_id], "contract_id": contract_id},
+        )
+        return _str(_obj(run.json())["run_id"])
+
     async def setup(self, scenario: Scenario, scenario_dir: Path) -> SetupResult:
         project_id, dataset_id = await self._project_and_dataset(scenario, scenario_dir)
-        DataContract.model_validate(scenario.contract)
+        contract = scenario.contract
+        proposal: dict[str, JsonValue] | None = None
+        if scenario.setup.propose:
+            proposed = await self._call(
+                "POST",
+                f"/api/projects/{project_id}/contracts/propose",
+                expected={200},
+                json={"dataset_id": dataset_id, "contract": scenario.contract},
+            )
+            proposal = _obj(proposed.json())
+            (scenario_dir / "proposal.json").write_text(
+                json.dumps(proposal, indent=2), encoding="utf-8"
+            )
+            contract = _obj(proposal["contract"])
+        DataContract.model_validate(contract)
         validated = await self._call(
             "POST",
             f"/api/projects/{project_id}/contracts/validate",
             expected={200},
-            json={"dataset_id": dataset_id, "contract": scenario.contract},
+            json={"dataset_id": dataset_id, "contract": contract},
         )
         validation = _obj(validated.json())
         if validation.get("valid") is False:
@@ -159,21 +195,11 @@ class Driver:
             "POST",
             f"/api/projects/{project_id}/contracts",
             expected={201},
-            files={"file": ("contract.json", json.dumps(scenario.contract), "application/json")},
+            files={"file": ("contract.json", json.dumps(contract), "application/json")},
         )
         contract_id = _str(_obj(stored.json())["id"])
-        run = await self._call(
-            "POST",
-            f"/api/projects/{project_id}/runs",
-            expected={201},
-            json={
-                "mode": scenario.mode,
-                "dataset_ids": [dataset_id],
-                "contract_id": contract_id,
-            },
-        )
-        run_id = _str(_obj(run.json())["run_id"])
-        return SetupResult(project_id, dataset_id, contract_id, run_id, validation)
+        run_id = await self.create_run(project_id, dataset_id, contract_id, scenario.mode)
+        return SetupResult(project_id, dataset_id, contract_id, run_id, validation, proposal)
 
     # --- run loop -------------------------------------------------------------------------
 
@@ -295,16 +321,27 @@ class Driver:
                 "POST", f"/api/runs/{run_id}/messages", expected={200}, json={"text": action.text}
             )
         elif action.do == "rewind":
+            rewind_body: JsonValue = {
+                "action": "rewind",
+                "target": action.target,
+                "request_id": action.request_id,
+            }
             response = await self._call(
-                "POST",
-                f"/api/runs/{run_id}/control",
-                expected={200, 201},
-                json={
-                    "action": "rewind",
-                    "target": action.target,
-                    "request_id": action.request_id,
-                },
+                "POST", f"/api/runs/{run_id}/control", expected={200, 201}, json=rewind_body
             )
+            again = await self._call(
+                "POST", f"/api/runs/{run_id}/control", expected={200, 201}, json=rewind_body
+            )
+            first_body = _obj(response.json())
+            outcome.fork_responses.append({**first_body, "status_code": response.status_code})
+            outcome.fork_responses.append({**_obj(again.json()), "status_code": again.status_code})
+            outcome.child_run_id = _str(first_body["new_run_id"])
+        elif action.do == "restart_api":
+            if self._restart is None:
+                raise HarnessError("restart_api needs a restart hook")
+            await self._restart()
+            outcome.actions.append({"index": index, "do": action.do, "status_code": 0, "body": {}})
+            return
         else:
             response = await self._call(
                 "POST", f"/api/runs/{run_id}/control", expected={200}, json={"action": action.do}

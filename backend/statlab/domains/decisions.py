@@ -11,6 +11,7 @@ from statlab_contracts.contract import InferenceGoal, Objective
 from statlab_contracts.reporting import ReportSection
 from statlab_contracts.vocabulary import (
     METRICS_FOR_TASK,
+    RESERVED_ESTIMATOR_PARAMS,
     TASK_FOR_TARGET_TYPE,
     Metric,
     ParamValue,
@@ -168,6 +169,17 @@ class TrainingDecision(CandidateDecision):
     method: Literal["direct", "grid"] = "direct"
     params: dict[str, ParamValue] = Field(default_factory=dict)
     param_grid: dict[str, tuple[ParamValue, ...]] | None = None
+
+    @model_validator(mode="after")
+    def _no_tool_fixed_params(self) -> TrainingDecision:
+        keys = set(self.params) | set(self.param_grid or {})
+        reserved = sorted(keys & RESERVED_ESTIMATOR_PARAMS)
+        if reserved:
+            raise ValueError(
+                f"training params {reserved!r} are fixed by the tools "
+                "(n_jobs by D17, random_state by D34e); omit them"
+            )
+        return self
 
 
 class EvaluationActions(CandidateDecision):

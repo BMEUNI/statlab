@@ -142,7 +142,9 @@ class CandidateModelExecutor:
             question="Fit the approved estimator on original prepared train only. Choose direct "
             "fit or bounded grid. Keep estimator/class weight/calibration/methodology fixed. "
             "Use prior validation and retune reason for parameter retunes, never for fitting. "
-            "Prepared-frame CV has leakage caveats; respect explicit tuning method.",
+            "Prepared-frame CV has leakage caveats; respect explicit tuning method. "
+            "For the initial direct fit leave params empty; "
+            "the approved candidate parameters are used.",
         )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:

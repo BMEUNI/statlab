@@ -193,7 +193,9 @@ class OfflineProvider:
         )
 
     def _answer(self, title: str, user_text: str, scenario: Scenario) -> dict[str, JsonValue]:
-        contract = DataContract.model_validate(scenario.contract)
+        contract = DataContract.model_validate(
+            scenario.offline.proposed_contract or scenario.contract
+        )
         if title in _RATIONALE_ONLY:
             return {"rationale": RATIONALE}
         if title == "DesignDecision":
@@ -210,5 +212,8 @@ class OfflineProvider:
         if title == "QaAnswer":
             return {"text": "Offline stand-in answer.", "references": []}
         if title == "ContractProposal":
-            return {"contract": scenario.contract, "reasoning": "Offline stand-in proposal."}
+            return {
+                "contract": scenario.offline.proposed_contract or scenario.contract,
+                "reasoning": "Offline stand-in proposal.",
+            }
         raise RuntimeError(f"offline provider has no answer for {title}")

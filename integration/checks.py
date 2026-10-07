@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+
+from pydantic import JsonValue
 
 from integration.model import Scenario
 
@@ -439,6 +442,157 @@ def soft_checks(*, scenario: Scenario, evidence: Evidence) -> list[CheckResult]:
                 f"W-summary:{text}",
                 f"a node summary mentions {text!r}",
                 any(text.lower() in s for s in summaries),
+            )
+        )
+    return results
+
+
+_SHARED_NODES = (
+    "intake",
+    "problem_definition",
+    "data_profiling",
+    "data_splitting",
+    "experiment_design",
+    "inferential_analysis",
+    "champion_selection",
+    "artifact_persistence",
+)
+
+
+def _db_rows(db_path: Path, sql: str, params: tuple[str, ...]) -> list[tuple[object, ...]]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return [tuple(row) for row in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def extra_checks(
+    *,
+    scenario: Scenario,
+    outcome: RunOutcome,
+    db_path: Path,
+    project_slug: str,
+    main_run_id: str,
+    child_run_id: str | None,
+    run2_id: str | None,
+    proposal: dict[str, JsonValue] | None,
+    scenario_dir: Path,
+) -> list[CheckResult]:
+    expect = scenario.expect
+    results: list[CheckResult] = []
+    if expect.fork_idempotent:
+        ids = [response.get("new_run_id") for response in outcome.fork_responses]
+        results.append(
+            _must(
+                "E-fork_idempotent",
+                "repeated rewind returns the same child",
+                len(ids) == 2 and ids[0] == ids[1] and isinstance(ids[0], str) and bool(ids[0]),
+                f"new_run_ids={ids}",
+            )
+        )
+    if expect.child_report_contains:
+        report_path = scenario_dir / "child" / "report.md"
+        text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
+        for needle in expect.child_report_contains:
+            results.append(
+                _must(
+                    f"E-child_report:{needle}",
+                    f"child report contains {needle!r}",
+                    needle in text,
+                    f"project={project_slug} child={child_run_id}",
+                )
+            )
+    for node in expect.child_not_rerun:
+        rows = (
+            _db_rows(
+                db_path,
+                "SELECT COUNT(*) FROM node_executions WHERE run_id = ? AND node_name = ?",
+                (child_run_id, node),
+            )
+            if child_run_id
+            else [(-1,)]
+        )
+        results.append(
+            _must(
+                f"E-child_not_rerun:{node}",
+                f"{node} not re-executed in child",
+                rows[0][0] == 0,
+                f"rows={rows[0][0]}",
+            )
+        )
+    if expect.proposal_complete:
+        contract = proposal.get("contract") if proposal else None
+        reasoning = proposal.get("reasoning") if proposal else None
+
+        def _nested(section: str, key: str) -> object:
+            part = contract.get(section) if isinstance(contract, dict) else None
+            return part.get(key) if isinstance(part, dict) else None
+
+        missing = [
+            name
+            for name, value in (
+                ("target.type", _nested("target", "type")),
+                ("objective.task", _nested("objective", "task")),
+                ("objective.primary_metric", _nested("objective", "primary_metric")),
+                ("split.strategy", _nested("split", "strategy")),
+            )
+            if value is None
+        ]
+        blank = not isinstance(reasoning, str) or not reasoning.strip()
+        results.append(
+            _must(
+                "E-proposal_complete",
+                "proposal has the required contract fields and reasoning",
+                not missing and not blank,
+                f"missing={missing} blank_reasoning={blank}",
+            )
+        )
+    if expect.memory_rows_min:
+        count = _db_rows(
+            db_path,
+            "SELECT COUNT(*) FROM memory WHERE project_id = "
+            "(SELECT project_id FROM runs WHERE id = ?)",
+            (main_run_id,),
+        )[0][0]
+        results.append(
+            _must(
+                "E-memory_rows",
+                f"memory rows >= {expect.memory_rows_min}",
+                isinstance(count, int) and count >= expect.memory_rows_min,
+                f"count={count}",
+            )
+        )
+    if expect.second_run_memory:
+        memory: object = None
+        if run2_id:
+            rows = _db_rows(db_path, "SELECT config_json FROM runs WHERE id = ?", (run2_id,))
+            if rows and isinstance(rows[0][0], str):
+                parsed = json.loads(rows[0][0])
+                memory = parsed.get("memory") if isinstance(parsed, dict) else None
+        results.append(
+            _must(
+                "E-second_run_memory",
+                "second run config carries memory",
+                isinstance(memory, list) and bool(memory),
+                f"memory={memory!r}"[:300],
+            )
+        )
+    if expect.shared_completed_once:
+        rows = _db_rows(
+            db_path,
+            "SELECT node_name, candidate_id, attempt FROM node_executions "
+            "WHERE run_id = ? AND status = 'completed'",
+            (main_run_id,),
+        )
+        per_node = {node: sum(1 for r in rows if r[0] == node) for node in _SHARED_NODES}
+        duplicates = len(rows) - len(set(rows))
+        results.append(
+            _must(
+                "E-shared_completed_once",
+                "shared nodes completed at most once, no duplicate completions",
+                all(n <= 1 for n in per_node.values()) and duplicates == 0,
+                f"per_node={per_node} duplicates={duplicates}",
             )
         )
     return results
