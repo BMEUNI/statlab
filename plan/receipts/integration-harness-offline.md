@@ -99,3 +99,14 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - `make check` exit 0: 3057 passed, 1 designed skip; TOTAL 11403 stmts / 3286 branches 100%;
   mypy 188; Ruff clean; 197 formatted. Offline suites not rerun: F9 only changes the
   provider-exception path, which the stand-in never takes.
+
+## Addendum — live run 4 finding and F10, 2026-10-07
+
+- Live S01 (paid, user-confirmed) `integration/out/20261007T191756Z-live`: $0.0314, 7 calls;
+  the LLM copied `list_estimators` `default_grid` lists into candidate params at design; F6
+  rejected twice -> abort. No provider failure (F9 logging idle).
+- F10: sequence-valued params get "a parameter takes one value (tuning grids are chosen at
+  model_training as param_grid)"; the design question states single values only.
+- `make check` exit 0: 3057 passed, 1 designed skip; TOTAL 11405 stmts / 3288 branches 100%;
+  mypy 188; Ruff clean; 197 formatted. Offline suites not rerun: the stand-in never sends
+  sequences, and the only other change is prompt text.

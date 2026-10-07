@@ -1572,3 +1572,28 @@ Recipe:
      and for `rate_limit` additionally `"status=429" in caplog.text`.
 Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_control_recovery.py'`
 Ruff check/format and mypy on the two files.
+
+## Live run 4 finding (2026-10-07, `integration/out/20261007T191756Z-live`, S01, $0.0314)
+
+F9 logging: no provider failure this time. S01 ended `cancelled` at the initial
+`experiment_design`: the LLM put tuning grids into candidate params (`max_depth: (None, 5, 10)`,
+`learning_rate: (0.05, 0.1)`); F6 rejected them ("... is not a valid positive int or none"), the
+repair round repeated the same grids, `LlmOutputError` -> failure gate -> abort. The message
+names a kind mismatch, not the actual mistake (a sequence where one value is required).
+
+## Fix F10 — say "one value, grids later" at design time
+
+Owned files: `contracts/statlab_contracts/vocabulary.py`,
+`backend/statlab/domains/design_inference.py`, `tests/test_candidate_vocabulary.py`.
+
+Recipe:
+1. `vocabulary.py` `tunable_param_errors`: between the unknown-key branch and the kind branch add
+   `elif isinstance(value, tuple):` appending
+   `f"{key}={value!r} is a sequence; a parameter takes one value (tuning grids are chosen at model_training as param_grid)"`.
+2. `design_inference.py` `_design` question: append the sentence
+   `" Estimator params hold single fixed values (empty for defaults); never put tuning grids or lists there, grids are chosen later at model_training."`
+3. `tests/test_candidate_vocabulary.py`: remove `("max_features", (1, 2))` from the
+   `test_tunable_kinds_reject` table; add test `test_tunable_sequence_value_names_the_mistake`:
+   `tunable_param_errors({"max_depth": (None, 5)}, None) == ["max_depth=(None, 5) is a sequence; a parameter takes one value (tuning grids are chosen at model_training as param_grid)"]`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_vocabulary.py tests/test_candidate_models.py tests/test_nodes_design_inference.py tests/test_nodes_candidate_models.py'`;
+Ruff check/format and mypy on the three owned files.

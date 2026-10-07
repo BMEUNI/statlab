@@ -189,12 +189,18 @@ def test_tunable_kinds_accept(key: str, value: ParamValue) -> None:
         ("max_features", "auto"),
         ("max_features", 1.5),
         ("max_features", 0.0),
-        ("max_features", (1, 2)),
     ],
 )
 def test_tunable_kinds_reject(key: str, value: ParamValue) -> None:
     kind = TUNABLE_PARAM_KINDS[key].replace("_", " ")
     assert tunable_param_errors({key: value}, None) == [f"{key}={value!r} is not a valid {kind}"]
+
+
+def test_tunable_sequence_value_names_the_mistake() -> None:
+    assert tunable_param_errors({"max_depth": (None, 5)}, None) == [
+        "max_depth=(None, 5) is a sequence; a parameter takes one value "
+        "(tuning grids are chosen at model_training as param_grid)"
+    ]
 
 
 def test_tunable_unknown_and_disallowed_keys() -> None:

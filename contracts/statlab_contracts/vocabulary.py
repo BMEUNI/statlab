@@ -243,6 +243,11 @@ def tunable_param_errors(
         if key not in TUNABLE_PARAM_KINDS or (allowed is not None and key not in allowed):
             options = sorted(allowed if allowed is not None else TUNABLE_PARAM_KINDS)
             errors.append(f"{key!r} is not a tunable parameter here; allowed: {options}")
+        elif isinstance(value, tuple):
+            errors.append(
+                f"{key}={value!r} is a sequence; a parameter takes one value "
+                "(tuning grids are chosen at model_training as param_grid)"
+            )
         elif not _matches_kind(value, TUNABLE_PARAM_KINDS[key]):
             kind = TUNABLE_PARAM_KINDS[key].replace("_", " ")
             errors.append(f"{key}={value!r} is not a valid {kind}")

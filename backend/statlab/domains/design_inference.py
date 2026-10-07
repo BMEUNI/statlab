@@ -181,7 +181,9 @@ class DesignInferenceExecutor:
             "recorded dimensions and justify families above two. Respect explicit contract "
             "choices and shared pre-split row threshold. If checkpointed candidates exist, "
             "confirm that exact cumulative set, preserving every specification. "
-            "Do not fit or probe parameters.",
+            "Do not fit or probe parameters. Estimator params hold single fixed values "
+            "(empty for defaults); never put tuning grids or lists there, grids are chosen "
+            "later at model_training.",
             check=_rejecting(
                 lambda d: self.validate_design(invocation, d, registry.summary, problem)
             ),
