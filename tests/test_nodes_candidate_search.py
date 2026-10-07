@@ -15,9 +15,10 @@ from statlab.domains.decisions import DesignDecision, SearchDecision
 from statlab.domains.design_inference import DesignInferenceExecutor
 from statlab.domains.foundation import _RefusalError
 from statlab.domains.tabular import TABULAR_SPINE
-from statlab.errors import EngineError
+from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
+from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import (
     create_node_execution,
@@ -266,3 +267,40 @@ async def test_search_wave_order_budget_and_no_completed_branch(
     )
     assert await planner(failed, 2) == ()
     assert len(h.llm.calls) == calls
+
+
+@pytest.mark.asyncio
+async def test_search_check_feeds_repair_and_unrepairable_proposal_ends_search(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    await joined(h)
+    planner = CandidateSearchPlanner(h.runtime)
+    original = h.state.branches[0].spec
+    new = proposal(original)
+    h.llm.responses[SearchDecision] = SearchDecision(
+        rationale="Validation comparison", candidates=(new,)
+    )
+    assert await planner(h.state, 2) == (new,)
+    check = h.llm.checks[SearchDecision]
+    assert check(SearchDecision(rationale="Nothing new")) is None
+    assert check(SearchDecision(rationale="ok", candidates=(new,))) is None
+    with pytest.raises(DecisionRejectedError, match="cumulative"):
+        check(SearchDecision(rationale="dup", candidates=(original,)))
+
+    async def unrepairable(*args: object, **kwargs: object) -> SearchDecision:
+        raise LlmOutputError(
+            Failure(
+                error_class="tool_param",
+                message="LLM output remained invalid after one repair",
+                field_errors={"output": "still invalid"},
+            )
+        )
+
+    monkeypatch.setattr(h.llm, "complete", unrepairable)
+    assert await planner(h.state, 2) == ()
+    assert "search ends" in caplog.text

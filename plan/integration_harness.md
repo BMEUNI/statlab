@@ -1597,3 +1597,72 @@ Recipe:
    `tunable_param_errors({"max_depth": (None, 5)}, None) == ["max_depth=(None, 5) is a sequence; a parameter takes one value (tuning grids are chosen at model_training as param_grid)"]`.
 Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_candidate_vocabulary.py tests/test_candidate_models.py tests/test_nodes_design_inference.py tests/test_nodes_candidate_models.py'`;
 Ruff check/format and mypy on the three owned files.
+
+## Live run 5 finding (2026-10-07, `integration/out/20261007T192326Z-live`, S01, $0.2384)
+
+F10 worked: design, inference and all 5 candidates completed. The wave-2 `SearchDecision` added a
+third linear candidate without `family_justifications`; `CandidateSearchPlanner` ran
+`validate_design` after `decide`, raised `_RefusalError("more than two candidates in a family
+need justification")` from inside `engine._fanout`. The run task crashed (API log ERROR, snapshot
+`execution_failed=true` by chunk 34 design, SQL status left `running`); the harness ignored
+`execution_failed` and waited the full 1200 s timeout.
+
+## Fix F11 — search proposals get the repair round; unusable proposals end search
+
+Owned files: `backend/statlab/domains/candidate_search.py`,
+`backend/statlab/domains/design_inference.py`, `tests/test_nodes_candidate_search.py`,
+`integration/driver.py` (H6).
+
+Recipe:
+1. `design_inference.py` `validate_design`: family refusal message becomes
+   `f"more than two candidates in family {family!r} need a family_justifications entry"`.
+2. `candidate_search.py`:
+   - Add `import logging`, `_LOGGER = logging.getLogger(__name__)`; import `_rejecting` from
+     `statlab.domains.foundation` and `LlmOutputError` from `statlab.errors`.
+   - In `__call__`, after `self.runtime.context(invocation)` and before building `comparison`,
+     compute (moved up from after `decide`): `old`, `prior`, `justifications` exactly as today,
+     plus `registry = _object(design.summary.get("registry"), "design registry")`,
+     `problem = problem_from_state(state)` and
+     `existing = tuple(branch.spec for branch in state.branches)`.
+   - Define local `def cumulative(proposal: SearchDecision) -> None`: return immediately when
+     `proposal.candidates` is empty; else build
+     `CandidateSet(candidates=(*existing, *proposal.candidates))`, mapping `ValidationError` to
+     `_RefusalError(f"invalid cumulative candidate proposal: {reasons}")` (`from exc`) where
+     `reasons = "; ".join(str(error["msg"]) for error in exc.errors(include_input=False, include_context=False))`;
+     then `DesignInferenceExecutor(self.runtime).validate_design(invocation,
+     DesignDecision(rationale=proposal.rationale, candidate_set=<that set>,
+     family_justifications={**justifications, **proposal.family_justifications}), registry,
+     problem, require_saved=False)`.
+   - Call `decide(..., check=_rejecting(cumulative))` inside
+     `try: ... except LlmOutputError: _LOGGER.warning("Run %s wave %d search proposal stayed invalid after repair; search ends", state.run_id, wave); return ()`.
+   - After decide: `if not proposal.candidates: return ()`; `cumulative(proposal)`;
+     `return proposal.candidates`. Remove the old post-decide block it replaces.
+3. `tests/test_nodes_candidate_search.py`:
+   - The existing `match="cumulative"` assertion stays valid.
+   - New `test_search_check_feeds_repair_and_unrepairable_proposal_ends_search(migrated_db,
+     project, tmp_path, monkeypatch, caplog)`: `h, _ = await candidate_harness(...)`;
+     `await joined(h)`; `planner = CandidateSearchPlanner(h.runtime)`;
+     `original = h.state.branches[0].spec`; `new = proposal(original)`; response
+     `SearchDecision(rationale="Validation comparison", candidates=(new,))`;
+     `assert await planner(h.state, 2) == (new,)`; `check = h.llm.checks[SearchDecision]`;
+     `check(SearchDecision(rationale="Nothing new"))` is None;
+     `check(SearchDecision(rationale="ok", candidates=(new,)))` is None;
+     `with pytest.raises(DecisionRejectedError, match="cumulative")`:
+     `check(SearchDecision(rationale="dup", candidates=(original,)))`.
+     Then define `async def unrepairable(*args: object, **kwargs: object) -> SearchDecision:
+     raise LlmOutputError(Failure(error_class="tool_param", message="LLM output remained invalid after one repair"))`,
+     `monkeypatch.setattr(h.llm, "complete", unrepairable)`;
+     `assert await planner(h.state, 2) == ()` and `"search ends" in caplog.text`.
+     (Imports: `DecisionRejectedError` from `statlab.llm.client`, `LlmOutputError` from
+     `statlab.errors`; `Failure` is already imported.)
+4. H6 `integration/driver.py` wait loop: right after `outcome.final_status = status`, add: if
+   `snapshot.get("execution_failed") is True`: set `outcome.final_status = "execution_failed"`
+   and `break` (no cancel call). G2 then reports `final=execution_failed`.
+
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_search.py tests/test_nodes_design_inference.py tests/test_graph_engine.py tests/test_graph_engine_tools.py'`;
+Ruff check/format and mypy on the four owned files;
+`.venv/bin/python -m integration.run_scenarios --llm offline-rich --only S01 > /tmp/f11_rich.log 2>&1`.
+
+F11 addendum A: `Failure(error_class="tool_param", ...)` requires nonempty `field_errors`. In the
+new test use `Failure(error_class="tool_param", message="LLM output remained invalid after one repair", field_errors={"output": "still invalid"})`
+(the shape `LlmClient` produces). Rerun the focused pytest command only.

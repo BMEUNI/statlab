@@ -160,7 +160,10 @@ class DesignInferenceExecutor:
                 raise _RefusalError("candidate choices name unknown or ineligible columns")
         for family, count in families.items():
             if count > 2 and not decision.family_justifications.get(family, "").strip():
-                raise _RefusalError("more than two candidates in a family need justification")
+                raise _RefusalError(
+                    f"more than two candidates in family {family!r} "
+                    "need a family_justifications entry"
+                )
         if (
             require_saved
             and invocation.state.branches

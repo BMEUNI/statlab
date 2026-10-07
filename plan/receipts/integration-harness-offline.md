@@ -110,3 +110,16 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - `make check` exit 0: 3057 passed, 1 designed skip; TOTAL 11405 stmts / 3288 branches 100%;
   mypy 188; Ruff clean; 197 formatted. Offline suites not rerun: the stand-in never sends
   sequences, and the only other change is prompt text.
+
+## Addendum — live run 5 finding, F11, H6, 2026-10-07
+
+- Live S01 (paid, user-confirmed) `integration/out/20261007T192326Z-live`: $0.2384; full wave 1
+  completed; the wave-2 search proposal broke the family-justification rule, the planner raised
+  `_RefusalError` inside `_fanout`, the run task crashed (`execution_failed`), harness waited
+  1200 s.
+- F11: search proposals validated inside the repair round (`check=_rejecting(cumulative)`); an
+  unrepairable proposal logs a warning and ends search; family refusal names the family. H6:
+  harness treats snapshot `execution_failed=true` as terminal.
+- `make check` exit 0: 3058 passed, 1 designed skip; TOTAL 11418 stmts / 3290 branches 100%;
+  mypy 188; Ruff clean; 197 formatted.
+- Full rich suite `integration/out/20261007T195055Z-offline-rich`: 19/19 PASS.

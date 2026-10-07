@@ -377,6 +377,9 @@ class Driver:
                 )
                 status = _str(_obj(snapshot["run"])["status"])
                 outcome.final_status = status
+                if snapshot.get("execution_failed") is True:
+                    outcome.final_status = "execution_failed"
+                    break
                 gates = snapshot.get("gates")
                 if status in ("awaiting_user", "paused"):
                     await self._answer_gates(
