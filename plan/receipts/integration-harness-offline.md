@@ -186,3 +186,10 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - Offline `integration/out/20261008T084054Z-offline` and rich
   `integration/out/20261008T084855Z-offline-rich`: 19/19 PASS each (source identical; addendum A
   is test-only).
+
+## Addendum — live S14 PASS after F17, 2026-10-08
+
+- Live S14 (paid, user-confirmed, $0.30 cap) `integration/out/20261008T090422Z-live` at 411b625:
+  PASS 9/9, $0.2068, 35 calls, 176 s, run `completed`. Three outputs repaired in one round each:
+  ProfileDecision (target in summarize_categorical), TrainingDecision (echoed JSON schema),
+  ChampionChoice (rationale over 2000 chars).
