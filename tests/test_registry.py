@@ -148,8 +148,8 @@ def test_brier_is_binary_only() -> None:
     assert is_binary_only("roc_auc") is False
 
 
-@pytest.mark.parametrize(("cores", "expected"), [(16, 4), (2, 1), (None, 1)])
-def test_fit_threads_is_a_quarter_of_the_cores(
+@pytest.mark.parametrize(("cores", "expected"), [(16, 5), (2, 1), (None, 1)])
+def test_fit_threads_is_a_third_of_the_cores(
     monkeypatch: pytest.MonkeyPatch, cores: int | None, expected: int
 ) -> None:
     monkeypatch.setattr(os, "cpu_count", lambda: cores)

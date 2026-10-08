@@ -1,7 +1,8 @@
 """The six training tools (`PLAN.md` §6.3's `training` phase, this chunk's `13_tools_training.md`):
 `list_estimators`, `train_estimator`, `tune_estimator`, `predict`, `predict_proba`,
 `get_model_params`. This is where D34a (tune by CV within train), D34b (calibrate on train), D34e
-(explicit seeds), D17 (`n_jobs=1` for fits, the fit semaphore via `heavy=True`) and D36c (tuning
+(explicit seeds), D17 (`n_jobs=1` estimators, the fit semaphore via `heavy=True`; addendum 50
+threads an uncalibrated forest's final fit) and D36c (tuning
 stops at its budget) become code. It runs after chunk 12 in batch B1 and consumes its matrices.
 
 sklearn is untyped here (`ignore_missing_imports`), so its estimators, scorers and arrays are
@@ -52,6 +53,7 @@ from statlab_tools.registry import (
     SPECS,
     EstimatorEntry,
     estimators,
+    fit_threads,
     greater_is_better,
     is_binary_only,
     is_negated,
@@ -406,7 +408,18 @@ def train_estimator(
         estimator = _wrap_calibrated(estimator, cv_folds, seed)
         calibrated = True
 
-    fitted = _fit(estimator, x, y, entry.task)
+    # D17 addendum 50: forest trees fit on threads; predictions stay single-threaded because a
+    # threaded forest sums tree outputs in completion order (last-bit nondeterminism).
+    threaded = entry.family == "random_forest" and not calibrated
+    if threaded:
+        from joblib import parallel_config
+
+        _set_params(estimator, {"n_jobs": fit_threads()})
+        with parallel_config(backend="threading"):
+            fitted = _fit(estimator, x, y, entry.task)
+        _set_params(fitted, {"n_jobs": 1})
+    else:
+        fitted = _fit(estimator, x, y, entry.task)
     classes = _classes(fitted) if entry.task == "classification" else ()
 
     model = FittedModel(

@@ -12,8 +12,9 @@ and sklearn pulls scipy; building the registry only when a training tool actuall
 
 sklearn facts this module encodes (verified under `-W error`, the spec's §1):
 `LogisticRegression(max_iter=1000)` so it converges without a `ConvergenceWarning` (D-e, P4);
-the forests take `n_jobs=1` (D17: nothing oversubscribes the fit semaphore; tool loops use
-`parallel_jobs` threads under joblib's threading backend); `LinearRegression`
+the forests are built with `n_jobs=1` (D17); tool loops use `parallel_jobs` threads under
+joblib's threading backend, and `train_estimator` fits an uncalibrated forest on `fit_threads()`
+threads (addendum 50); `LinearRegression`
 has no `random_state` (P5), so its `build` ignores the seed; `make_scorer(..., zero_division=0)`
 on precision/recall/f1 so a zero-division `UndefinedMetricWarning` does not fail scoring (P4);
 `neg_brier_score` is binary-only, so a multiclass `brier` is refused by the caller.
@@ -209,10 +210,10 @@ _GREATER_IS_BETTER: dict[Metric, bool] = {
 
 
 def fit_threads() -> int:
-    """Threads one heavy tool may use for its parallel loop (CV folds, permutation repeats); a
-    quarter of the cores so concurrent candidates do not oversubscribe badly; threads only, loky
-    processes deadlock (D17)."""
-    return max(1, (os.cpu_count() or 1) // 4)
+    """Threads one heavy tool may use for its parallel loop (CV folds, permutation repeats, a
+    forest's final fit): a third of the cores, so on 16 cores the default 5 folds run in one
+    round; threads only, loky processes deadlock (D17, addendum 50)."""
+    return max(1, (os.cpu_count() or 1) // 3)
 
 
 def parallel_jobs(name: str) -> int:

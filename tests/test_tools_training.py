@@ -824,6 +824,52 @@ def test_tuning_cv_runs_folds_on_threads(
     assert {n_jobs for n_jobs, _ in seen} == {1}
 
 
+def test_forest_final_fit_runs_trees_on_threads_then_predicts_single_threaded(
+    run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D17 addendum 50: an uncalibrated forest's final fit builds its trees on `fit_threads()`
+    threads, then the estimator is reset to `n_jobs=1` so predictions stay single-threaded. A
+    fitted forest is identical for any `n_jobs`, so both fits predict the same frame."""
+    import joblib.parallel
+    import statlab_tools.tools.training as training
+    from sklearn.base import BaseEstimator
+    from statlab_contracts.vocabulary import Task
+
+    real = training._fit
+    seen: list[tuple[object, str]] = []
+
+    def spy(estimator: object, x: np.ndarray, y: pd.Series, task: Task) -> object:
+        backend = type(joblib.parallel.get_active_backend()[0]).__name__
+        seen.append((cast(BaseEstimator, estimator).get_params()["n_jobs"], backend))
+        return real(estimator, x, y, task)
+
+    monkeypatch.setattr(training, "_fit", spy)
+    monkeypatch.setattr(training, "fit_threads", lambda: 3)
+    ref = _save(run_paths, _separable_binary())
+    threaded = train_estimator(
+        run_paths, ref, target="y", name="random_forest_classifier", seed=1, params=_FAST_RF
+    )
+    assert seen == [(3, "ThreadingBackend")]
+    loaded_forest = cast(BaseEstimator, _load_model(run_paths, threaded.artifacts[0].ref).estimator)
+    assert loaded_forest.get_params()["n_jobs"] == 1
+
+    seen.clear()
+    monkeypatch.setattr(training, "fit_threads", lambda: 1)
+    single = train_estimator(
+        run_paths, ref, target="y", name="random_forest_classifier", seed=1, params=_FAST_RF
+    )
+    assert seen[0][0] == 1
+    pd.testing.assert_frame_equal(
+        _loaded(run_paths, predict_proba(run_paths, threaded.artifacts[0].ref, ref)),
+        _loaded(run_paths, predict_proba(run_paths, single.artifacts[0].ref, ref)),
+    )
+
+    seen.clear()
+    train_estimator(run_paths, ref, target="y", name="logistic_regression", seed=1)
+    assert len(seen) == 1
+    assert seen[0][1] != "ThreadingBackend"
+
+
 def test_tune_best_params_is_the_argmax_of_results(run_paths: RunPaths) -> None:
     """`best_params`/`best_score` must be the best row of `results` in the metric's natural
     direction -- for both a greater-is-better and a lower-is-better metric."""
