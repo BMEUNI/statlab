@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Mechanical implementer. Transcribes main's resolved detailed plan into code; makes no design decisions. The only writer role main may spawn in Claude Code.
-model: sonnet
+model: haiku
 effort: low
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
