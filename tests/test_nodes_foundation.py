@@ -692,6 +692,8 @@ async def test_profile_check_feeds_llm_repair(
     messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
     assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
     assert "never a sentence, pair or comment" in messages[-1]["content"]
+    assert "Numeric columns: x." in messages[-1]["content"]
+    assert "Non-numeric columns: excluded, id, y." in messages[-1]["content"]
     assert "LLM decide node=data_profiling candidate=- output=ProfileDecision" in caplog.text
 
 
@@ -848,6 +850,26 @@ async def test_profile_selection_uses_declared_structural_casts(
     await env.advance(3)
     numeric = next(params for _, tool, params in env.tools.calls if tool == "summarize_numeric")
     assert numeric == {"frame": str(FRAME), "columns": ["x"]}
+    messages = next(m for o, _, m in env.llm.calls if o is ProfileDecision)
+    assert "Numeric columns: x." in messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_profile_question_lists_role_overridden_columns(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    contract = DataContract(
+        target=TargetSpec(column="y", type="binary"),
+        features=FeatureRules(roles={"x": "boolean"}),
+    )
+    env = harness(migrated_db, project, tmp_path, contract=contract)
+    env.llm.responses[ProfileDecision] = ProfileDecision(rationale="no numeric")
+    await env.advance(3)
+    messages = next(m for o, _, m in env.llm.calls if o is ProfileDecision)
+    assert "Numeric columns: none." in messages[-1]["content"]
+    assert "Non-numeric columns: excluded, id, x, y." in messages[-1]["content"]
 
 
 @pytest.mark.asyncio

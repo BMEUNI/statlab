@@ -403,13 +403,9 @@ class FoundationExecutor:
         except ValidationError as exc:
             raise EngineError("malformed problem boundary", cause=exc) from exc
 
-    def _validate_profile(
-        self,
-        invocation: NodeInvocation,
-        decision: ProfileDecision,
-        schema: dict[str, JsonValue],
-        target: str,
-    ) -> None:
+    def _profile_columns(
+        self, schema: dict[str, JsonValue]
+    ) -> tuple[dict[str, JsonValue], set[str]]:
         columns = _object(schema.get("columns"), "profile columns")
         numeric = {
             name
@@ -424,6 +420,16 @@ class FoundationExecutor:
                     numeric.add(column)
                 else:
                     numeric.discard(column)
+        return columns, numeric
+
+    def _validate_profile(
+        self,
+        invocation: NodeInvocation,
+        decision: ProfileDecision,
+        schema: dict[str, JsonValue],
+        target: str,
+    ) -> None:
+        columns, numeric = self._profile_columns(schema)
         selections = (
             (decision.numeric, "summarize_numeric", numeric),
             (decision.categorical, "summarize_categorical", set(columns) - numeric),
@@ -466,6 +472,7 @@ class FoundationExecutor:
         )
         metric = resolve_metric(problem, target.summary)
         ProblemSpec.model_validate({**problem.model_dump(mode="json"), "primary_metric": metric})
+        columns, numeric = self._profile_columns(schema.summary)
         decision = await self.runtime.decide(
             invocation,
             ProfileDecision,
@@ -475,7 +482,9 @@ class FoundationExecutor:
             "summarize_categorical takes only non-numeric columns; numeric, correlations and "
             "outliers take only numeric columns (dtype or contract role). "
             "Every list entry is one exact column name from the schema, never a sentence, "
-            "pair or comment.",
+            "pair or comment."
+            f" Numeric columns: {', '.join(sorted(numeric)) or 'none'}."
+            f" Non-numeric columns: {', '.join(sorted(set(columns) - numeric)) or 'none'}.",
             check=_rejecting(
                 lambda d: self._validate_profile(invocation, d, schema.summary, problem.target)
             ),
