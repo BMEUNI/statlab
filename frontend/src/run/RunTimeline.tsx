@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useRef } from 'react';
-import { Boxes, Trophy, X } from 'lucide-react';
+import { Boxes, Trophy } from 'lucide-react';
 import type { ExecutionRecord, GateQuestion } from '../api/types.ts';
 import {
   cellStatus,
@@ -47,9 +47,6 @@ export default function RunTimeline({ view, executions, pending, selected, champ
     cellStatus(node, candidateId, executions, pending, latestOutcome(view, node, candidateId));
   const detailBlock = () => (
     <div className="tl-detail" ref={detailRef}>
-      <button type="button" className="link-button tl-close" onClick={() => onSelect(null)}>
-        <X className="icon" aria-hidden="true" />Close the details
-      </button>
       {detail}
     </div>
   );

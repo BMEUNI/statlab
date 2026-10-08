@@ -9,6 +9,7 @@ import math
 import os
 import sqlite3
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from time import monotonic
 from typing import Protocol
 
@@ -727,10 +728,20 @@ def _token_count(value: object) -> int:
     return value
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _flash_peak(at: datetime) -> bool:
+    """DeepSeek Flash peak window, UTC Monday to Friday (PLAN section 7.1)."""
+    return at.weekday() < 5 and (1 <= at.hour < 4 or 6 <= at.hour < 10)
+
+
 def _cost(response: ModelResponse, model: str, prompt: int, completion: int, cached: int) -> float:
     if model.lower() in _FLASH_MODELS:
-        # ponytail: peak rates are an upper estimate; add time-aware pricing if billing needs it.
+        # Off-peak Flash rates are exactly half of every peak rate (PLAN section 7.1).
         amount = ((prompt - cached) * 0.30 + cached * 0.006 + completion * 1.20) / 1_000_000
+        amount *= 1.0 if _flash_peak(_utc_now()) else 0.5
     else:
         try:
             raw_cost = litellm.completion_cost(completion_response=response, model=model)

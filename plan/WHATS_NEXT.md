@@ -26,7 +26,12 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: user's online test of chunk 46, then the next phase
+## Next: user's online test of chunks 46-47, then the next phase
+
+Chunk [47](./47_polish_help_report_cost.md) accepted 2026-10-08: light run header, close icon
+inside the step box, navbar help menu from the registry, champion tiles, full-width justified
+report with a two-column plot grid, Flash cost priced by call time (off-peak half). Open: live
+multiclass (S12) not re-run since `694eefb`; offline-rich S01 stalls at experiment_design.
 
 Chunk [46](./46_calm_run_screen.md) accepted 2026-10-08: per-candidate exception gates ask once
 per attempt, pending gates are grouped per step in one chat decision box (approve all or per

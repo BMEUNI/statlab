@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,7 @@ from statlab.config import Settings
 from statlab.errors import LlmCallError, LlmOutputError, PersistenceError
 from statlab.graph.recovery import recover_call
 from statlab.llm import LlmClient
+from statlab.llm import client as client_module
 from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.repository import (
     create_contract,
@@ -95,6 +97,11 @@ def llm_context(
     )
     execution = create_node_execution(migrated_db, run_id=run.id, node_name="intake", seq=0)
     return migrated_db, run.id, execution.id
+
+
+@pytest.fixture(autouse=True)
+def _peak_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "_utc_now", lambda: datetime(2026, 10, 6, 7, 0, tzinfo=UTC))
 
 
 def _settings(tmp_path: Path, limit: int = 4) -> Settings:
@@ -941,6 +948,68 @@ async def test_empty_choices_are_logged_and_wrapped(
             (8 * 0.30 + 3 * 0.006 + 5 * 1.20) / 1_000_000,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_flash_off_peak_cost_is_half(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, run_id, execution_id = llm_context
+    monkeypatch.setattr(client_module, "_utc_now", lambda: datetime(2026, 10, 8, 12, 0, tzinfo=UTC))
+
+    async def fake(**kwargs: object) -> object:
+        return ModelResponse(
+            choices=[],
+            model="deepseek/deepseek-flash",
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 5,
+                "total_tokens": 16,
+                "prompt_tokens_details": {"cached_tokens": 3},
+            },
+        )
+
+    with pytest.raises(LlmCallError, match="no choices"):
+        await LlmClient(_settings(tmp_path), acompletion=fake).complete(
+            conn,
+            run_id=run_id,
+            node_execution_id=execution_id,
+            model="deepseek/deepseek-flash",
+            messages=[],
+            output=Result,
+        )
+    assert _rows(conn) == [
+        (
+            "Result",
+            "deepseek/deepseek-flash",
+            11,
+            5,
+            3,
+            (8 * 0.30 + 3 * 0.006 + 5 * 1.20) / 1_000_000 * 0.5,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("at", "expected"),
+    [
+        (datetime(2026, 10, 5, 0, 59, tzinfo=UTC), False),
+        (datetime(2026, 10, 5, 1, 0, tzinfo=UTC), True),
+        (datetime(2026, 10, 5, 3, 59, tzinfo=UTC), True),
+        (datetime(2026, 10, 5, 4, 0, tzinfo=UTC), False),
+        (datetime(2026, 10, 5, 5, 59, tzinfo=UTC), False),
+        (datetime(2026, 10, 5, 6, 0, tzinfo=UTC), True),
+        (datetime(2026, 10, 5, 9, 59, tzinfo=UTC), True),
+        (datetime(2026, 10, 5, 10, 0, tzinfo=UTC), False),
+        (datetime(2026, 10, 9, 7, 0, tzinfo=UTC), True),
+        (datetime(2026, 10, 10, 7, 0, tzinfo=UTC), False),
+        (datetime(2026, 10, 11, 2, 0, tzinfo=UTC), False),
+    ],
+)
+def test_flash_peak_window(at: datetime, expected: bool) -> None:
+    assert client_module._flash_peak(at) is expected
 
 
 @pytest.mark.parametrize("malformed_shape", ["choice", "content"])

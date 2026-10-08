@@ -1,6 +1,7 @@
 import { isJsonObject, publicCandidateId } from '../api/client.ts';
 import { fieldsOf } from '../contract/schema.ts';
 import type {
+  EstimatorInfo,
   ExecutionRecord,
   GateAction,
   GatePhase,
@@ -106,6 +107,13 @@ export const ESTIMATOR_LABELS: Record<string, string> = {
 export function estimatorLabel(name: string | null): string {
   if (name === null) return 'Model';
   return ESTIMATOR_LABELS[name] ?? humanize(name);
+}
+
+export function modelsFor(estimators: EstimatorInfo[], task: string): string {
+  return estimators
+    .filter((estimator) => estimator.task === task)
+    .map((estimator) => estimatorLabel(estimator.name))
+    .join(', ');
 }
 
 export const METRIC_LABELS: Record<string, string> = {

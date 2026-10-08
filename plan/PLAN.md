@@ -1200,8 +1200,8 @@ tier 2. Strict schemas on the Responses API are outside v1's transport scope.
 [Thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/) defaults to enabled;
 the client disables it for ordinary structured extraction, and enables it with effort `high`
 when routing requests reasoning. Only `content` is parsed; `reasoning_content` is not persisted.
-The local Flash cost override uses peak rates as an informational upper estimate because the
-installed LiteLLM map is stale; exact time-dependent billing is not a gate (D16).
+The local Flash cost override applies peak or off-peak rates by the UTC call time (chunk 47)
+because the installed LiteLLM map is stale; the ledger is informational, not a gate (D16).
 
 DeepSeek publishes concurrency ceilings only, no RPM/TPM. A `429` is a `transient` error for the
 recovery handler — cap in-flight requests, exponential back-off, queue rather than fan out.

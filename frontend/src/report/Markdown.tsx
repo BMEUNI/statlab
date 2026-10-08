@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { parseMarkdown, type Inline } from './markdown.ts';
+import { figureRow, parseMarkdown, type Inline } from './markdown.ts';
 
 type ImageUrl = (src: string) => string | null;
 
@@ -27,7 +27,22 @@ export default function Markdown({ source, imageUrl }: { source: string; imageUr
           const Tag = `h${Math.min(block.level + 1, 6)}` as 'h2';
           return <Tag key={index}>{inlines(block.inlines, imageUrl)}</Tag>;
         }
-        if (block.type === 'paragraph') return <p key={index}>{inlines(block.inlines, imageUrl)}</p>;
+        if (block.type === 'paragraph') {
+          const figures = figureRow(block.inlines);
+          if (figures !== null) {
+            return (
+              <div className="plot-grid" key={index}>
+                {figures.map((fig, at) => {
+                  const url = imageUrl(fig.src);
+                  return url === null
+                    ? <p key={at}>{`[figure: ${fig.alt}]`}</p>
+                    : <a key={at} href={url} target="_blank" rel="noreferrer noopener" title="Open full size"><img className="plot" alt={fig.alt} src={url} /></a>;
+                })}
+              </div>
+            );
+          }
+          return <p key={index}>{inlines(block.inlines, imageUrl)}</p>;
+        }
         if (block.type === 'code') return <pre key={index}><code>{block.text}</code></pre>;
         if (block.type === 'quote') return <blockquote key={index}>{inlines(block.inlines, imageUrl)}</blockquote>;
         if (block.type === 'rule') return <hr key={index} />;

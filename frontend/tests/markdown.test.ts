@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseInline, parseMarkdown } from '../src/report/markdown.ts';
+import { figureRow, parseInline, parseMarkdown } from '../src/report/markdown.ts';
 
 const text = (value: string) => ({ type: 'text', text: value });
 
@@ -40,4 +40,13 @@ test('parseMarkdown on a report head', () => {
   assert.deepEqual(parseMarkdown(source).map((block) => block.type), ['heading', 'heading', 'paragraph', 'table']);
   const table = parseMarkdown(source)[3];
   assert.equal(table?.type === 'table' ? table.rows.length : -1, 2);
+});
+
+test('figureRow keeps only image-only paragraphs', () => {
+  assert.deepEqual(figureRow(parseInline('![a](plots/a.png) ![b](plots/b.png)')), [
+    { alt: 'a', src: 'plots/a.png' },
+    { alt: 'b', src: 'plots/b.png' },
+  ]);
+  assert.equal(figureRow(parseInline('see ![a](plots/a.png)')), null);
+  assert.equal(figureRow(parseInline('plain')), null);
 });

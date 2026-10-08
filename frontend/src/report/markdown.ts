@@ -14,6 +14,19 @@ export type Block =
   | { type: 'table'; header: Inline[][]; rows: Inline[][][] }
   | { type: 'rule' };
 
+export function figureRow(inlines: Inline[]): { alt: string; src: string }[] | null {
+  const figures: { alt: string; src: string }[] = [];
+  for (const item of inlines) {
+    if (item.type === 'image') {
+      figures.push({ alt: item.alt, src: item.src });
+      continue;
+    }
+    if (item.type === 'text' && item.text.trim() === '') continue;
+    return null;
+  }
+  return figures.length === 0 ? null : figures;
+}
+
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];
   let literal = '';

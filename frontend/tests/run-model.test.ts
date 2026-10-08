@@ -23,6 +23,7 @@ import {
   latestOutcome,
   metricLabel,
   modeLabel,
+  modelsFor,
   narrate,
   nodeLabel,
   nowLine,
@@ -502,4 +503,15 @@ test('jsonBlock and splitLead', () => {
   assert.deepEqual(splitLead('First one. Second one.'), { lead: 'First one.', more: 'Second one.' });
   assert.deepEqual(splitLead('Only.'), { lead: 'Only.', more: null });
   assert.deepEqual(splitLead('A. B. C. D.', 3), { lead: 'A. B. C.', more: 'D.' });
+});
+
+test('modelsFor lists registry models of one task', () => {
+  const estimators = [
+    { name: 'logistic_regression', task: 'classification' },
+    { name: 'ridge', task: 'regression' },
+    { name: 'hist_gb_regressor', task: 'regression' },
+  ];
+  assert.equal(modelsFor(estimators, 'regression'), 'Ridge regression, Gradient boosting');
+  assert.equal(modelsFor(estimators, 'classification'), 'Logistic regression');
+  assert.equal(modelsFor(estimators, 'survival'), '');
 });

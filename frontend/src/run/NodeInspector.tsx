@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import { formatTime } from '../ui/format.ts';
 import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
@@ -11,9 +12,10 @@ type Props = {
   data: RunExecutions | undefined;
   selected: Selection | null;
   artifacts: ArtifactEntry[] | undefined;
+  onClose: () => void;
 };
 
-export default function NodeInspector({ view, data, selected, artifacts }: Props) {
+export default function NodeInspector({ view, data, selected, artifacts, onClose }: Props) {
   if (selected === null) {
     return (
       <section className="panel">
@@ -32,7 +34,12 @@ export default function NodeInspector({ view, data, selected, artifacts }: Props
 
   return (
     <section className="panel" aria-labelledby="inspector-heading">
-      <h2 id="inspector-heading">{nodeLabel(node)}{branchLabel === null ? '' : ` for ${branchLabel}`}</h2>
+      <div className="inspector-head">
+        <h2 id="inspector-heading">{nodeLabel(node)}{branchLabel === null ? '' : ` for ${branchLabel}`}</h2>
+        <button type="button" className="icon-button" aria-label="Close the details" title="Close the details" onClick={onClose}>
+          <X className="icon" aria-hidden="true" />
+        </button>
+      </div>
       <h3>Outcome</h3>
       {outcome === null ? <p>No result recorded yet.</p> : (
         <>

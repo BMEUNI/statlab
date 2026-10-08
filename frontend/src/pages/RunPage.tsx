@@ -124,7 +124,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                       onSelect={setSelected}
                       detail={selected === null
                         ? null
-                        : <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} />}
+                        : <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} onClose={() => setSelected(null)} />}
                     />
                   )}
                   {tab === 'candidates' && <CandidateTable rows={rows} />}

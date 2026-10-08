@@ -1,4 +1,7 @@
-import { FolderOpen, Plus } from 'lucide-react';
+import { CircleQuestionMark, FolderOpen, Plus } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { getVocabulary } from './api/client.ts';
+import { modelsFor } from './run/model.ts';
 import ChatHome from './chat/ChatHome.tsx';
 import { CURRENT_KEY, browserStore, clearSession } from './chat/session.ts';
 import ProjectPage from './pages/ProjectPage.tsx';
@@ -12,6 +15,11 @@ export default function App() {
   const { route, navigate } = useRoute();
   const [chatKey, setChatKey] = useState(0);
   const inProjects = route.name === 'projects' || route.name === 'project' || route.name === 'setup';
+  const vocabulary = useQuery({ queryKey: ['vocabulary'], queryFn: ({ signal }) => getVocabulary(signal) });
+  const models = (task: string) => {
+    const list = modelsFor(vocabulary.data?.estimators ?? [], task);
+    return list === '' ? '' : `: ${list}`;
+  };
 
   return (
     <div className="app">
@@ -27,6 +35,18 @@ export default function App() {
             }}
           ><Plus className="icon" aria-hidden="true" />New chat</button>
           <a className="button" href="#/projects" aria-current={inProjects ? 'page' : undefined}><FolderOpen className="icon" aria-hidden="true" />Projects &amp; runs</a>
+          <details className="help-menu">
+            <summary aria-label="What is Statlab?" title="What is Statlab?"><CircleQuestionMark className="icon" aria-hidden="true" /></summary>
+            <div className="help-pop">
+              <p><strong>Statlab</strong> runs a modelling study on a table you upload. An AI agent cleans the data, builds features, fits and tunes several models, and picks a champion scored once on held-out test data. You approve the key decisions in the chat.</p>
+              <p className="help-pop-title">What it can do now</p>
+              <ul>
+                <li>{`Classification (two or more classes)${models('classification')}`}</li>
+                <li>{`Regression (a numeric target)${models('regression')}`}</li>
+                <li>Effect tests: whether a column affects the target</li>
+              </ul>
+            </div>
+          </details>
         </nav>
       </header>
       <main className={route.name === 'home' || route.name === 'run' ? 'app-main' : 'app-main scroll'}>
