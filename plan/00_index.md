@@ -65,7 +65,7 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)) |
 | B13 | 33 API projects + 34 API runs | implemented/reviewed; static 2026-10-05; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B13.md) |
 | B14 | 35 SSE + 36 frontend scaffold | implemented/reviewed; static 2026-10-05; frontend typecheck/build passed; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); M12 browser smoke still deferred; [receipt](./receipts/B14.md) |
-| B15 | 37 setup flow + 38 run workspace | |
+| B15 | 36b read API + 37 setup flow + 38 run workspace (user requirement 2026-10-08: every backend feature usable in the UI) | in progress |
 | B16 | 39 comparison + 40 report | M13 |
 
 ## Phase A — Foundation (01–06)
@@ -143,7 +143,8 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
 | 36 | [`36_frontend_scaffold.md`](./36_frontend_scaffold.md) — Vite + TS strict, typed API client, `EventSource` hook with `seq` tracking and reconnect | implemented (static only; tests stopped) | 35 |
-| 37 | `37_frontend_setup_flow.md` — project picker, upload wizard, contract mapping table, mode selection | untouched | 33, 36 |
+| 36b | [`36b_api_read.md`](./36b_api_read.md) — read-only API: datasets/contracts lists, executions + tool/LLM calls + cost, artifacts list/download/preview, run files and report plots | implemented 2026-10-08 (make check 3069 passed, 100%) | 33, 34, 35 |
+| 37 | `37_frontend_setup_flow.md` — project picker, upload wizard, contract mapping table, mode selection | untouched | 33, 36, 36b |
 | 38 | `38_frontend_run_workspace.md` — node graph (shared spine + candidate columns), chat with token streaming, inline gate forms | untouched | 35, 37 |
 | 39 | `39_frontend_comparison.md` — candidate comparison table sortable by metric with `varies_from_baseline`, artifact browser, live cost | untouched | 38 |
 | 40 | `40_frontend_report.md` — report viewer with plots (**render `report.md` with raw HTML disabled**: section bodies are LLM text, chunk 19 D-e), champion card, downloads, run-history lineage tree | untouched | 39 |

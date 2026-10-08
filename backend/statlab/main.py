@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from statlab.api.inspect import inspect_router
 from statlab.api.projects import APIResources, projects_router
 from statlab.api.runs import RunRegistry, runs_router
 from statlab.api.stream import stream_router
@@ -115,6 +116,7 @@ def create_app(
         dependencies=[Depends(admitted_request, scope="request")],
     )
     app.include_router(projects_router(resources))
+    app.include_router(inspect_router(resources))
     app.include_router(runs_router(registry))
     app.include_router(stream_router(registry))
 

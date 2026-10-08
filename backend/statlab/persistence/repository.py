@@ -230,6 +230,14 @@ def get_dataset(conn: sqlite3.Connection, dataset_id: str) -> DatasetRow | None:
     return DatasetRow.model_validate(dict(row)) if row is not None else None
 
 
+def list_datasets(conn: sqlite3.Connection, project_id: str) -> tuple[DatasetRow, ...]:
+    rows = conn.execute(
+        "SELECT * FROM datasets WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+        (project_id,),
+    ).fetchall()
+    return tuple(DatasetRow.model_validate(dict(row)) for row in rows)
+
+
 def find_dataset_by_hash(
     conn: sqlite3.Connection, *, project_id: str, sha256: str
 ) -> DatasetRow | None:
@@ -267,6 +275,14 @@ def create_contract(
 def get_contract(conn: sqlite3.Connection, contract_id: str) -> ContractRow | None:
     row = conn.execute("SELECT * FROM contracts WHERE id = ?", (contract_id,)).fetchone()
     return _contract_row_from(row) if row is not None else None
+
+
+def list_contracts(conn: sqlite3.Connection, project_id: str) -> tuple[ContractRow, ...]:
+    rows = conn.execute(
+        "SELECT * FROM contracts WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+        (project_id,),
+    ).fetchall()
+    return tuple(_contract_row_from(row) for row in rows)
 
 
 def latest_contract(conn: sqlite3.Connection, project_id: str) -> ContractRow | None:
@@ -586,6 +602,20 @@ def list_node_executions(conn: sqlite3.Connection, run_id: str) -> tuple[NodeExe
         return tuple(NodeExecutionRow.model_validate(dict(row)) for row in rows)
     except (sqlite3.Error, ValidationError) as exc:
         raise PersistenceError("cannot read node executions", cause=exc) from exc
+
+
+def list_tool_calls(conn: sqlite3.Connection, run_id: str) -> tuple[ToolCallRow, ...]:
+    rows = conn.execute(
+        "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY ts, id", (run_id,)
+    ).fetchall()
+    return tuple(ToolCallRow.model_validate(dict(row)) for row in rows)
+
+
+def list_llm_calls(conn: sqlite3.Connection, run_id: str) -> tuple[LlmCallRow, ...]:
+    rows = conn.execute(
+        "SELECT * FROM llm_calls WHERE run_id = ? ORDER BY ts, id", (run_id,)
+    ).fetchall()
+    return tuple(LlmCallRow.model_validate(dict(row)) for row in rows)
 
 
 def interrupt_node_execution(conn: sqlite3.Connection, execution_id: str) -> None:

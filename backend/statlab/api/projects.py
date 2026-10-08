@@ -46,6 +46,8 @@ from statlab.persistence.repository import (
     get_dataset,
     get_project,
     get_project_by_slug,
+    list_contracts,
+    list_datasets,
     list_projects,
     list_runs,
 )
@@ -407,6 +409,18 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
             memory=read_memory(resource.conn, project.id),
         )
 
+    @router.get("/api/projects/{project_id}/datasets", response_model=tuple[DatasetRow, ...])
+    async def datasets(project_id: str) -> tuple[DatasetRow, ...]:
+        resource = resources()
+        project = ProjectsService(resource).project(project_id)
+        return list_datasets(resource.conn, project.id)
+
+    @router.get("/api/projects/{project_id}/contracts", response_model=tuple[ContractRow, ...])
+    async def contracts(project_id: str) -> tuple[ContractRow, ...]:
+        resource = resources()
+        project = ProjectsService(resource).project(project_id)
+        return list_contracts(resource.conn, project.id)
+
     @router.post("/api/projects/{project_id}/datasets", status_code=201)
     async def upload_dataset(
         project_id: str,
@@ -521,7 +535,11 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
             project_id, body.dataset_id, body.contract
         )
 
-    @router.post("/api/projects/{project_id}/contracts/propose")
+    @router.post(
+        "/api/projects/{project_id}/contracts/propose",
+        response_model=ContractProposal,
+        response_model_exclude_unset=True,
+    )
     async def propose_contract(project_id: str, body: ContractProposalRequest) -> ContractProposal:
         return await ProjectsService(resources()).propose(project_id, body)
 

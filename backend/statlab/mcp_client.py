@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, cast
 import httpx2
 from jsonschema import Draft202012Validator, SchemaError
 from pydantic import JsonValue, ValidationError
-from statlab_contracts.artifacts import ARTIFACT_ID_PATTERN, ArtifactMeta, ArtifactRef
+from statlab_contracts.artifacts import (
+    ARTIFACT_ID_PATTERN,
+    ArtifactKind,
+    ArtifactMeta,
+    ArtifactRef,
+)
 from statlab_contracts.contract import DataContract, DatasetOptions
 from statlab_contracts.envelope import (
     ORCHESTRATOR_SUPPLIED,
@@ -194,6 +199,79 @@ class McpClient:
             if node in spec.allow_in or spec.allow_in == ("*",)
         )
 
+    async def _dispatch_direct(
+        self, spec: ToolSpec, arguments: dict[str, JsonValue], *, read_timeout_seconds: int
+    ) -> ToolSuccess:
+        try:
+            json.dumps(arguments, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ToolCallError(
+                spec.name,
+                Failure(
+                    error_class="tool_param",
+                    message="tool parameters must be strict JSON",
+                    field_errors={"params": "parameter values must be finite JSON values"},
+                ),
+                cause=exc,
+            ) from exc
+        errors = self._schema_errors(spec, arguments)
+        if errors:
+            raise ToolCallError(
+                spec.name,
+                Failure(
+                    error_class="tool_param",
+                    message="tool parameters do not match served schema",
+                    field_errors=errors,
+                ),
+            )
+        try:
+            result = await cast("ClientSession", self._session).call_tool(
+                spec.name, arguments, read_timeout_seconds=read_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            raise
+        except (httpx2.HTTPError, OSError, TimeoutError) as exc:
+            raise ToolCallError(
+                spec.name,
+                ToolFailure(error_class="transient", message="MCP dispatch failed"),
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            from mcp.shared.exceptions import MCPError
+            from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
+
+            transient = isinstance(exc, MCPError) and exc.code in (
+                REQUEST_TIMEOUT,
+                CONNECTION_CLOSED,
+            )
+            raise ToolCallError(
+                spec.name,
+                ToolFailure(
+                    error_class="transient" if transient else "bug",
+                    message="MCP dispatch failed",
+                ),
+                cause=exc,
+            ) from exc
+        from mcp.types import CallToolResult
+
+        if not isinstance(result, CallToolResult) or result.structured_content is None:
+            raise ToolCallError(
+                spec.name, Failure(error_class="bug", message="malformed MCP tool result")
+            )
+        structured = result.structured_content
+        raw = structured.get("result") if isinstance(structured, Mapping) else None
+        try:
+            validated = TOOL_RESULT_ADAPTER.validate_python(raw)
+        except Exception as exc:
+            raise ToolCallError(
+                spec.name,
+                Failure(error_class="bug", message="malformed tool envelope"),
+                cause=exc,
+            ) from exc
+        if isinstance(validated, ToolFailure):
+            raise ToolCallError(spec.name, validated)
+        return validated
+
     async def setup_dataset(
         self,
         *,
@@ -223,78 +301,49 @@ class McpClient:
         }
         if contract is not None:
             arguments["contract"] = contract.model_dump(mode="json")
-        try:
-            json.dumps(arguments, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise ToolCallError(
-                "setup_dataset",
-                Failure(
-                    error_class="tool_param",
-                    message="tool parameters must be strict JSON",
-                    field_errors={"params": "parameter values must be finite JSON values"},
-                ),
-                cause=exc,
-            ) from exc
-        errors = self._schema_errors(spec, arguments)
-        if errors:
-            raise ToolCallError(
-                "setup_dataset",
-                Failure(
-                    error_class="tool_param",
-                    message="tool parameters do not match served schema",
-                    field_errors=errors,
-                ),
-            )
-        try:
-            result = await cast("ClientSession", self._session).call_tool(
-                "setup_dataset", arguments, read_timeout_seconds=900
-            )
-        except asyncio.CancelledError:
-            raise
-        except (httpx2.HTTPError, OSError, TimeoutError) as exc:
-            raise ToolCallError(
-                "setup_dataset",
-                ToolFailure(error_class="transient", message="MCP dispatch failed"),
-                cause=exc,
-            ) from exc
-        except Exception as exc:
-            from mcp.shared.exceptions import MCPError
-            from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
-
-            transient = isinstance(exc, MCPError) and exc.code in (
-                REQUEST_TIMEOUT,
-                CONNECTION_CLOSED,
-            )
-            raise ToolCallError(
-                "setup_dataset",
-                ToolFailure(
-                    error_class="transient" if transient else "bug",
-                    message="MCP dispatch failed",
-                ),
-                cause=exc,
-            ) from exc
-        from mcp.types import CallToolResult
-
-        if not isinstance(result, CallToolResult) or result.structured_content is None:
-            raise ToolCallError(
-                "setup_dataset", Failure(error_class="bug", message="malformed MCP tool result")
-            )
-        structured = result.structured_content
-        raw = structured.get("result") if isinstance(structured, Mapping) else None
-        try:
-            validated = TOOL_RESULT_ADAPTER.validate_python(raw)
-        except Exception as exc:
-            raise ToolCallError(
-                "setup_dataset",
-                Failure(error_class="bug", message="malformed tool envelope"),
-                cause=exc,
-            ) from exc
-        if isinstance(validated, ToolFailure):
-            raise ToolCallError("setup_dataset", validated)
+        validated = await self._dispatch_direct(spec, arguments, read_timeout_seconds=900)
         if validated.artifacts:
             raise ToolCallError(
                 "setup_dataset",
                 Failure(error_class="bug", message="setup tool returned unexpected artifacts"),
+            )
+        return validated
+
+    async def describe_artifact(
+        self,
+        *,
+        project: str,
+        run: str,
+        artifact: str,
+        kind: ArtifactKind,
+        head_rows: int = 20,
+    ) -> ToolSuccess:
+        """Dispatch the read-only describe tool for a UI preview without run-scoped accounting."""
+        if self._session is None:
+            raise EngineError("MCP client is not entered")
+        if get_project_by_slug(self.conn, project) is None:
+            raise EngineError("describe project does not exist")
+        spec = self.tools.get("describe_artifact")
+        if (
+            spec is None
+            or spec.phase != "artifacts"
+            or spec.allow_in != ("*",)
+            or spec.heavy
+            or spec.transform_only
+        ):
+            raise EngineError("describe_artifact registry metadata is invalid")
+        arguments: dict[str, JsonValue] = {
+            "project": project,
+            "run": run,
+            "artifact": artifact,
+            "kind": kind,
+            "head_rows": head_rows,
+        }
+        validated = await self._dispatch_direct(spec, arguments, read_timeout_seconds=60)
+        if validated.artifacts:
+            raise ToolCallError(
+                "describe_artifact",
+                Failure(error_class="bug", message="describe tool returned unexpected artifacts"),
             )
         return validated
 

@@ -2035,3 +2035,87 @@ def test_repository_wraps_tool_call_integrity_and_sqlite_errors(
             result_json=ToolSuccess().model_dump_json(),
             duration_ms=0,
         )
+
+
+_DESCRIBE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "project": {"type": "string"},
+        "run": {"type": "string"},
+        "artifact": {"type": "string"},
+        "kind": {"type": "string"},
+        "head_rows": {"type": "integer"},
+    },
+    "required": ["project", "run", "artifact", "kind", "head_rows"],
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_describe_artifact_dispatches_without_audit(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    session = FakeSession(
+        (served_tool("describe_artifact", _DESCRIBE_SCHEMA, allow_in=["*"], phase="artifacts"),)
+    )
+    session.envelope = ToolSuccess(summary={"rows": 1}).model_dump(mode="json")
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        result = await client.describe_artifact(
+            project=paths.slug, run=paths.run_id, artifact="a_" + "0" * 16, kind="dataframe"
+        )
+    assert result.summary == {"rows": 1}
+    assert session.calls == [
+        (
+            "describe_artifact",
+            {
+                "project": paths.slug,
+                "run": paths.run_id,
+                "artifact": "a_" + "0" * 16,
+                "kind": "dataframe",
+                "head_rows": 20,
+            },
+            60,
+        )
+    ]
+    assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_describe_artifact_guards(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    artifact = "a_" + "0" * 16
+    client = McpClient(settings(paths, tmp_path), conn, session=FakeSession(()))
+    with pytest.raises(EngineError, match="MCP client is not entered"):
+        await client.describe_artifact(
+            project=paths.slug, run=paths.run_id, artifact=artifact, kind="dataframe"
+        )
+    good = served_tool("describe_artifact", _DESCRIBE_SCHEMA, allow_in=["*"], phase="artifacts")
+    session = FakeSession((good,))
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as entered:
+        with pytest.raises(EngineError):
+            await entered.describe_artifact(
+                project="missing-project", run=paths.run_id, artifact=artifact, kind="dataframe"
+            )
+    async with McpClient(settings(paths, tmp_path), conn, session=FakeSession(())) as missing:
+        with pytest.raises(EngineError):
+            await missing.describe_artifact(
+                project=paths.slug, run=paths.run_id, artifact=artifact, kind="dataframe"
+            )
+    wrong = FakeSession((served_tool("describe_artifact", _DESCRIBE_SCHEMA, phase="intake"),))
+    async with McpClient(settings(paths, tmp_path), conn, session=wrong) as bad:
+        with pytest.raises(EngineError):
+            await bad.describe_artifact(
+                project=paths.slug, run=paths.run_id, artifact=artifact, kind="dataframe"
+            )
+    assert wrong.calls == []
+    session.envelope = ToolSuccess(
+        artifacts=(ArtifactMeta(ref=new_artifact_ref(), kind="table"),)
+    ).model_dump(mode="json")
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as entered:
+        with pytest.raises(ToolCallError):
+            await entered.describe_artifact(
+                project=paths.slug, run=paths.run_id, artifact=artifact, kind="dataframe"
+            )

@@ -183,7 +183,7 @@ async def _open_project_api(
         return _model_response(
             json.dumps(
                 {
-                    "contract": answer.model_dump(mode="json"),
+                    "contract": answer.model_dump(mode="json", exclude_unset=True),
                     "reasoning": "Typed profile-based proposal.",
                 }
             )
@@ -761,6 +761,9 @@ async def test_proposal_partial_unresolved_mismatch_and_missing_target_paths(
             },
         )
         assert success.status_code == 200
+        assert "constraints" not in success.json()["contract"]
+        assert "preprocessing" not in success.json()["contract"]
+        assert success.json()["contract"]["split"]["seed"] == 7
         assert _readonly_count(settings.db_path, "contracts") == 0
         assert _readonly_count(settings.db_path, "runs") == 0
 
