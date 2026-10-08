@@ -348,7 +348,9 @@ input[type="text"], input[type="number"], select, textarea { min-width: 0; }
 .decision-rows .panel.gate { flex-basis: 100%; }
 .decision-actions, .decision-row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .decision-actions { margin-top: 6px; }
-.decision-footer { margin-top: 4px; }
+.decision-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 12px; margin-bottom: 8px; }
+.decision-top h2 { margin: 0; }
+.decision-top .link-button { font-size: 0.875rem; }
 .decision-box button { padding: 4px 10px; font-size: 0.875rem; }
 .jump-latest { position: sticky; bottom: 8px; display: flex; margin: 8px auto 0; box-shadow: var(--shadow); }
 .tl-detail > .tl-close { display: flex; margin: 0 0 6px auto; font-size: 0.875rem; }

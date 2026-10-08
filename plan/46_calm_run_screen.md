@@ -586,3 +586,22 @@ one describes it.. so the first X sentence is always duplicated". Cause:
    `assert.deepEqual(splitLead('A. B. C. D.', 3), { lead: 'A. B. C.', more: 'D.' })`.
 
 Checks: `npm test`, `npm run typecheck`, `npm run build` (from `frontend/`).
+
+## Addendum G — "finish automatically" moves into the box header (user request)
+
+User, 2026-10-08: "approve all and finish automatically takes up a ton of space, move it
+somewhere it doesnt take up place from the process right panel and also from the left chat
+panel". Decision: put it on the decision box's own header line, right-aligned, as a small link.
+
+1. `DecisionBox.tsx`: wrap the existing `<h2 id="decision-heading">…</h2>` in
+   `<div className="decision-top">`. Move the button from the `decision-footer` div into that
+   wrapper after the `h2`, with the same render condition and the same `onClick` answer list;
+   give it `className="link-button"` and
+   `title="Approve every waiting decision, then run the rest without asking"`; its content is the
+   `FastForward` icon plus the text `Finish automatically`. Delete the `decision-footer` div.
+2. `style.css`: replace the `.decision-footer { margin-top: 4px; }` rule with
+   `.decision-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items:
+   center; gap: 4px 12px; margin-bottom: 8px; }` and `.decision-top h2 { margin: 0; }`; add
+   `.decision-top .link-button { font-size: 0.875rem; }`.
+
+Checks: `npm run typecheck`, `npm run build` (from `frontend/`).

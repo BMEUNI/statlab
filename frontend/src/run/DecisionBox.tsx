@@ -78,10 +78,26 @@ export default function DecisionBox({ runId, mode, pending, view, navigate, open
 
   return (
     <section className="decision-box" aria-labelledby="decision-heading">
-      <h2 id="decision-heading">
-        <Hand className="icon" aria-hidden="true" />
-        {`Waiting for you (${items.length + broken.length})`}
-      </h2>
+      <div className="decision-top">
+        <h2 id="decision-heading">
+          <Hand className="icon" aria-hidden="true" />
+          {`Waiting for you (${items.length + broken.length})`}
+        </h2>
+        {mode === 'guided' && broken.length === 0 && items.every(canApprove) && auto !== undefined && (
+          <button
+            type="button"
+            className="link-button"
+            title="Approve every waiting decision, then run the rest without asking"
+            disabled={busy}
+            onClick={() => answer.mutate([
+              answerOf(auto, 'approve_all_remaining'),
+              ...ordered.filter((item) => item !== auto).map((item) => answerOf(item, 'approve')),
+            ])}
+          >
+            <FastForward className="icon" aria-hidden="true" />Finish automatically
+          </button>
+        )}
+      </div>
       {broken.map(({ gate }) => (
         <div key={gate.id}>
           <p role="alert">A decision cannot be displayed.</p>
@@ -168,20 +184,6 @@ export default function DecisionBox({ runId, mode, pending, view, navigate, open
           </article>
         );
       })}
-      {mode === 'guided' && broken.length === 0 && items.every(canApprove) && auto !== undefined && (
-        <div className="decision-footer">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => answer.mutate([
-              answerOf(auto, 'approve_all_remaining'),
-              ...ordered.filter((item) => item !== auto).map((item) => answerOf(item, 'approve')),
-            ])}
-          >
-            <FastForward className="icon" aria-hidden="true" />Approve all and finish automatically
-          </button>
-        </div>
-      )}
       {answer.isError && <p role="alert">{errorText(answer.error)}</p>}
     </section>
   );
