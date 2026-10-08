@@ -87,7 +87,7 @@ Cannot provide these: keep investigating read-only. Behavior summary or file lis
    - Codex: `agent_type="implementer"`, `fork_turns="none"`; `.codex/agents/implementer.toml` pins
      `gpt-6-luna`, low reasoning.
    - Claude Code: Agent `subagent_type="implementer"` (never `"fork"`, no `model` override);
-     `.claude/agents/implementer.md` pins `haiku` (Haiku 4.5), low effort. Continue a stage's implementer via
+     `.claude/agents/implementer.md` pins the `haiku` alias (newest Haiku), low effort. Continue a stage's implementer via
      SendMessage.
    Only these two pinned roles are authorized subagents. Never spawn Sol, `implementer_strong`,
    Opus/Fable/Haiku overrides, general-purpose, Explore, Plan, cavecrew, reviewers or other roles;
