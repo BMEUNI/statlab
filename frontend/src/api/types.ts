@@ -164,3 +164,13 @@ export type ArtifactPreview = {
   dtypes: Record<string, string>;
   head: JsonObject[];
 };
+
+export type SetupState = {
+  project_id: string | null;
+  dataset_id: string | null;
+  target: string | null;
+  contract_id: string | null;
+  mode: RunMode | null;
+};
+export type ChatTurn = { role: 'user' | 'assistant'; text: string };
+export type AssistantReply = { reply: string; state: SetupState; start: boolean; issues: string[] };

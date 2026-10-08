@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ApiError,
+  assistantTurn,
+  parseAssistantReply,
   artifactUrl,
   parseArtifactEntries,
   parseArtifactPreview,
@@ -414,4 +416,31 @@ test('runFileUrl encodes the run id only and getRunFile returns text', async () 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+const assistantReply = {
+  reply: 'Which dataset?',
+  state: { project_id: 'p1', dataset_id: null, target: null, contract_id: null, mode: 'guided' },
+  start: false,
+  issues: ['Missing target'],
+};
+
+test('assistant reply parser validates fields', () => {
+  assert.deepEqual(parseAssistantReply(assistantReply), {
+    ...assistantReply,
+    state: { project_id: 'p1', dataset_id: null, target: null, contract_id: null, mode: 'guided' },
+  });
+  assert.equal(parseAssistantReply({ ...assistantReply, state: { project_id: 'p1' } }).state.mode, null);
+  isInvalidResponse(() => parseAssistantReply({ ...assistantReply, state: { mode: 'bogus' } }));
+  isInvalidResponse(() => parseAssistantReply({ ...assistantReply, start: 'yes' }));
+});
+
+test('assistantTurn POSTs messages and state', async () => {
+  await withFetch(assistantReply, async (requests) => {
+    const state = { project_id: null, dataset_id: null, target: null, contract_id: null, mode: null };
+    const messages = [{ role: 'user' as const, text: 'hi' }];
+    assert.equal((await assistantTurn(messages, state)).reply, 'Which dataset?');
+    assert.equal(requests[0]?.input, '/api/assistant/turn');
+    assert.equal(requests[0]?.init?.body, JSON.stringify({ messages, state }));
+  });
 });

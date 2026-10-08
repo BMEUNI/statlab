@@ -443,3 +443,22 @@ export function mergedMetrics(item: Branch): Record<string, number> {
 }
 
 export const EMPTY_VOCABULARY: Vocabulary = { contractSchema: {}, estimators: [], inferentialModels: [] };
+
+export const TONES: Record<CellStatus, string> = {
+  pending: 'upcoming',
+  running: 'current',
+  awaiting: 'awaiting',
+  completed: 'done',
+  skipped: 'skipped',
+  failed: 'fault',
+};
+
+export function groupTone(statuses: CellStatus[]): string {
+  if (statuses.length === 0) return 'upcoming';
+  if (statuses.includes('failed')) return 'fault';
+  if (statuses.includes('awaiting')) return 'awaiting';
+  if (statuses.includes('running')) return 'current';
+  if (statuses.every((status) => status === 'completed' || status === 'skipped')) return 'done';
+  if (statuses.some((status) => status === 'completed' || status === 'skipped')) return 'current';
+  return 'upcoming';
+}

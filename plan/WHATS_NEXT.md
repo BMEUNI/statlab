@@ -26,12 +26,15 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B16 — chunks 39 and 40
+## Next: paid ONLINE runtime run (needs fresh explicit user go-ahead)
 
-B15 (36b, 37, 38) accepted 2026-10-08; see spec frontmatter. User requirement: every backend
-feature usable in the UI. Next: 39 candidate comparison, artifact list/preview/download with the
-D32 lock, live cost; then 40 report viewer (report.md, raw HTML disabled), pipeline/manifest
-downloads, lineage tree, project memory. Offline click-through stack:
+B15–B17 accepted 2026-10-08 (frontend 36b–41). The main screen is now a chat (`#/`): an LLM
+setup assistant (`POST /api/assistant/turn`, role `setup_assistant` on the default model) asks
+for project, dataset, target and mode with inline widgets; runs open as chat (left) plus
+progress timeline, gates, candidates, files and report (right). Projects & runs browser lives
+at `#/projects`. See [41 spec](./41_chat_first_ui.md) receipt.
+Next: the paid online run, which also exercises the real setup assistant. DeepSeek balance was
+about $0.78; check readiness first, then ask the user to confirm and top up. Offline stack:
 `.venv/bin/python -m integration.serve_ui` + `STATLAB_API_ORIGIN=http://127.0.0.1:8765 make ui`.
 No paid run without fresh explicit user confirmation.
 User authorizes automatic local commits after finished work; never push. Main writes no code;

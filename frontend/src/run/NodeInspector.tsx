@@ -3,7 +3,7 @@ import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
 import { executionsFor, formatUsd, latestOutcome, nodeLabel, type RunView } from './model.ts';
-import type { Selection } from './RunGraph.tsx';
+import type { Selection } from './RunTimeline.tsx';
 
 type Props = {
   view: RunView;

@@ -404,36 +404,37 @@ def _project_paths(settings: Settings, slug: str) -> ProjectPaths:
     return paths
 
 
+def create_project_record(resources: APIResources, slug: str, name: str) -> ProjectRow:
+    if get_project_by_slug(resources.conn, slug) is not None:
+        raise HTTPException(409, "project slug already exists")
+    paths = _project_paths(resources.settings, slug)
+    if os.path.lexists(paths.project_json):
+        raise HTTPException(409, "project metadata already exists")
+    paths.datasets.mkdir(parents=True, exist_ok=True)
+    paths.contracts.mkdir(parents=True, exist_ok=True)
+    paths.runs.mkdir(parents=True, exist_ok=True)
+    row = create_project(resources.conn, slug=slug, name=name)
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=paths.root)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(row.model_dump_json().encode("utf-8"))
+            os.link(tmp_name, paths.project_json)
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
+    except FileExistsError:
+        raise HTTPException(409, "project metadata already exists") from None
+    except OSError:
+        raise HTTPException(500, "project was created but metadata could not be written") from None
+    return row
+
+
 def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/projects", status_code=201, response_model=ProjectRow)
     async def create(body: ProjectCreate) -> ProjectRow:
-        resource = resources()
-        if get_project_by_slug(resource.conn, body.slug) is not None:
-            raise HTTPException(409, "project slug already exists")
-        paths = _project_paths(resource.settings, body.slug)
-        if os.path.lexists(paths.project_json):
-            raise HTTPException(409, "project metadata already exists")
-        paths.datasets.mkdir(parents=True, exist_ok=True)
-        paths.contracts.mkdir(parents=True, exist_ok=True)
-        paths.runs.mkdir(parents=True, exist_ok=True)
-        row = create_project(resource.conn, slug=body.slug, name=body.name)
-        try:
-            fd, name = tempfile.mkstemp(dir=paths.root)
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(row.model_dump_json().encode("utf-8"))
-                os.link(name, paths.project_json)
-            finally:
-                Path(name).unlink(missing_ok=True)
-        except FileExistsError:
-            raise HTTPException(409, "project metadata already exists") from None
-        except OSError:
-            raise HTTPException(
-                500, "project was created but metadata could not be written"
-            ) from None
-        return row
+        return create_project_record(resources(), body.slug, body.name)
 
     @router.get("/api/projects", response_model=tuple[ProjectRow, ...])
     async def list_all() -> tuple[ProjectRow, ...]:

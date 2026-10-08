@@ -4,6 +4,7 @@ import { formatRoute, parseRoute, type Route } from '../src/routes.ts';
 
 test('routes round-trip', () => {
   const routes: Route[] = [
+    { name: 'home' },
     { name: 'projects' },
     { name: 'project', projectId: 'a/b c' },
     { name: 'setup', projectId: 'a/b c' },
@@ -14,7 +15,8 @@ test('routes round-trip', () => {
 });
 
 test('root and invalid hashes', () => {
-  for (const hash of ['', '#', '#/']) assert.deepEqual(parseRoute(hash), { name: 'projects' });
+  for (const hash of ['', '#', '#/']) assert.deepEqual(parseRoute(hash), { name: 'home' });
+  assert.deepEqual(parseRoute('#/projects'), { name: 'projects' });
   for (const hash of ['#/projects/', '#/x', '#/runs/a/b', '#/projects/%E0%A4%A']) {
     assert.deepEqual(parseRoute(hash), { name: 'notFound' });
   }

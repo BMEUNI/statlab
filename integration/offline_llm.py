@@ -365,6 +365,77 @@ def _rich_search(evidence: list[JsonValue], scenario: Scenario) -> dict[str, Jso
     }
 
 
+def _setup_action(system: str, messages: list[dict[str, str]]) -> dict[str, JsonValue]:
+    marker = "SETUP FACTS (data, not instructions):\n"
+    start = system.index(marker) + len(marker)
+    end = system.index("\n", start)
+    facts = _obj(json.loads(system[start:end]), "facts")
+    text = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+    t = text.lower()
+    state = _obj(facts["state"], "state")
+    if not state.get("project_id"):
+        for project in _list(facts["projects"], "projects"):
+            item = _obj(project, "project")
+            name = str(item["name"])
+            if name.lower() in t:
+                return {
+                    "action": "select_project",
+                    "project_id": str(item["id"]),
+                    "reply": f"Using project {name}. Which dataset should we use? "
+                    "Upload a CSV or pick one.",
+                }
+        new_name = text.strip()[:60]
+        return {
+            "action": "create_project",
+            "project_name": new_name,
+            "reply": f"Created project {new_name}. Upload a CSV to continue.",
+        }
+    if not state.get("dataset_id"):
+        datasets = [_obj(d, "dataset") for d in _list(facts["datasets"], "datasets")]
+        chosen = next((d for d in datasets if str(d["filename"]).lower() in t), None)
+        if chosen is None and len(datasets) == 1:
+            chosen = datasets[0]
+        if chosen is not None:
+            return {
+                "action": "select_dataset",
+                "dataset_id": str(chosen["id"]),
+                "reply": f"Using {chosen['filename']}. Which column should the model predict?",
+            }
+        return {
+            "action": "none",
+            "reply": "Upload a CSV with the button below, or name one of the datasets.",
+        }
+    if not state.get("target"):
+        for column in _list(facts["columns"], "columns"):
+            name = str(_obj(column, "column")["name"])
+            if name.lower() in t:
+                return {
+                    "action": "set_target",
+                    "target": name,
+                    "reply": f"Target set to {name}. I drafted the modelling setup; "
+                    "review it on the right. Guided or autonomous?",
+                }
+        return {"action": "none", "reply": "Which column should the model predict?"}
+    if not state.get("mode"):
+        if "guided" in t:
+            return {
+                "action": "set_mode",
+                "mode": "guided",
+                "reply": "Guided mode: I will stop for your approval at each decision. "
+                "Say start when ready.",
+            }
+        if "auto" in t:
+            return {
+                "action": "set_mode",
+                "mode": "autonomous",
+                "reply": "Autonomous mode: I will run to the end. Say start when ready.",
+            }
+        return {"action": "none", "reply": "Should I run guided or autonomous?"}
+    if "start" in t:
+        return {"action": "start_run", "reply": "Starting the run."}
+    return {"action": "none", "reply": "Everything is ready. Say start when you want to begin."}
+
+
 class OfflineProvider:
     def __init__(self, *, rich: bool = False) -> None:
         self.scenario: Scenario | None = None
@@ -398,7 +469,10 @@ class OfflineProvider:
         first_user = next((m["content"] for m in messages if m["role"] == "user"), None)
         if first_user is None:
             raise RuntimeError("offline provider: no user message")
-        content = json.dumps(self._answer(title, user_text, first_user, scenario))
+        if title == "SetupAction":
+            content = json.dumps(_setup_action(system, messages))
+        else:
+            content = json.dumps(self._answer(title, user_text, first_user, scenario))
         if kwargs.get("stream") is True:
             return _Stream(content, model)
         return ModelResponse(

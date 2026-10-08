@@ -34,3 +34,4 @@ Thumbs.db
 graphify-out/
 integration/out/
 integration/.cache/
+.playwright-mcp/

@@ -1,4 +1,5 @@
 export type Route =
+  | { name: 'home' }
   | { name: 'projects' }
   | { name: 'project'; projectId: string }
   | { name: 'setup'; projectId: string }
@@ -11,7 +12,8 @@ export function parseRoute(hash: string): Route {
   let text = hash.startsWith('#') ? hash.slice(1) : hash;
   if (text.startsWith('/')) text = text.slice(1);
   const segments = text.split('/');
-  if (segments.length === 1 && segments[0] === '') return { name: 'projects' };
+  if (segments.length === 1 && segments[0] === '') return { name: 'home' };
+  if (segments.length === 1 && segments[0] === 'projects') return { name: 'projects' };
   let ids: string[];
   try {
     ids = segments.map((segment) => decodeURIComponent(segment));
@@ -28,6 +30,7 @@ export function parseRoute(hash: string): Route {
 
 export function formatRoute(route: Route): string {
   switch (route.name) {
+    case 'projects': return '#/projects';
     case 'project': return `#/projects/${encodeURIComponent(route.projectId)}`;
     case 'setup': return `#/projects/${encodeURIComponent(route.projectId)}/new`;
     case 'run': return `#/runs/${encodeURIComponent(route.runId)}`;

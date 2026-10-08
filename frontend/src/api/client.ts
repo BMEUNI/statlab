@@ -1,4 +1,7 @@
 import type {
+  AssistantReply,
+  ChatTurn,
+  SetupState,
   ArtifactEntry,
   ArtifactPreview,
   ContractProposal,
@@ -561,6 +564,34 @@ export async function createRun(
       json: { mode, dataset_ids: [datasetId], contract_id: contractId },
     }),
   );
+}
+
+export function parseSetupState(value: unknown): SetupState {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const mode = value.mode ?? null;
+  if (mode !== null && !isRunMode(mode)) throw invalidResponse();
+  return {
+    project_id: nullableString({ ...value, project_id: value.project_id ?? null }, 'project_id'),
+    dataset_id: nullableString({ ...value, dataset_id: value.dataset_id ?? null }, 'dataset_id'),
+    target: nullableString({ ...value, target: value.target ?? null }, 'target'),
+    contract_id: nullableString({ ...value, contract_id: value.contract_id ?? null }, 'contract_id'),
+    mode,
+  };
+}
+
+export function parseAssistantReply(value: unknown): AssistantReply {
+  if (!isJsonObject(value)) throw invalidResponse();
+  if (typeof value.start !== 'boolean') throw invalidResponse();
+  return {
+    reply: requiredString(value, 'reply'),
+    state: parseSetupState(value.state),
+    start: value.start,
+    issues: stringArray(value.issues),
+  };
+}
+
+export async function assistantTurn(messages: ChatTurn[], state: SetupState): Promise<AssistantReply> {
+  return parseAssistantReply(await request('/api/assistant/turn', { method: 'POST', json: { messages, state } }));
 }
 
 function runPath(runId: string): string {

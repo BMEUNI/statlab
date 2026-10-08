@@ -8,6 +8,7 @@ import {
   formatUsd,
   gateEdits,
   graphLayout,
+  groupTone,
   latestOutcome,
   mergedMetrics,
   nodeLabel,
@@ -248,4 +249,14 @@ test('cellStatus ties and inherited outcomes', () => {
   assert.equal(cellStatus('intake', null, [], [], null), 'pending');
   const data = { executions: a, toolCalls: [], llmCalls: [], costUsd: 0 };
   assert.deepEqual(executionsFor('intake', null, data).map((e) => e.execution.attempt), [2, 1]);
+});
+
+test('groupTone', () => {
+  assert.equal(groupTone([]), 'upcoming');
+  assert.equal(groupTone(['completed', 'failed']), 'fault');
+  assert.equal(groupTone(['awaiting', 'running']), 'awaiting');
+  assert.equal(groupTone(['running', 'pending']), 'current');
+  assert.equal(groupTone(['completed', 'skipped']), 'done');
+  assert.equal(groupTone(['completed', 'pending']), 'current');
+  assert.equal(groupTone(['pending', 'pending']), 'upcoming');
 });
