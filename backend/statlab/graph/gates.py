@@ -97,7 +97,7 @@ class GateService:
         )
         return tuple(boundary.execution_id for boundary in (*shared, *candidate))
 
-    def _validate(self, gate: GateRow) -> GateQuestion:
+    def _validate(self, gate: GateRow, *, current_schema: bool = True) -> GateQuestion:
         if gate.run_id != self.run_id:
             raise EngineError("gate belongs to another run")
         row = self.conn.execute(
@@ -113,7 +113,10 @@ class GateService:
             raise PersistenceError("gate execution ownership mismatch")
         if question.node not in {spec.name for spec in self.loop.nodes}:
             raise EngineError("gate node is undeclared")
-        if question.decision_schema != self._schema(question).model_json_schema():
+        if (
+            current_schema
+            and question.decision_schema != self._schema(question).model_json_schema()
+        ):
             raise EngineError("gate decision schema changed")
         return question
 
@@ -522,7 +525,7 @@ class GateService:
     async def reconcile(self, state: RunState) -> RunState:
         """Boot preparation seam: no task creation; unanswered gates remain dormant."""
         for gate in list_gates(self.conn, self.run_id):
-            question = self._validate(gate)
+            question = self._validate(gate, current_schema=gate.status != "applied")
             for entry in question.history:
                 if isinstance(entry, dict) and "answer" in entry:
                     prior = GateAnswer.model_validate(entry["answer"])

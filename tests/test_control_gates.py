@@ -817,3 +817,31 @@ async def test_restart_repairs_mode_written_before_gate_preparation(engine_world
     assert final.status == "completed" and final.mode == "autonomous"
     assert len(seen) == 2
     assert list_gates(conn, lifecycle.initial.run_id)[0].status == "applied"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_schema_check_for_applied_gates(engine_world: World) -> None:
+    lifecycle, service, _seen = await shared_gate(engine_world)
+    conn = engine_world.conn
+    gate = list_gates(conn, lifecycle.initial.run_id)[0]
+    applied = transition_gate(
+        conn,
+        gate,
+        status="applied",
+        answer_json=GateAnswer(gate_id=gate.id, action="approve").model_dump_json(),
+        question={**gate.question(), "decision_schema": {}},
+    )
+    await service.reconcile(await lifecycle.state())
+    assert any(
+        event.type == "gate.closed" and event.payload["gate_id"] == gate.id
+        for event in await lifecycle.loop.events.replay()
+    )
+    transition_gate(
+        conn,
+        applied,
+        status="pending",
+        answer_json=None,
+        question={**gate.question(), "decision_schema": {}},
+    )
+    with pytest.raises(EngineError, match="gate decision schema changed"):
+        await service.reconcile(await lifecycle.state())
