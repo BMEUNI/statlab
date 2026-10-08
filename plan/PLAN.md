@@ -1284,7 +1284,7 @@ label (D36a). Every "auto mode" below means `autonomous`.
 
 | | Auto (`autonomous`) | Guided (`guided`) |
 |---|---|---|
-| Gates | none (except escalation) | **shared nodes 1–6 gate; the node-5 shortlist is the key decision.** Per-candidate nodes 7–11 run ungated except on exceptions (D29) |
+| Gates | none (except escalation) | **shared nodes 1–6 gate; the node-5 shortlist is the key decision.** Per-candidate nodes 7–11 run ungated except on failure; approving node 5 approves every candidate's pipeline (D29, chunk 46c) |
 | Agent proposes params | yes, applies immediately | yes, presented for edit/approve |
 | Candidate execution | parallel | parallel (D29) |
 | User can interrupt | yes (Q&A / status / rewind / lifecycle) | yes, same |
@@ -1327,6 +1327,11 @@ action are not asked again. The UI groups pending per-candidate gates of the sam
 into one decision box (approve all, or approve/review per model) shown in both the chat and the
 progress pane; the API still answers one gate per request, and the run stays `awaiting_user`
 until every pending gate is answered.
+Chunk 46c (user decision) supersedes the per-candidate exception gates above: in guided mode
+per-candidate nodes no longer open exception gates at all; the experiment-design approval covers
+each candidate's whole pipeline, and a per-candidate node stops only on failure. Material
+exceptions and warnings stay recorded in the step result. The `exception` gate-policy label is
+kept because stored run spines must keep matching the code spine.
 
 ---
 

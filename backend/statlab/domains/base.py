@@ -18,8 +18,9 @@ NodeKind = Literal["SHARED", "PER_CANDIDATE"]
 """SHARED runs once per run; PER_CANDIDATE runs once per candidate (PLAN.md §4.2)."""
 
 GatePolicy = Literal["always", "exception", "never"]
-"""Guided-mode gating (D29). `always` for shared nodes, `exception` for per-candidate nodes,
-`never` for nodes with no user-meaningful decision."""
+"""Guided-mode gating (D29). `always` for shared nodes; `exception` for per-candidate nodes,
+which never ask in guided mode (the experiment design approval covers each candidate) and stop
+only on failure (chunk 46c); `never` for nodes with no user-meaningful decision."""
 
 NodeStatus = Literal["completed", "skipped", "failed", "awaiting_user"]
 

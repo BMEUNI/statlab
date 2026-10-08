@@ -94,39 +94,6 @@ def pipeline_from_state(
     )
 
 
-async def exception_approval[T: CandidateDecision](
-    runtime: DomainRuntime,
-    invocation: NodeInvocation,
-    decision: T,
-    evidence: _Evidence,
-    *,
-    after_action: bool = False,
-) -> T | None:
-    if after_action:
-        start = evidence.acknowledged or 0
-        new_warnings = evidence.warnings[start:]
-        exceptions = decision.material_exceptions if evidence.acknowledged is None else ()
-    else:
-        new_warnings = evidence.warnings
-        exceptions = decision.material_exceptions
-    if not exceptions and not new_warnings:
-        if not after_action:
-            evidence.acknowledged = len(evidence.warnings)
-        return decision
-    approval_evidence: tuple[JsonValue, ...] = (
-        *evidence.tools,
-        {"warnings": list(new_warnings)},
-    )
-    approved = await runtime.approve(
-        invocation, decision, approval_evidence, after_action=after_action
-    )
-    if after_action and approved is not None and approved != decision:
-        raise _RefusalError("completed actions cannot be changed by exception acknowledgment")
-    if not after_action and approved is not None:
-        evidence.acknowledged = len(evidence.warnings)
-    return approved
-
-
 class CandidatePipelineExecutor:
     def __init__(self, runtime: DomainRuntime) -> None:
         self.runtime = runtime
@@ -251,16 +218,13 @@ class CandidatePipelineExecutor:
             "pipeline": pipeline.model_dump(mode="json"),
             "decision": decision.model_dump(mode="json"),
         }
-        # Carried fitted objects remain live across preparation and awaiting exception gates.
+        # Carried fitted objects remain live as this step's artifacts.
         evidence.refs.extend((pipeline.train, pipeline.valid))
         for step in pipeline.replay:
             for key in ("imputer", "clipper", "encoder", "scaler", "binner"):
                 if key in step.parameters:
                     evidence.refs.append(_ref(step.parameters, key))
-        approved = await exception_approval(
-            self.runtime, invocation, decision, evidence, after_action=True
-        )
-        return evidence.result("awaiting_user" if approved is None else "completed", summary)
+        return evidence.result("completed", summary)
 
     async def _preprocessing(
         self,
@@ -288,10 +252,6 @@ class CandidatePipelineExecutor:
                 "cast. "
                 "Declare material exceptions. Explicit contract drop_constant is authoritative.",
             )
-        approved = await exception_approval(self.runtime, invocation, decision, evidence)
-        if approved is None:
-            return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
-        decision = approved
         rules = self.runtime.contract.preprocessing
         if (
             "drop_constant" in rules.model_fields_set

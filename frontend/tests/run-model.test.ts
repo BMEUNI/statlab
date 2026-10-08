@@ -10,6 +10,7 @@ import {
   forkNote,
   datasetColumns,
   decisionLead,
+  DESIGN_NOTE,
   formatUsd,
   gateEdits,
   gateNotes,
@@ -460,6 +461,10 @@ test('decisionLead', () => {
   );
   assert.equal(lead(gate({ proposal: { user_summary: 'One. Two. Three.' } }), false), 'One. Two.');
   assert.equal(lead(gate({ reasoning: 'Alpha. Beta. Gamma.' }), false), 'Alpha. Beta.');
+  assert.equal(
+    lead(gate({ node: 'experiment_design', proposal: { user_summary: 'One. Two. Three.' } }), false),
+    'One. Two. ' + DESIGN_NOTE,
+  );
   assert.equal(
     lead(gate({ phase: 'failure', failure: { errorClass: 'data', message: 'boom' } }), false),
     'This step failed: boom',

@@ -18,7 +18,6 @@ from statlab.domains.candidate_pipeline import (
     _FEATURE_RATIONALE,
     _FEATURE_SUMMARY,
     CandidatePipelineExecutor,
-    exception_approval,
     pipeline_from_state,
 )
 from statlab.domains.decisions import (
@@ -31,7 +30,6 @@ from statlab.domains.decisions import (
     TrainingDecision,
     ValidationConclusion,
 )
-from statlab.domains.foundation import _Evidence
 from statlab.domains.runtime import Approval
 from statlab.domains.tabular import TABULAR_SPINE, TABULAR_TRAVERSAL
 from statlab.errors import EngineError, LlmCallError, ToolCallError
@@ -442,7 +440,7 @@ async def test_target_encoding_keeps_oof_train_and_only_applies_to_validation(
 
 
 @pytest.mark.asyncio
-async def test_train_decided_selection_replays_exact_drop_and_exception_waits(
+async def test_train_decided_selection_replays_exact_drop_and_guided_warnings_continue(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -468,8 +466,8 @@ async def test_train_decided_selection_replays_exact_drop_and_exception_waits(
     assert len(replay) == 1 and replay[0]["frame"] != selector["train"]
     h.state = h.state.model_copy(update={"mode": "guided"})
     tools.warning = "Unseen validation category"
-    awaiting = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))
-    assert awaiting.status == "awaiting_user" and awaiting.summary["pipeline"]
+    result = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))
+    assert result.status == "completed" and "Unseen validation category" in result.warnings
 
 
 @pytest.mark.asyncio
@@ -490,7 +488,7 @@ async def test_pipeline_cancellation_failure_and_missing_upstream(
 
 
 @pytest.mark.asyncio
-async def test_material_exception_gate_precedes_actions(
+async def test_guided_material_exceptions_do_not_wait(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -500,70 +498,20 @@ async def test_material_exception_gate_precedes_actions(
     h.llm.responses[PreprocessingDecision] = PreprocessingDecision(
         rationale="Drop request requires review", material_exceptions=("Sparse feature exclusion",)
     )
-    output = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
-    assert output.status == "awaiting_user" and not tools.calls
-
-    async def approve(
-        inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
-    ) -> BaseModel:
-        assert inv.candidate is not None
-        return decision
-
-    h.runtime = replace(h.runtime, approval=approve)
-    assert (
-        await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
-    ).status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_exception_check_tracks_acknowledged_warnings(
-    migrated_db: sqlite3.Connection,
-    project: ProjectRow,
-    tmp_path: Path,
-) -> None:
-    h, _ = await candidate_harness(migrated_db, project, tmp_path)
-    h.state = h.state.model_copy(update={"mode": "guided"})
-    seen: list[tuple[bool, tuple[JsonValue, ...]]] = []
+    asked: list[bool] = []
 
     async def approve(
         inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
     ) -> BaseModel | None:
-        seen.append((inv.after_action, evidence))
-        return None if inv.after_action else decision
+        asked.append(inv.after_action)
+        return None
 
     h.runtime = replace(h.runtime, approval=approve)
-    invocation = candidate_invocation(h, 6)
-    flagged = PreprocessingDecision(rationale="r", material_exceptions=("Sparse",))
-    clean = PreprocessingDecision(rationale="r")
-
-    quiet = _Evidence()
-    assert await exception_approval(h.runtime, invocation, clean, quiet) is clean
-    assert quiet.acknowledged == 0
-    assert seen == []
-
-    pre = _Evidence(warnings=["w0"])
-    assert await exception_approval(h.runtime, invocation, flagged, pre) == flagged
-    assert pre.acknowledged == 1
-    assert seen[-1] == (False, ({"warnings": ["w0"]},))
-
-    settled = _Evidence(warnings=["w0"], acknowledged=1)
-    assert (
-        await exception_approval(h.runtime, invocation, flagged, settled, after_action=True)
-        is flagged
-    )
-    assert len(seen) == 1
-
-    grown = _Evidence(warnings=["w0", "w1"], acknowledged=1)
-    assert (
-        await exception_approval(h.runtime, invocation, flagged, grown, after_action=True)
-    ) is None
-    assert seen[-1] == (True, ({"warnings": ["w1"]},))
-
-    unchecked = _Evidence()
-    assert (
-        await exception_approval(h.runtime, invocation, flagged, unchecked, after_action=True)
-    ) is None
-    assert seen[-1] == (True, ({"warnings": []},))
+    output = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
+    assert output.status == "completed" and asked == [] and tools.calls
+    decision = output.summary["decision"]
+    assert isinstance(decision, dict)
+    assert decision["material_exceptions"] == ["Sparse feature exclusion"]
 
 
 @pytest.mark.asyncio
@@ -976,29 +924,6 @@ async def test_ordinal_without_categoricals_and_mutual_info_keep_selected_train(
     pipeline = pipeline_from_state(h.state, h.state.branches[0])
     assert pipeline.train == selected.artifacts[0].ref
     assert [s.tool for s in pipeline.replay] == ["drop_columns", "apply_imputer"]
-
-
-@pytest.mark.asyncio
-async def test_after_action_acknowledgment_cannot_change_completed_decision(
-    migrated_db: sqlite3.Connection,
-    project: ProjectRow,
-    tmp_path: Path,
-) -> None:
-    h, tools = await candidate_harness(migrated_db, project, tmp_path)
-    h.state = h.state.model_copy(update={"mode": "guided"})
-    tools.warning = "Imputer filled a sparse column"
-
-    async def approve(
-        inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
-    ) -> BaseModel:
-        assert inv.after_action
-        return PreprocessingDecision(rationale="Changed after the actions ran")
-
-    h.runtime = replace(h.runtime, approval=approve)
-    failed = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
-    assert failed.status == "failed" and failed.error is not None
-    assert failed.error.message == "completed actions cannot be changed by exception acknowledgment"
-    assert failed.artifacts == ()
 
 
 @pytest.mark.asyncio

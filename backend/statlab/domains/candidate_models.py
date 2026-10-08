@@ -13,7 +13,6 @@ from statlab_contracts.vocabulary import TUNABLE_PARAMS
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_pipeline import (
     candidate_result,
-    exception_approval,
     pipeline_from_state,
 )
 from statlab.domains.decisions import (
@@ -170,10 +169,7 @@ class CandidateModelExecutor:
         summary: dict[str, JsonValue],
     ) -> NodeResult:
         summary["decision"] = decision.model_dump(mode="json")
-        approved = await exception_approval(
-            self.runtime, invocation, decision, evidence, after_action=True
-        )
-        return evidence.result("awaiting_user" if approved is None else "completed", summary)
+        return evidence.result("completed", summary)
 
     async def _training(
         self,
@@ -223,10 +219,6 @@ class CandidateModelExecutor:
                 )
             ),
         )
-        approved = await exception_approval(self.runtime, invocation, decision, evidence)
-        if approved is None:
-            return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
-        decision = approved
         if tuning.method == "random":
             raise _RefusalError("random search has no supported tool")
         _validate_training(
@@ -321,10 +313,6 @@ class CandidateModelExecutor:
             "curves or threshold.",
             check=_rejecting(lambda d: _validate_evaluation(problem, d)),
         )
-        approved = await exception_approval(self.runtime, invocation, decision, evidence)
-        if approved is None:
-            return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
-        decision = approved
         _validate_evaluation(problem, decision)
         predicted = await self._call(
             invocation, evidence, "predict", {"model": str(model), "frame": str(pipeline.valid)}
@@ -518,9 +506,7 @@ class CandidateModelExecutor:
             retune_reason=conclusion.retune_reason,
         )
         output = await self._finish(invocation, evidence, final, summary)
-        if output.status == "completed":
-            return output.model_copy(update={"metrics": {metric: float(value)}})
-        return output
+        return output.model_copy(update={"metrics": {metric: float(value)}})
 
     async def _interpretation(
         self,
@@ -546,10 +532,6 @@ class CandidateModelExecutor:
             " Partial dependence columns and error segments must be entries of "
             "model_summary.feature_names.",
         )
-        approved = await exception_approval(self.runtime, invocation, decision, evidence)
-        if approved is None:
-            return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
-        decision = approved
         if decision.skip_reason is not None:
             return NodeResult(
                 status="skipped",

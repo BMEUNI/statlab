@@ -642,3 +642,130 @@ User, 2026-10-08: "Candidate models in the right panel doesnt have an icon". Cau
 `frontend/src/run/RunTimeline.tsx:89` renders an empty `tl-marker`. Fix: put
 `<Boxes className="icon" aria-hidden="true" />` inside that span (add `Boxes` to the existing
 `lucide-react` import). No CSS change. Checks: `npm run typecheck`, `npm run build`.
+
+---
+
+## Stage 46c — accept each model once, at experiment design (user decision)
+
+User, 2026-10-08: "I still have to accept cleaning, feature engineering, training etc.. for
+every single model, what I want is to accept that model 1 is going to be cleaned fitted etc..
+so accept everything once." Asked where; the user chose: **approving the experiment design (which
+lists every candidate) approves each model's whole pipeline; per-candidate steps never ask in
+guided mode and stop only when a step fails** (failure escalation is unchanged). Material
+exceptions and tool warnings stay recorded in each step's decision/warnings.
+
+Constraint found by main: do NOT change `TABULAR_SPINE` gate policies. `SpineEntry` stores
+`gate_policy`, and `Checkpointer.load` (`graph/checkpoint.py:55`) and `RunLoop.load_state`
+(`graph/engine.py:157`) reject a stored spine that differs from the code spine, so a policy change
+would break resuming, rewinding and boot-reconciling every existing run. The `exception` label
+stays; its meaning changes in domain code only. Generic gate machinery (`runtime.approve`,
+`GateService` after-phase handling) is untouched.
+
+Owned: `backend/statlab/domains/candidate_pipeline.py`, `backend/statlab/domains/candidate_models.py`,
+`backend/statlab/domains/foundation.py`, `backend/statlab/domains/base.py`,
+`tests/test_nodes_candidate_pipeline.py`, `tests/test_nodes_candidate_models.py`,
+`frontend/src/run/model.ts`, `frontend/tests/run-model.test.ts`.
+
+### Backend
+
+1. `candidate_pipeline.py`: delete `exception_approval` entirely.
+   - `_preprocessing` (~line 291): delete the `approved = await exception_approval(...)`, the
+     `if approved is None: return ...awaiting_user...` and `decision = approved` lines; the
+     function continues with the existing `rules = ...` line using `decision` unchanged.
+   - `_finish` (~line 243): keep signature and the refs block; the comment becomes
+     `# Carried fitted objects remain live as this step's artifacts.`; delete the
+     `exception_approval` call; return `evidence.result("completed", summary)`.
+   - Remove imports that become unused (only mechanical removals).
+2. `candidate_models.py`: remove `exception_approval` from the import list.
+   - `_finish` (~line 165): keep signature; after `summary["decision"] = ...` return
+     `evidence.result("completed", summary)`.
+   - `_training` (~226), `_evaluation` (~324), `_interpretation` (~549): delete the three lines
+     `approved = await exception_approval(...)`, `if approved is None: return ...`,
+     `decision = approved`; everything after stays (the existing `random` check,
+     `_validate_training`, `_validate_evaluation`, skip handling).
+3. `foundation.py`: remove the `acknowledged` field from `_Evidence`.
+4. `base.py`: `GatePolicy` docstring becomes: "Guided-mode gating (D29). `always` for shared
+   nodes; `exception` for per-candidate nodes, which never ask in guided mode (the experiment
+   design approval covers each candidate) and stop only on failure (chunk 46c); `never` for
+   nodes with no user-meaningful decision."
+
+### Backend tests
+
+`tests/test_nodes_candidate_pipeline.py`:
+- Remove the imports `exception_approval` and `from statlab.domains.foundation import _Evidence`
+  (and any import left unused by the deletions below).
+- `test_train_decided_selection_replays_exact_drop_and_exception_waits` → rename to
+  `test_train_decided_selection_replays_exact_drop_and_guided_warnings_continue`; its last two
+  lines become `result = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))`
+  and `assert result.status == "completed" and "Unseen validation category" in result.warnings`.
+- `test_material_exception_gate_precedes_actions` → rename to
+  `test_guided_material_exceptions_do_not_wait`; body: harness, guided mode, the same
+  `PreprocessingDecision(... material_exceptions=("Sparse feature exclusion",))` response;
+  `asked: list[bool] = []`; approval callback appends `inv.after_action` and returns `None`;
+  `h.runtime = replace(h.runtime, approval=approve)`; `output = await
+  CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))`; assert `output.status ==
+  "completed"`, `asked == []`, `tools.calls` non-empty, and
+  `output.summary["decision"]["material_exceptions"] == ["Sparse feature exclusion"]`
+  (guard the `dict` access with `isinstance` as other tests do).
+- Delete `test_exception_check_tracks_acknowledged_warnings` and
+  `test_after_action_acknowledgment_cannot_change_completed_decision`.
+
+`tests/test_nodes_candidate_models.py`:
+- `test_training_refusals_and_exception_wait` → rename to `test_training_refusals`; delete its
+  guided block (from `_mode(h, "guided")` through the following `_mode(h, "autonomous")`,
+  i.e. the guided response, `offset`, the two asserts and the mode reset); keep
+  `contract = h.runtime.contract` and everything after.
+- `test_evaluation_exception_wait_and_out_of_range_after_action_wait` → rename to
+  `test_guided_evaluation_continues_with_exceptions_and_out_of_range_metric`; first run:
+  `assert (await _run(h, 9)).status == "completed"` (drop `offset` and its assert); second
+  run: `assert output.status == "completed"`; keep the `metrics == {}`, warning and
+  `score_regression` asserts.
+- Delete `test_approved_exceptions_are_not_asked_again_after_scoring`; revert the pydantic
+  import to what remains used.
+- `test_interpretation_wait_skip_coefficients_and_unscaled_pdp` → rename to
+  `test_interpretation_guided_skip_coefficients_and_unscaled_pdp`; its first guided run asserts
+  `status == "completed"` instead of `"awaiting_user"`.
+
+### Frontend
+
+5. `model.ts`: constant `DESIGN_NOTE = "Approving this also approves every model's cleaning,
+   training, evaluation and explanation; they only stop to ask if a step fails."`. In
+   `decisionLead`'s shared branch, when `group.node === 'experiment_design'`, return the
+   existing lead text followed by a space and `DESIGN_NOTE`.
+6. `run-model.test.ts` (decisionLead test): add a shared `experiment_design` group whose
+   proposal `user_summary` is `'One. Two. Three.'` → `'One. Two. ' + DESIGN_NOTE` (export
+   `DESIGN_NOTE` and import it in the test).
+
+### Checks (46c)
+
+`make test-fast TESTS="tests/test_nodes_candidate_pipeline.py tests/test_nodes_candidate_models.py tests/test_api_runs.py tests/test_control_gates.py tests/test_candidate_fanout.py"`;
+`.venv/bin/python -m ruff check`, `ruff format --check`, `mypy` on the 6 owned Python files;
+from `frontend/`: `npm test`, `npm run typecheck`, `npm run build`.
+Main then runs `make check`.
+
+### Addendum 46c-A — out-of-range metric assertion
+
+Implementer stop: in `test_guided_evaluation_continues_with_exceptions_and_out_of_range_metric`
+the kept `assert output.metrics == {}` fails (`{'rmse': -1.0}`). The empty metrics came only from
+the old after-action wait; a completed evaluation records its metric, exactly as autonomous mode
+already does, with the "Primary metric is outside its mathematical range" warning. Decision: that
+assert becomes `assert output.metrics == {"rmse": -1.0}`; the warning and `score_regression`
+asserts stay. Rerun check 1 only.
+
+### Addendum 46c-B — dead branch after removing the wait
+
+`make check` (main): 3095 passed, coverage 99.99 %; `candidate_models.py:511` (`return output`
+after `if output.status == "completed":`) is unreachable because `_finish` now always returns a
+completed result. Fix in `_evaluation`: replace the three lines (`if output.status ==
+"completed":`, its `return output.model_copy(...)`, and `return output`) with the single line
+`return output.model_copy(update={"metrics": {metric: float(value)}})`. Checks:
+`make test-fast TESTS="tests/test_nodes_candidate_models.py"`, Ruff check/format and mypy on
+`backend/statlab/domains/candidate_models.py`.
+
+### Stage 46c acceptance receipt (2026-10-08)
+
+Implementer: focused pytest (5 files, then models file after 46c-B) exit 0; Ruff/format/mypy on the
+6 owned Python files exit 0; `npm test` 87/87, typecheck and build exit 0. Main: `make check`
+exit 0 — 3125 passed, 1 designed skip, coverage 100 % (12,015 statements, 3,458 branches), mypy
+(195 files) and Ruff clean (log `check46c2.log`, temporary). Earlier attempt failed only on
+coverage (`candidate_models.py:511`, fixed by 46c-B).

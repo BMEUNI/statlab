@@ -234,7 +234,6 @@ class _Evidence:
     tools: list[JsonValue] = field(default_factory=list)
     refs: list[ArtifactRef] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    acknowledged: int | None = None
 
     def add(self, tool: str, output: ToolSuccess) -> None:
         self.tools.append({"tool": tool, "result": output.model_dump(mode="json")})

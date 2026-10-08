@@ -636,6 +636,8 @@ export function groupTone(statuses: CellStatus[]): string {
   return 'upcoming';
 }
 
+export const DESIGN_NOTE = "Approving this also approves every model's cleaning, training, evaluation and explanation; they only stop to ask if a step fails.";
+
 export const STEP_PURPOSES: Record<string, string> = {
   preprocessing: 'Clean the data for each model: fill missing values and drop unusable columns.',
   feature_engineering: "Build each model's inputs: encode categories and scale numbers.",
@@ -706,8 +708,8 @@ export function decisionLead(group: DecisionGroup): string {
       : `${purpose} Done; I noted points to check.`;
   }
   const summary = q.proposal.user_summary;
-  if (typeof summary === 'string' && summary.trim() !== '') return firstSentences(summary, 2);
-  return firstSentences(q.reasoning, 2);
+  const lead = typeof summary === 'string' && summary.trim() !== '' ? firstSentences(summary, 2) : firstSentences(q.reasoning, 2);
+  return group.node === 'experiment_design' ? `${lead} ${DESIGN_NOTE}` : lead;
 }
 
 export function nowLine(

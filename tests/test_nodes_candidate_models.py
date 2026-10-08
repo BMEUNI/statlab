@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import ValidationError
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_models import (
     CV_CAVEAT,
@@ -436,7 +436,7 @@ async def test_durable_decision_and_executor_binding_guards(
 
 
 @pytest.mark.asyncio
-async def test_training_refusals_and_exception_wait(
+async def test_training_refusals(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -450,14 +450,6 @@ async def test_training_refusals_and_exception_wait(
     await prepare_candidate(h)
     assert h.state.branches[0].spec.estimator.params == {"fit_intercept": True}
     contract = h.runtime.contract
-    _mode(h, "guided")
-    h.llm.responses[TrainingDecision] = TrainingDecision(
-        rationale="Needs review", material_exceptions=("Unusual grid",)
-    )
-    offset = len(tools.calls)
-    assert (await _run(h, 8)).status == "awaiting_user"
-    assert len(tools.calls) == offset
-    _mode(h, "autonomous")
     h.runtime = replace(
         h.runtime,
         contract=DataContract(
@@ -624,7 +616,7 @@ async def test_binary_threshold_range_and_calibrated_diagnostic_refusals(
 
 
 @pytest.mark.asyncio
-async def test_evaluation_exception_wait_and_out_of_range_after_action_wait(
+async def test_guided_evaluation_continues_with_exceptions_and_out_of_range_metric(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -636,47 +628,18 @@ async def test_evaluation_exception_wait_and_out_of_range_after_action_wait(
     h.llm.responses[EvaluationActions] = EvaluationActions(
         rationale="Review actions", material_exceptions=("Skip CV",)
     )
-    offset = len(tools.calls)
-    assert (await _run(h, 9)).status == "awaiting_user"
-    assert len(tools.calls) == offset
+    assert (await _run(h, 9)).status == "completed"
     h.llm.responses[EvaluationActions] = EvaluationActions(rationale="Score validation")
     tools.metric = -1.0
     output = await _run(h, 9)
-    assert output.status == "awaiting_user"
-    assert output.metrics == {}
+    assert output.status == "completed"
+    assert output.metrics == {"rmse": -1.0}
     assert "Primary metric is outside its mathematical range" in output.warnings
     assert "score_regression" in [name for _, name, _ in tools.calls]
 
 
 @pytest.mark.asyncio
-async def test_approved_exceptions_are_not_asked_again_after_scoring(
-    migrated_db: sqlite3.Connection,
-    project: ProjectRow,
-    tmp_path: Path,
-) -> None:
-    h, _ = await candidate_harness(migrated_db, project, tmp_path)
-    await prepare_candidate(h)
-    await _run_save(h, 8)
-    _mode(h, "guided")
-    h.llm.responses[EvaluationActions] = EvaluationActions(
-        rationale="Review actions", material_exceptions=("Single validation split",)
-    )
-    phases: list[bool] = []
-
-    async def approve(
-        inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
-    ) -> BaseModel | None:
-        phases.append(inv.after_action)
-        return None if inv.after_action else decision
-
-    h.runtime = replace(h.runtime, approval=approve)
-    output = await _run(h, 9)
-    assert output.status == "completed"
-    assert phases == [False]
-
-
-@pytest.mark.asyncio
-async def test_interpretation_wait_skip_coefficients_and_unscaled_pdp(
+async def test_interpretation_guided_skip_coefficients_and_unscaled_pdp(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -695,7 +658,7 @@ async def test_interpretation_wait_skip_coefficients_and_unscaled_pdp(
     h.llm.responses[InterpretationDecision] = InterpretationDecision(
         rationale="Review", material_exceptions=("Leakage suspicion",)
     )
-    assert (await _run(h, 10)).status == "awaiting_user"
+    assert (await _run(h, 10)).status == "completed"
     _mode(h, "autonomous")
     h.llm.responses[InterpretationDecision] = InterpretationDecision(
         rationale="Skip", skip_reason="Not needed for this candidate"
