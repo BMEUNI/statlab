@@ -36,7 +36,14 @@ from statlab.errors import LlmCallError, LlmOutputError, PersistenceError
 from statlab.persistence.repository import record_llm_call
 
 _LOGGER = logging.getLogger(__name__)
+_TRANSCRIPT = logging.getLogger("statlab.llm.transcript")
 _REQUEST_TIMEOUT = 180
+
+
+def _render_messages(messages: Sequence[dict[str, str]]) -> str:
+    return "\n".join(f"--- {m['role']} ---\n{m['content']}" for m in messages)
+
+
 _FLASH_MODELS = frozenset(
     {
         "deepseek/deepseek-flash",
@@ -214,8 +221,25 @@ class LlmClient:
                     sink=sink,
                 )
 
+            _TRANSCRIPT.info(
+                "LLM request run=%s execution=%s output=%s model=%s attempt=%d\n%s",
+                run_id or "setup",
+                node_execution_id or "-",
+                output.__name__,
+                model,
+                2 if repaired else 1,
+                _render_messages(request_messages),
+            )
             response = await request() if recovery is None else await recovery(request)
             prior_content = _content(response)
+            _TRANSCRIPT.info(
+                "LLM response run=%s execution=%s output=%s attempt=%d\n%s",
+                run_id or "setup",
+                node_execution_id or "-",
+                output.__name__,
+                2 if repaired else 1,
+                prior_content,
+            )
             try:
                 if not prior_content:
                     raise ValueError("response content is empty")
@@ -225,6 +249,14 @@ class LlmClient:
                 return result
             except (ValidationError, ValueError) as exc:
                 validation_errors = _validation_errors(exc)
+                _TRANSCRIPT.info(
+                    "LLM output rejected run=%s execution=%s output=%s attempt=%d errors=%s",
+                    run_id or "setup",
+                    node_execution_id or "-",
+                    output.__name__,
+                    2 if repaired else 1,
+                    json.dumps(validation_errors, sort_keys=True),
+                )
                 if repaired:
                     raise LlmOutputError(
                         Failure(

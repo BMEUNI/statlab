@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from statlab.graph.state import RunState
 
 Repair = Callable[[Failure], Awaitable[dict[str, JsonValue]]]
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,6 +571,19 @@ class McpClient:
             args_json=json.dumps(sent, separators=(",", ":"), ensure_ascii=False),
             result_json=result_json,
             duration_ms=duration_ms,
+        )
+        _LOGGER.info(
+            "Tool call run=%s node=%s execution=%s tool=%s ok=%s duration=%dms args=%s",
+            ctx.paths.run_id,
+            ctx.node,
+            ctx.node_execution_id,
+            tool,
+            json.loads(result_json).get("ok"),
+            duration_ms,
+            json.dumps(sent, separators=(",", ":"), ensure_ascii=False),
+        )
+        _LOGGER.debug(
+            "Tool result tool=%s execution=%s %s", tool, ctx.node_execution_id, result_json
         )
 
 

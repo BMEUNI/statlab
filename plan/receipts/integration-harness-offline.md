@@ -132,3 +132,14 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - F12: `_REQUEST_TIMEOUT = 180`. `make check` exit 0: 3058 passed, 1 designed skip; TOTAL
   11418 stmts / 3290 branches 100%; mypy 188; Ruff clean; 197 formatted. Offline suites not
   rerun (constant only affects real provider waits).
+
+## Addendum — F13 + H7 logging, 2026-10-08
+
+- F13: `api.log` always carries `LLM decide` lines, full LLM request messages, raw responses,
+  rejected outputs with errors, and tool calls with arguments (INFO); tool results at DEBUG.
+  No reasoning text. Secret scan of `integration/out/20261008T063646Z-offline/api.log`: 0 hits.
+- H7: terminal prints scenario start/end and one line per SSE event; `--verbose` enables DEBUG.
+- Offline S01 `integration/out/20261008T063646Z-offline`: PASS 24/24; api.log 27 requests,
+  27 responses, 27 decides, 85 tool calls.
+- `make check` exit 0: 3058 passed, 1 designed skip; TOTAL 11431 stmts / 3290 branches 100%;
+  mypy 188; Ruff clean; 197 formatted.

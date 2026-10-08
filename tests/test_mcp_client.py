@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import threading
 from contextlib import AsyncExitStack
@@ -469,8 +470,11 @@ async def test_discovery_is_cached_and_orchestrator_values_replace_agent_values(
 
 @pytest.mark.asyncio
 async def test_split_and_non_split_seed_sources_differ_and_are_logged(
-    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="statlab.mcp_client")
     conn, paths, original_contract, _ = world
     original_run = get_run(conn, paths.run_id)
     assert original_run is not None
@@ -537,6 +541,8 @@ async def test_split_and_non_split_seed_sources_differ_and_are_logged(
         )
     assert [arguments["seed"] for _, arguments, _ in session.calls] == [11, 73]
     assert [call.arguments["seed"] for call in logged_calls(conn, run.id)] == [11, 73]
+    assert "Tool call run=" in caplog.text
+    assert "Tool result tool=" in caplog.text
 
 
 @pytest.mark.asyncio

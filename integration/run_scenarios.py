@@ -59,6 +59,7 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="integration.run_scenarios")
     parser.add_argument("--llm", choices=("live", "offline", "offline-rich"), required=True)
     parser.add_argument("--only", nargs="*", default=[])
+    parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--budget-usd", type=float, default=2.0)
     parser.add_argument("--scenarios", type=Path, default=Path("integration/scenarios.toml"))
     return parser.parse_args(argv)
@@ -131,6 +132,7 @@ async def _run_one(
     budget: Budget,
     live: bool,
 ) -> ScenarioRecord:
+    print(f"== {scenario.id} {scenario.title}", flush=True)
     record = ScenarioRecord(scenario)
     scenario_dir = workspace.scenario_dir(scenario.id)
     record.folder = scenario_dir
@@ -259,6 +261,7 @@ async def _run_one(
         "http_log": driver.http_log[http_start:],
     }
     (scenario_dir / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"== {scenario.id} {record.result}", flush=True)
     return record
 
 
@@ -329,6 +332,8 @@ async def _suite(scenarios: tuple[Scenario, ...], args: argparse.Namespace) -> i
     workspace.data_dir.mkdir(parents=True)
     workspace.api_log.touch()
     _setup_logging(workspace.api_log)
+    if args.verbose:
+        logging.getLogger("statlab").setLevel(logging.DEBUG)
     token = secrets.token_urlsafe(32)
     mcp = McpProcess(data_dir=workspace.data_dir, token=token, log_path=workspace.mcp_log)
     api: ApiServer | None = None

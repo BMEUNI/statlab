@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -24,6 +25,7 @@ from statlab.mcp_client import CallContext
 from statlab.persistence.models import MemoryRow
 from statlab.persistence.repository import get_champion_model
 
+_LOGGER = logging.getLogger(__name__)
 Approval = Callable[[NodeInvocation, BaseModel, tuple[JsonValue, ...]], Awaitable[BaseModel | None]]
 DecisionOverride = Callable[[NodeInvocation, type[BaseModel]], Awaitable[BaseModel | None]]
 
@@ -81,6 +83,13 @@ class DomainRuntime:
         check: Callable[[T], None] | None = None,
     ) -> T:
         context = self.context(invocation)
+        _LOGGER.info(
+            "LLM decide node=%s candidate=%s output=%s execution=%s",
+            context.node,
+            invocation.candidate.public_id if invocation.candidate is not None else "-",
+            output.__name__,
+            context.node_execution_id,
+        )
         if self.decision_override is not None:
             approved = await self.decision_override(invocation, output)
             if approved is not None:

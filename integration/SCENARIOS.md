@@ -24,6 +24,20 @@ scenario a folder with `result.json`, the recorded SSE `events.jsonl`, `snapshot
 extracts (`node_executions.json`, `llm_calls.json`, `tool_calls.json`, `gates.json`), and copies
 of `report.md`, `pipeline.py`, `manifest.json` when produced.
 
+`api.log` is the backend log of the whole suite, in order. It contains:
+
+- every LLM step (`LLM decide node=... candidate=... output=...`);
+- the full prompt of every LLM request (`LLM request ...`, then `--- system ---` / `--- user ---`
+  blocks);
+- the raw reply (`LLM response ...`);
+- every rejected reply with the validation errors sent back for repair (`LLM output rejected ...`);
+- every tool call with its arguments and duration (`Tool call ...`);
+- provider failures (`LLM request failed: <class> status=<code>`).
+
+Add `--verbose` to also log the full result of every tool call. The terminal prints one line per
+run event (step started or finished, gate, status) and a line when each scenario starts and ends.
+To follow a run in detail, run `tail -f integration/out/<folder>/api.log` in a second terminal.
+
 The harness uses an isolated data directory and database inside that folder; it never touches
 `projects/` or `statlab.db`. Machine-readable definitions: [scenarios.toml](./scenarios.toml).
 

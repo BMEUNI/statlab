@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -676,7 +677,10 @@ async def test_profile_selection_refuses_before_optional_tools(
 
 
 @pytest.mark.asyncio
-async def test_profile_check_feeds_llm_repair(foundation: Harness) -> None:
+async def test_profile_check_feeds_llm_repair(
+    foundation: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="statlab.domains.runtime")
     await foundation.advance(2)
     await foundation.step()
     check = foundation.llm.checks[ProfileDecision]
@@ -685,6 +689,7 @@ async def test_profile_check_feeds_llm_repair(foundation: Harness) -> None:
         check(ProfileDecision(rationale="bad", categorical=("x",)))
     messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
     assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
+    assert "LLM decide node=data_profiling candidate=- output=ProfileDecision" in caplog.text
 
 
 @pytest.mark.asyncio

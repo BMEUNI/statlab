@@ -1683,3 +1683,65 @@ assertions that compare the sent `timeout` to `60` (`test_llm_stream.py` ~130,
 `test_llm_client.py` ~164, ~291, ~329) to `180`. Nothing else.
 Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_llm_stream.py'`;
 Ruff check/format and mypy on the three files.
+
+## Fix F13 + H7 — everything readable in the logs; progress visible in the terminal
+
+User request (2026-10-08): full prompts in every log, not only a debug mode; very large, less
+important detail may be debug-only; the terminal should show what is happening.
+
+Decisions: transcripts go through Python logging (no DB migration, no new files): every run's
+`api.log` gets them. INFO = always: each `decide` (node, candidate, output type), each LLM
+request with the full messages, each LLM response content, each rejected output with its errors,
+each tool call (node, tool, ok, duration, arguments). DEBUG only: full tool results. Reasoning
+text is never logged (existing policy: reasoning content is not persisted). No secret ever enters
+messages, arguments or results.
+
+Owned files: `backend/statlab/llm/client.py`, `backend/statlab/domains/runtime.py`,
+`backend/statlab/mcp_client.py`, `tests/test_llm_client.py`, `tests/test_mcp_client.py`,
+`tests/test_nodes_foundation.py`, `integration/driver.py`, `integration/run_scenarios.py`.
+
+Recipe:
+1. `llm/client.py`:
+   - `_TRANSCRIPT = logging.getLogger("statlab.llm.transcript")` beside `_LOGGER`.
+   - Module function `_render_messages(messages: Sequence[dict[str, str]]) -> str` returning
+     `"\n".join(f"--- {m['role']} ---\n{m['content']}" for m in messages)`.
+   - In `_complete`, inside the loop, immediately before `response = await request() if ...`:
+     `_TRANSCRIPT.info("LLM request run=%s execution=%s output=%s model=%s attempt=%d\n%s", run_id or "setup", node_execution_id or "-", output.__name__, model, 2 if repaired else 1, _render_messages(request_messages))`.
+   - Immediately after `prior_content = _content(response)`:
+     `_TRANSCRIPT.info("LLM response run=%s execution=%s output=%s attempt=%d\n%s", run_id or "setup", node_execution_id or "-", output.__name__, 2 if repaired else 1, prior_content)`.
+   - In `except (ValidationError, ValueError) as exc:` right after `validation_errors = ...`:
+     `_TRANSCRIPT.info("LLM output rejected run=%s execution=%s output=%s attempt=%d errors=%s", run_id or "setup", node_execution_id or "-", output.__name__, 2 if repaired else 1, json.dumps(validation_errors, sort_keys=True))`.
+2. `domains/runtime.py` `decide`: after `context = self.context(invocation)` and before the
+   override check, `_LOGGER.info("LLM decide node=%s candidate=%s output=%s execution=%s", context.node, invocation.candidate.public_id if invocation.candidate is not None else "-", output.__name__, context.node_execution_id)`
+   (add `import logging` and `_LOGGER = logging.getLogger(__name__)`).
+3. `mcp_client.py`: add `import logging`, `_LOGGER = logging.getLogger(__name__)`. At the end of
+   the client's `_record` method (after `record_tool_call(...)`):
+   `_LOGGER.info("Tool call run=%s node=%s execution=%s tool=%s ok=%s duration=%dms args=%s", ctx.paths.run_id, ctx.node, ctx.node_execution_id, tool, json.loads(result_json).get("ok"), duration_ms, json.dumps(sent, separators=(",", ":"), ensure_ascii=False))`
+   then `_LOGGER.debug("Tool result tool=%s execution=%s %s", tool, ctx.node_execution_id, result_json)`.
+4. Tests:
+   - `tests/test_llm_client.py::test_semantic_check_rejection_gets_one_repair`: add
+     `caplog: pytest.LogCaptureFixture`; first line `caplog.set_level(logging.INFO, logger="statlab.llm.transcript")`
+     (import `logging`); after the existing assertions assert `"LLM request" in caplog.text`,
+     `"attempt=2" in caplog.text`, `'{"value":"bad"}' in caplog.text`,
+     `"LLM output rejected" in caplog.text`.
+   - `tests/test_mcp_client.py::test_split_and_non_split_seed_sources_differ_and_are_logged`: add
+     `caplog`; `caplog.set_level(logging.DEBUG, logger="statlab.mcp_client")` at the start; at
+     the end assert `"Tool call run=" in caplog.text` and `"Tool result tool=" in caplog.text`.
+   - `tests/test_nodes_foundation.py::test_profile_check_feeds_llm_repair`: add `caplog`;
+     `caplog.set_level(logging.INFO, logger="statlab.domains.runtime")` at the start; assert
+     `"LLM decide node=data_profiling candidate=- output=ProfileDecision" in caplog.text`.
+5. H7 `integration/driver.py` `_record_events`: after writing the event to the sink, print one line
+   to stdout: `print(f"  {str(payload.get('ts', ''))[11:19]} {payload.get('type')} {json.dumps(payload.get('payload'), ensure_ascii=False)[:160]}", flush=True)`.
+6. H7 `integration/run_scenarios.py`:
+   - `_parse`: add `parser.add_argument("--verbose", action="store_true")`.
+   - Where `_setup_logging(workspace.api_log)` is called, then if `args.verbose`:
+     `logging.getLogger("statlab").setLevel(logging.DEBUG)`.
+   - In `_run_one`, first line: `print(f"== {scenario.id} {scenario.title}", flush=True)`; just
+     before it returns the record: `print(f"== {scenario.id} {record.result}", flush=True)`
+     (if `_run_one` has several return points, print before each).
+7. Main updates `integration/SCENARIOS.md` (log contents, `--verbose`).
+
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_mcp_client.py tests/test_nodes_foundation.py tests/test_llm_stream.py'`;
+Ruff check/format and mypy on all owned files (paths as separate arguments);
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S01 > /tmp/f13_s01.log 2>&1`
+(report exit; main inspects `api.log`).

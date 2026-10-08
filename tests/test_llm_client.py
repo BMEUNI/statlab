@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import sqlite3
@@ -401,7 +402,9 @@ async def test_semantic_check_rejection_gets_one_repair(
     llm_context: tuple[sqlite3.Connection, str, str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="statlab.llm.transcript")
     conn, run_id, execution_id = llm_context
     monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
     calls: list[dict[str, object]] = []
@@ -428,6 +431,10 @@ async def test_semantic_check_rejection_gets_one_repair(
     second_messages = calls[1]["messages"]
     assert isinstance(second_messages, list) and isinstance(second_messages[-1], dict)
     assert "value is not allowed; allowed: ['good']" in second_messages[-1]["content"]
+    assert "LLM request" in caplog.text
+    assert "attempt=2" in caplog.text
+    assert '{"value":"bad"}' in caplog.text
+    assert "LLM output rejected" in caplog.text
 
 
 @pytest.mark.asyncio

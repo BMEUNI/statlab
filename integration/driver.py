@@ -229,6 +229,12 @@ class Driver:
                                 events.append({**payload})
                                 with sink.open("a", encoding="utf-8") as handle:
                                     handle.write(json.dumps(payload) + "\n")
+                                shown = json.dumps(payload.get("payload"), ensure_ascii=False)
+                                print(
+                                    f"  {str(payload.get('ts', ''))[11:19]} "
+                                    f"{payload.get('type')} {shown[:160]}",
+                                    flush=True,
+                                )
                             payload = None
             except httpx.HTTPError:
                 pass
