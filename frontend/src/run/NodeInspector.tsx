@@ -1,12 +1,18 @@
 import { formatTime } from '../ui/format.ts';
-import type { RunExecutions } from '../api/types.ts';
+import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
+import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
 import { executionsFor, formatUsd, latestOutcome, nodeLabel, type RunView } from './model.ts';
 import type { Selection } from './RunGraph.tsx';
 
-type Props = { view: RunView; data: RunExecutions | undefined; selected: Selection | null };
+type Props = {
+  view: RunView;
+  data: RunExecutions | undefined;
+  selected: Selection | null;
+  artifacts: ArtifactEntry[] | undefined;
+};
 
-export default function NodeInspector({ view, data, selected }: Props) {
+export default function NodeInspector({ view, data, selected, artifacts }: Props) {
   if (selected === null) {
     return (
       <section className="panel">
@@ -34,7 +40,6 @@ export default function NodeInspector({ view, data, selected }: Props) {
             <dt>Error</dt><dd>{outcome.error === null ? '—' : `${outcome.error.errorClass}: ${outcome.error.message}`}</dd>
             <dt>Warnings</dt>
             <dd>{outcome.warnings.length === 0 ? '—' : outcome.warnings.map((warning, index) => <div key={index}>{warning}</div>)}</dd>
-            <dt>Artifacts</dt><dd>{`${outcome.artifacts.length} files`}</dd>
           </dl>
           {Object.keys(outcome.metrics).length > 0 && (
             <div className="table-wrap">
@@ -48,6 +53,27 @@ export default function NodeInspector({ view, data, selected }: Props) {
                 </tbody>
               </table>
             </div>
+          )}
+          {outcome.artifacts.length > 0 && (
+            <>
+              <h3>Files</h3>
+              {artifacts === undefined ? <p>Loading files…</p> : (
+                <div className="table-wrap">
+                  <table>
+                    <caption>Files made by this step</caption>
+                    <thead><tr>{ARTIFACT_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>
+                    <tbody>
+                      {outcome.artifacts.map((ref) => {
+                        const entry = artifacts.find((item) => item.id === ref);
+                        return entry === undefined
+                          ? <tr key={ref}><td colSpan={7}><code>{ref}</code> is not listed for this run.</td></tr>
+                          : <ArtifactRow key={ref} entry={entry} />;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
           {typeof decision === 'object' && decision !== null && !Array.isArray(decision) && (
             <>

@@ -143,3 +143,24 @@ export type EstimatorInfo = { name: string; task: string };
 export type Vocabulary = { contractSchema: JsonObject; estimators: EstimatorInfo[]; inferentialModels: string[] };
 export type SetupValidation = { valid: boolean; mismatches: JsonObject[]; warnings: string[] };
 export type ContractProposal = { contract: JsonObject; reasoning: string };
+
+export type ArtifactEntry = {
+  id: string;
+  kind: string;
+  label: string | null;
+  split: string | null;
+  rows: number | null;
+  cols: number | null;
+  producedBy: string;
+  ts: string;
+  pruned: boolean;
+  locked: boolean;
+};
+
+export type ArtifactPreview = {
+  rows: number;
+  cols: number;
+  columns: string[];
+  dtypes: Record<string, string>;
+  head: JsonObject[];
+};

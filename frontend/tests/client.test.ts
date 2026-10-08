@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ApiError,
+  artifactUrl,
+  parseArtifactEntries,
+  parseArtifactPreview,
+  previewArtifact,
   answerGate,
   checkGateEdits,
   createProject,
@@ -367,5 +371,34 @@ test('run actions POST the documented bodies', async () => {
     assert.deepEqual(await checkGateEdits('r1', 'g1', { a: 1 }), []);
     assert.equal(requests[0]?.input, '/api/runs/r1/gates/g1/check');
     assert.equal(requests[0]?.init?.body, '{"edits":{"a":1}}');
+  });
+});
+
+const artifactRow = (id: string, meta: string, prunedAt: string | null, locked: boolean) => ({
+  artifact: { id, run_id: 'r1', kind: 'dataframe', path: 'p', meta_json: meta, produced_by: 'n1', ts: 't', pruned_at: prunedAt },
+  locked,
+});
+
+test('parseArtifactEntries reads meta, tolerates bad meta and rejects wrong types', () => {
+  const meta = JSON.stringify({ ref: 'x', label: 'Train', rows: 10, cols: 3, split: 'train' });
+  assert.deepEqual(parseArtifactEntries([artifactRow('a1', meta, null, false), artifactRow('a2', '{bad', 'then', true)]), [
+    { id: 'a1', kind: 'dataframe', label: 'Train', split: 'train', rows: 10, cols: 3, producedBy: 'n1', ts: 't', pruned: false, locked: false },
+    { id: 'a2', kind: 'dataframe', label: null, split: null, rows: null, cols: null, producedBy: 'n1', ts: 't', pruned: true, locked: true },
+  ]);
+  isInvalidResponse(() => parseArtifactEntries([{ ...artifactRow('a1', meta, null, false), locked: 'no' }]));
+});
+
+test('parseArtifactPreview maps columns from dtypes', () => {
+  assert.deepEqual(parseArtifactPreview({ rows: 5, cols: 2, dtypes: { a: 'int64', b: 'object' }, head: [{ a: 1, b: 'x' }] }), {
+    rows: 5, cols: 2, columns: ['a', 'b'], dtypes: { a: 'int64', b: 'object' }, head: [{ a: 1, b: 'x' }],
+  });
+});
+
+test('artifactUrl encodes and previewArtifact requests the preview path', async () => {
+  assert.equal(artifactUrl('a/b'), '/api/artifacts/a%2Fb');
+  await withFetch({ rows: 1, cols: 1, dtypes: { a: 'int64' }, head: [] }, async (requests) => {
+    await previewArtifact('a1');
+    assert.equal(requests[0]?.input, '/api/artifacts/a1/preview');
+    assert.equal(requests[0]?.init?.method, 'GET');
   });
 });

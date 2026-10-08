@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getExecutions, getRun } from '../api/client.ts';
+import { getExecutions, getRun, listRunArtifacts } from '../api/client.ts';
 import { useRunEvents } from '../api/useRunEvents.ts';
 import type { Route } from '../routes.ts';
+import ArtifactBrowser from '../run/ArtifactBrowser.tsx';
+import CandidateTable from '../run/CandidateTable.tsx';
+import { candidateRows } from '../run/compare.ts';
 import ChatPanel from '../run/ChatPanel.tsx';
 import GatePanel from '../run/GatePanel.tsx';
 import { foldEvents, parseGateQuestion, parseRunView } from '../run/model.ts';
@@ -15,6 +18,8 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const queryClient = useQueryClient();
   const snapshot = useQuery({ queryKey: ['run', runId], queryFn: ({ signal }) => getRun(runId, signal) });
   const executions = useQuery({ queryKey: ['executions', runId], queryFn: ({ signal }) => getExecutions(runId, signal) });
+  const artifacts = useQuery({ queryKey: ['artifacts', runId], queryFn: ({ signal }) => listRunArtifacts(runId, signal) });
+  const [tab, setTab] = useState<'steps' | 'candidates' | 'files'>('steps');
   const subscribedId = snapshot.data?.run.id === runId ? runId : null;
   const stream = useRunEvents(subscribedId);
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -26,6 +31,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
     const timer = setTimeout(() => {
       void queryClient.invalidateQueries({ queryKey: ['run', runId] });
       void queryClient.invalidateQueries({ queryKey: ['executions', runId] });
+      void queryClient.invalidateQueries({ queryKey: ['artifacts', runId] });
     }, 300);
     return () => clearTimeout(timer);
   }, [stream.lastSeq, runId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -39,6 +45,13 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const pending = data.gates
     .filter((gate) => gate.status === 'pending')
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
+
+  const rows = view === null ? [] : candidateRows(view);
+  const tabs = [
+    { id: 'steps' as const, label: 'Steps' },
+    { id: 'candidates' as const, label: `Candidates (${rows.length})` },
+    { id: 'files' as const, label: `Files (${artifacts.data?.length ?? 0})` },
+  ];
 
   return (
     <section aria-label="Run workspace">
@@ -82,14 +95,38 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
             ? <p role="alert">This run's state cannot be displayed.</p>
             : (
               <>
-                <RunGraph
-                  view={view}
-                  executions={executions.data?.executions ?? []}
-                  pending={pending.flatMap(({ question }) => (question === null ? [] : [question]))}
-                  selected={selected}
-                  onSelect={setSelected}
-                />
-                <NodeInspector view={view} data={executions.data} selected={selected} />
+                <div className="tabs" role="tablist">
+                  {tabs.map((item) => (
+                    <button
+                      key={item.id} type="button" role="tab" id={`run-tab-${item.id}`} aria-selected={tab === item.id}
+                      aria-controls="run-panel" onClick={() => setTab(item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+                <div role="tabpanel" id="run-panel" aria-labelledby={`run-tab-${tab}`}>
+                  {tab === 'steps' && (
+                    <>
+                      <RunGraph
+                        view={view}
+                        executions={executions.data?.executions ?? []}
+                        pending={pending.flatMap(({ question }) => (question === null ? [] : [question]))}
+                        selected={selected}
+                        onSelect={setSelected}
+                      />
+                      <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} />
+                    </>
+                  )}
+                  {tab === 'candidates' && <CandidateTable rows={rows} />}
+                  {tab === 'files' && (
+                    artifacts.isPending
+                      ? <p>Loading files…</p>
+                      : artifacts.isError
+                        ? <p role="alert">{errorText(artifacts.error)}</p>
+                        : <ArtifactBrowser entries={artifacts.data} />
+                  )}
+                </div>
               </>
             )}
         </div>

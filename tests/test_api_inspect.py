@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 from statlab.config import Settings
+from statlab.graph.state import RunState
 from statlab.persistence.db import connect
 from statlab.persistence.repository import (
     claim_test_scoring,
@@ -250,3 +251,37 @@ async def test_run_files_and_report_plots(tmp_path: Path, monkeypatch: pytest.Mo
         assert (await client.get(f"{base}/manifest.json")).status_code == 404
         assert (await client.get(f"{base}/secret.txt")).status_code == 404
         assert (await client.get("/api/runs/missing/files/pipeline.py")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_artifact_list_reads_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _session, project):
+        seed = _seed(settings, str(project["id"]))
+        paths = RunPaths(settings.data_dir, "demo", seed.run_id)
+        url = f"/api/runs/{seed.run_id}/artifacts"
+        paths.state_json.write_text(
+            RunState(
+                run_id=seed.run_id, spine_id="s", spine=(), mode="autonomous"
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+        listed = await client.get(url)
+        assert listed.status_code == 200
+        assert {row["artifact"]["id"] for row in listed.json()} == {
+            seed.plot,
+            seed.frame,
+            seed.test_frame,
+            seed.table,
+            seed.pruned,
+        }
+        paths.state_json.write_text("{", encoding="utf-8")
+        malformed = await client.get(url)
+        assert malformed.status_code == 500
+        assert malformed.json() == {"detail": "internal error"}
+        paths.state_json.write_text(
+            RunState(run_id="r_other", spine_id="s", spine=(), mode="autonomous").model_dump_json(),
+            encoding="utf-8",
+        )
+        assert (await client.get(url)).status_code == 500

@@ -1,4 +1,6 @@
 import type {
+  ArtifactEntry,
+  ArtifactPreview,
   ContractProposal,
   ContractRecord,
   DatasetProfile,
@@ -603,4 +605,71 @@ export async function rewindRun(runId: string, target: string, requestId: string
 
 export async function sendMessage(runId: string, text: string): Promise<ControlReply> {
   return parseControlReply(await request(`${runPath(runId)}/messages`, { method: 'POST', json: { text } }));
+}
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+export function parseArtifactEntries(value: unknown): ArtifactEntry[] {
+  if (!Array.isArray(value)) throw invalidResponse();
+  return value.map((item): ArtifactEntry => {
+    if (!isJsonObject(item) || !isJsonObject(item.artifact) || typeof item.locked !== 'boolean') {
+      throw invalidResponse();
+    }
+    const artifact = item.artifact;
+    let label: string | null = null;
+    let split: string | null = null;
+    let rows: number | null = null;
+    let cols: number | null = null;
+    const meta = artifact.meta_json;
+    if (typeof meta !== 'string') throw invalidResponse();
+    try {
+      const parsed: unknown = JSON.parse(meta);
+      if (isJsonObject(parsed)) {
+        label = typeof parsed.label === 'string' ? parsed.label : null;
+        split = typeof parsed.split === 'string' ? parsed.split : null;
+        rows = finiteOrNull(parsed.rows);
+        cols = finiteOrNull(parsed.cols);
+      }
+    } catch {
+      // unparseable meta leaves label, split, rows and cols empty
+    }
+    return {
+      id: requiredString(artifact, 'id'),
+      kind: requiredString(artifact, 'kind'),
+      label,
+      split,
+      rows,
+      cols,
+      producedBy: requiredString(artifact, 'produced_by'),
+      ts: requiredString(artifact, 'ts'),
+      pruned: nullableString(artifact, 'pruned_at') !== null,
+      locked: item.locked,
+    };
+  });
+}
+
+export function parseArtifactPreview(value: unknown): ArtifactPreview {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const dtypes = stringRecord(value.dtypes);
+  return {
+    rows: requiredNumber(value, 'rows'),
+    cols: requiredNumber(value, 'cols'),
+    columns: Object.keys(dtypes),
+    dtypes,
+    head: objectArray(value.head),
+  };
+}
+
+export function artifactUrl(id: string): string {
+  return `/api/artifacts/${encodeURIComponent(id)}`;
+}
+
+export async function listRunArtifacts(runId: string, signal?: AbortSignal): Promise<ArtifactEntry[]> {
+  return parseArtifactEntries(await request(`${runPath(runId)}/artifacts`, { method: 'GET', signal }));
+}
+
+export async function previewArtifact(id: string, signal?: AbortSignal): Promise<ArtifactPreview> {
+  return parseArtifactPreview(await request(`${artifactUrl(id)}/preview`, { method: 'GET', signal }));
 }

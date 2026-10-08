@@ -146,7 +146,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 36b | [`36b_api_read.md`](./36b_api_read.md) — read-only API: datasets/contracts lists, executions + tool/LLM calls + cost, artifacts list/download/preview, run files and report plots | implemented 2026-10-08 (make check 3069 passed, 100%) | 33, 34, 35 |
 | 37 | [`37_frontend_setup_flow.md`](./37_frontend_setup_flow.md) — project picker, upload wizard, contract editor (columns/schema form/JSON), structural + data check, mode selection | implemented 2026-10-08 (make check 3074 passed, 100%; browser click-through) | 33, 36, 36b |
 | 38 | [`38_frontend_run_workspace.md`](./38_frontend_run_workspace.md) — step table (shared + candidate columns), step inspector with attempts/tool/agent calls and cost, chat with streamed replies, gate panels for all seven actions with edit check, pause/resume/stop/rewind | implemented 2026-10-08 (make check 3075 passed, 100%; browser acceptance) | 35, 37 |
-| 39 | `39_frontend_comparison.md` — candidate comparison table sortable by metric with `varies_from_baseline`, artifact browser, live cost | untouched | 38 |
+| 39 | [`39_frontend_comparison.md`](./39_frontend_comparison.md) — candidate comparison table sortable by metric with `varies_from_baseline`, file browser with preview/download/D32 lock, fork-aware artifact listing | implemented 2026-10-08 (make check 3076 passed, 100%; browser acceptance) | 38 |
 | 40 | `40_frontend_report.md` — report viewer with plots (**render `report.md` with raw HTML disabled**: section bodies are LLM text, chunk 19 D-e), champion card, downloads, run-history lineage tree | untouched | 39 |
 
 ## Dependency graph (phase level)

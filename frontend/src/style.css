@@ -139,3 +139,9 @@ button.danger { color: var(--fault); border-color: var(--fault); }
 @keyframes mark-pulse { 50% { opacity: 0.3; } }
 
 small.help { display: block; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+.filters select { width: auto; }
+img.plot { max-width: 100%; height: auto; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--surface); }
+th[aria-sort="ascending"] button::after { content: " ▲"; }
+th[aria-sort="descending"] button::after { content: " ▼"; }

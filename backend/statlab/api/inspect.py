@@ -13,6 +13,8 @@ from statlab_contracts.artifacts import ArtifactKind, parse_artifact_ref
 from statlab_contracts.layout import RunPaths
 
 from statlab.api.projects import APIResources, ProjectsService
+from statlab.errors import EngineError
+from statlab.graph.state import RunState
 from statlab.persistence.models import (
     ArtifactRow,
     LlmCallRow,
@@ -72,6 +74,18 @@ def _locked(artifact: ArtifactRow, run: RunRow) -> bool:
     return (artifact.derived_from_test or artifact.split == "test") and run.test_scored_at is None
 
 
+def _checkpoint(paths: RunPaths) -> RunState | None:
+    """The run's retained checkpoint, or None before the first save."""
+    try:
+        text = paths.state_json.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    try:
+        return RunState.model_validate_json(text)
+    except ValueError:
+        raise EngineError("run checkpoint is malformed") from None
+
+
 def _run(resource: APIResources, run_id: str) -> tuple[RunRow, RunPaths]:
     run = get_run(resource.conn, run_id)
     if run is None:
@@ -111,10 +125,12 @@ def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
     @router.get("/api/runs/{run_id}/artifacts", response_model=tuple[ArtifactEntry, ...])
     async def artifacts(run_id: str) -> tuple[ArtifactEntry, ...]:
         resource = resources()
-        run, _paths = _run(resource, run_id)
+        run, paths = _run(resource, run_id)
         return tuple(
             ArtifactEntry(artifact=row, locked=_locked(row, run))
-            for row in list_artifacts(resource.conn, run.id, include_pruned=True)
+            for row in list_artifacts(
+                resource.conn, run.id, include_pruned=True, checkpoint=_checkpoint(paths)
+            )
         )
 
     @router.get("/api/artifacts/{artifact_id}/preview")
