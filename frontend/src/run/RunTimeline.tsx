@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { useEffect, useRef } from 'react';
-import { Trophy, X } from 'lucide-react';
+import { Boxes, Trophy, X } from 'lucide-react';
 import type { ExecutionRecord, GateQuestion } from '../api/types.ts';
 import {
   cellStatus,
@@ -86,7 +86,7 @@ export default function RunTimeline({ view, executions, pending, selected, champ
       {layout.before.map(shared)}
       {layout.perCandidate.length > 0 && (
         <li className={`tl-item tl-${groupTone(allStatuses)}`}>
-          <span className="tl-marker" aria-hidden="true" />
+          <span className="tl-marker" aria-hidden="true"><Boxes className="icon" aria-hidden="true" /></span>
           <div className="tl-body">
             <div className="tl-head"><h3>Candidate models</h3></div>
             {view.branches.length > 0 && (

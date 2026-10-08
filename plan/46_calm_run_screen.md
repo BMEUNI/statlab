@@ -635,3 +635,10 @@ underlined link. Causes: `GatePanel.tsx:121,131` pass `columns={[]}` to `SchemaF
    summary has no `tools` → `[]`.
 
 Checks: `npm test`, `npm run typecheck`, `npm run build` (from `frontend/`).
+
+## Addendum I — candidate group marker icon (user report)
+
+User, 2026-10-08: "Candidate models in the right panel doesnt have an icon". Cause:
+`frontend/src/run/RunTimeline.tsx:89` renders an empty `tl-marker`. Fix: put
+`<Boxes className="icon" aria-hidden="true" />` inside that span (add `Boxes` to the existing
+`lucide-react` import). No CSS change. Checks: `npm run typecheck`, `npm run build`.
