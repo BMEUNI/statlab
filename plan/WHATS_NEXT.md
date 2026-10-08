@@ -26,7 +26,12 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: user's online test of chunks 46-47, then the next phase
+## Next: user's online test of chunks 46-51, then the next phase
+
+Chunks 48-51 accepted 2026-10-08: profiling question lists numeric/non-numeric columns (48),
+chat titles search waves (49), threaded random-forest final fit and a third of the cores for
+tool loops (50), chat retries transient provider errors and shows errors cleanly (51).
+Open: Q&A prompt is ~151k tokens per question (whole state summary); trim candidate.
 
 Chunk [47](./47_polish_help_report_cost.md) accepted 2026-10-08: light run header, close icon
 inside the step box, navbar help menu from the registry, champion tiles, full-width justified
