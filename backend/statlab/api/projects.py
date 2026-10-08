@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
@@ -122,6 +122,25 @@ class SetupValidation(BaseModel):
     valid: bool
     mismatches: tuple[dict[str, JsonValue], ...]
     warnings: tuple[str, ...]
+
+
+class ContractCheckRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    contract: dict[str, JsonValue]
+
+
+class ContractIssue(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    message: str
+
+
+class ContractCheck(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    errors: tuple[ContractIssue, ...]
 
 
 @dataclass(slots=True)
@@ -568,6 +587,24 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         resource = resources()
         registry = await resource.mcp.list_estimators()
         return {"contract_schema": DataContract.model_json_schema(), "registry": registry.summary}
+
+    @router.post("/api/contracts/check")
+    async def check_contract(body: ContractCheckRequest) -> ContractCheck:
+        try:
+            DataContract.model_validate(body.contract)
+        except ValidationError as exc:
+            return ContractCheck(
+                errors=tuple(
+                    ContractIssue(
+                        path=".".join(str(part) for part in error["loc"]),
+                        message=error["msg"].removeprefix("Value error, "),
+                    )
+                    for error in exc.errors(
+                        include_url=False, include_input=False, include_context=False
+                    )
+                )
+            )
+        return ContractCheck(errors=())
 
     return router
 

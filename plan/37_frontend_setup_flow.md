@@ -1,8 +1,8 @@
 ---
-status: in_progress
+status: implemented
 dependencies: [33, 36, 36b]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-08
+implementation_notes: "37a f07cbdd, 37b 546145d, 37c + Addendum A/A.1 accepted on 33e3f00 dirty tree: make check exit 0 (3074 passed, 100% line/branch, mypy 191 files, ruff); frontend npm test 32/32, typecheck 0, build 0; Playwright click-through on H9 offline stack passed all four contract sources, Columns/Rules/JSON edits, schema-error and data-mismatch display, guided start."
 ---
 
 # Chunk37 — setup flow (project picker, upload, contract editor, validation, start)
@@ -559,3 +559,104 @@ From `frontend/`: `npm test`, `npm run typecheck`, `npm run build` (genuine exit
 Main then performs the browser click-through on the H9 offline stack (Playwright): create
 project, upload `churn.csv`, all four contract sources, edit columns/rules/JSON, check, start a
 guided run, land on the run page.
+
+### 37c Addendum A — click-through corrections (2026-10-08)
+
+Click-through on the H9 offline stack passed: project create, churn.csv upload, all four
+contract sources, Columns/Rules/JSON edits (sparse draft, Apply JSON, error alert), data
+mismatch display, guided run start, run-page landing. Two defects found:
+
+1. **Estimators never listed.** Real `list_estimators` summary is
+   `{"estimators": {name: {task, family, ...}}, "inferential_models": {name: {...}}}`; the 37b
+   parser assumed a flat map, so `modelling.candidates` renders no checkboxes and drafted
+   candidates are invisible in the Rules tab.
+2. **Schema-invalid contracts show only "Invalid request."** The global
+   `RequestValidationError` handler (33 §5) sanitizes all 422s, so a contract that breaks a
+   `DataContract` rule (e.g. inference predictor in `features.exclude`, unknown enum, extra key)
+   gives the user no reason. Decision: keep the global sanitizer and the typed validate endpoint
+   unchanged; add a dedicated structural check that returns pydantic `loc`/`msg` only (never
+   `input`, `ctx`, `url`) to the caller who submitted that contract. React renders it as text.
+
+Owned files: `backend/statlab/api/projects.py`, `tests/test_api_projects.py`,
+`frontend/src/api/client.ts`, `frontend/tests/client.test.ts`. Nothing else.
+
+#### Backend (`backend/statlab/api/projects.py`)
+
+- Add `ValidationError` to the existing `from pydantic import ...` line.
+- New models next to `SetupValidation`, all `model_config = ConfigDict(frozen=True, extra="forbid")`:
+  - `ContractCheckRequest`: `contract: dict[str, JsonValue]`.
+  - `ContractIssue`: `path: str`, `message: str`.
+  - `ContractCheck`: `errors: tuple[ContractIssue, ...]`.
+- In the router factory, after the `/api/vocabulary` route, add
+  `@router.post("/api/contracts/check") async def check_contract(body: ContractCheckRequest) -> ContractCheck`:
+  `try: DataContract.model_validate(body.contract)`; on `ValidationError as exc` return
+  `ContractCheck(errors=tuple(ContractIssue(path=".".join(str(part) for part in error["loc"]),
+  message=error["msg"].removeprefix("Value error, ")) for error in exc.errors(include_url=False,
+  include_input=False, include_context=False)))`; otherwise return `ContractCheck(errors=())`.
+  No project lookup, no MCP call, no persistence. A non-object `contract` stays a sanitized 422
+  via the global handler.
+
+#### Backend tests (`tests/test_api_projects.py`)
+
+- `test_vocabulary_lists_schema_and_registry`: change the queued summary and the expected
+  `body["registry"]` to the real shape
+  `{"estimators": {"ridge": {"task": "regression"}}, "inferential_models": {"ols": {}}}`.
+- New `test_contract_check_reports_paths_and_messages(tmp_path, monkeypatch)` using
+  `_open_project_api(tmp_path, monkeypatch)` (ignore session/project), `POST /api/contracts/check`:
+  1. `{"contract": {"target": {"column": "y"}}}` -> 200, `{"errors": []}`; `session.calls` length
+     unchanged across the call (capture `len(session.calls)` before).
+  2. `{"contract": {"target": {"column": "y"}, "split": {"strategy": "bogus"}}}` -> 200;
+     `errors == [{"path": "split.strategy", "message": "Input should be 'random', 'stratified', 'temporal' or 'grouped'"}]`.
+  3. `{"contract": {"target": {"column": "y"}, "objective": {"inference_goals": [{"question": "q", "predictors": ["region"]}]}, "features": {"exclude": ["region"]}}}`
+     -> 200; one error with `path == ""` and message
+     `"objective.inference_goals question 'q' has predictors ['region'] in features.exclude"`.
+  4. `{"contract": {"target": {"column": "y"}, "zzz": 1}}` -> one error
+     `{"path": "zzz", "message": "Extra inputs are not permitted"}`; response text contains
+     neither `"input"` nor `"ctx"` nor `"url"`.
+  5. `{"contract": [1]}` -> 422 with `{"detail": "invalid request"}`.
+
+#### Frontend (`frontend/src/api/client.ts`)
+
+- `parseVocabulary`: iterate `registry.estimators` (when it is an object; otherwise no
+  estimators) instead of `registry`; keep the `isJsonObject(entry) && typeof entry.task === 'string'`
+  filter, drop the `name === 'inferential_models'` skip, keep the name sort and the
+  `inferentialModels` logic unchanged.
+- New exported `parseContractCheck(value: unknown): JsonObject[]`: `value` must be an object whose
+  `errors` is an array of objects each with string `path` and string `message`, else
+  `throw invalidResponse()`; return `errors.map(e => ({ field: e.path === '' ? 'contract' : e.path, message: e.message }))`.
+- `validateContract`: first `const issues = parseContractCheck(await request('/api/contracts/check', { method: 'POST', json: { contract } }))`;
+  if `issues.length > 0` return `{ valid: false, mismatches: issues, warnings: [] }` without
+  calling validate; else the existing validate request unchanged. `CheckStep` is not changed: it
+  already renders `field`/`message` mismatches.
+
+#### Frontend tests (`frontend/tests/client.test.ts`)
+
+- Vocabulary fixture: `registry: { estimators: { ridge: { task: 'regression' }, lr: { task: 'classification' }, bad: 1 }, inferential_models: { ols: {}, logit: {} } }`;
+  same expected estimators/inferential lists. Add `parseVocabulary({ contract_schema: {}, registry: {} }).estimators` deep-equals `[]`.
+- `parseContractCheck`: `{errors: [{path: 'split.strategy', message: 'm'}, {path: '', message: 'n'}]}`
+  -> `[{field: 'split.strategy', message: 'm'}, {field: 'contract', message: 'n'}]`; invalid
+  response for `{errors: [{path: 1, message: 'm'}]}` and for `{}`.
+- `validateContract` with a fetch stub that answers by URL (one test): (a) check returns
+  `{errors: [{path: 'zzz', message: 'Extra inputs are not permitted'}]}` -> result
+  `{valid: false, mismatches: [{field: 'zzz', message: 'Extra inputs are not permitted'}], warnings: []}`
+  and exactly one request, to `/api/contracts/check`, body `JSON.stringify({ contract })`;
+  (b) check returns `{errors: []}`, validate returns `{valid: true, mismatches: [], warnings: []}` ->
+  two requests in order `/api/contracts/check`, `/api/projects/p1/contracts/validate`, result valid.
+
+#### Checks
+
+- `make test-fast TESTS="tests/test_api_projects.py"`
+- `.venv/bin/python -m ruff check backend/statlab/api/projects.py tests/test_api_projects.py`
+- `.venv/bin/python -m ruff format --check backend/statlab/api/projects.py tests/test_api_projects.py`
+- `.venv/bin/python -m mypy backend/statlab/api/projects.py tests/test_api_projects.py`
+- From `frontend/`: `npm test`, `npm run typecheck`, `npm run build`.
+Stop and report on any failure; do not change messages, tests or other files to make them pass.
+
+#### 37c Addendum A.1 — test case 4 correction
+
+Case 4's substring check contradicts its own expected message ("Extra inputs ..." contains
+`input`). Replace the final `not in extra.text` loop with exact equality
+`extra.json() == {"errors": [{"path": "zzz", "message": "Extra inputs are not permitted"}]}`
+(proves only `path`/`message` keys) plus `'"ctx"' not in extra.text and '"url"' not in extra.text
+and '"input":' not in extra.text`. Rerun `make test-fast TESTS="tests/test_api_projects.py"` and
+the three static commands on the two Python files.

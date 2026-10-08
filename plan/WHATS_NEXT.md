@@ -26,26 +26,17 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B15 (chunks37–38, setup flow then run workspace; unstarted)
+## Next: batch B15 — chunk 38 run workspace
 
-Chunk35's [SSE implementation](./35_sse_stream.md) and chunk36's
-[browser scaffold/launcher](./36_frontend_scaffold.md) are terminal and reviewed. Scoped statics,
-frontend typecheck/build/Make dryrun and one final global Python static acceptance passed.
-M12 runtime/replay proof remains outstanding. Backend implementation is complete; behavioral
-acceptance remains limited by the test stop. B15 and B16 remain; no B15 spec or source work started.
-Specify chunk37 only when authorized, using dependencies33/36; specify38 only after37's terminal
-handoff (dependencies35/37). Preserve B13's fresh per-run
-runtime/loop/lifecycle/GateService/ForkService, revision callback and tabular retained-report
-publisher. API caller owns registry, execution/continuation tasks and shutdown drain; inbound
-controls use real same-run audit_anchor. Gate reconciliation precedes restart scans. Retried
-direct forks require durable request IDs; real service callbacks perform control actions.
-Keep dependent stages sequential. Main owns all design decisions, detailed per-file recipes,
-review and acceptance; main writes no code. Delegate only implementation-ready plans to the Luna/low
-`implementer`. Missing decisions/failures return to main for a resolved correction plan. No Sol workers
-or model escalation. Follow [role and plan requirements](../AGENTS.md#roles-plannerreviewer-and-mechanical-implementer).
-User authorizes automatic local commits after finished work; never push. The earlier test stop
-was lifted for offline runtime validation, now complete (2026-10-07). Paid online runs need a
-fresh explicit user authorization. B15 stays unstarted.
+36b and 37 accepted 2026-10-08 (see their spec frontmatter). User requirement: every backend
+feature usable in the UI. Next: spec 38a (run data layer: gate question parsing, graph model
+from state, event fold, gate/control/message/executions/artifacts clients) then 38b (graph +
+node inspector, timeline/chat with streaming, inline gate forms for all seven actions, run
+controls incl. rewind, live cost). Then B16: 39 comparison/artifacts, 40 report/downloads/
+lineage/memory. Offline click-through stack: `.venv/bin/python -m integration.serve_ui` +
+`STATLAB_API_ORIGIN=... make ui`. No paid run without fresh explicit user confirmation.
+User authorizes automatic local commits after finished work; never push. Main writes no code;
+delegate resolved plans to the pinned `implementer` only.
 
 ## Accepted seams and next-stage hazards
 

@@ -8,6 +8,7 @@ import {
   getRun,
   isJsonValue,
   listProjects,
+  parseContractCheck,
   parseContracts,
   parseProfile,
   parseProjectDetail,
@@ -15,6 +16,7 @@ import {
   parseRunSnapshot,
   parseVocabulary,
   uploadContract,
+  validateContract,
   uploadDataset,
 } from '../src/api/client.ts';
 
@@ -227,7 +229,7 @@ test('setup parsers validate and transform backend payloads', () => {
   const vocabulary = parseVocabulary({
     contract_schema: {},
     registry: {
-      ridge: { task: 'regression' }, lr: { task: 'classification' }, bad: 1,
+      estimators: { ridge: { task: 'regression' }, lr: { task: 'classification' }, bad: 1 },
       inferential_models: { ols: {}, logit: {} },
     },
   });
@@ -235,6 +237,13 @@ test('setup parsers validate and transform backend payloads', () => {
     { name: 'lr', task: 'classification' }, { name: 'ridge', task: 'regression' },
   ]);
   assert.deepEqual(vocabulary.inferentialModels, ['logit', 'ols']);
+  assert.deepEqual(parseVocabulary({ contract_schema: {}, registry: {} }).estimators, []);
+  assert.deepEqual(
+    parseContractCheck({ errors: [{ path: 'split.strategy', message: 'm' }, { path: '', message: 'n' }] }),
+    [{ field: 'split.strategy', message: 'm' }, { field: 'contract', message: 'n' }],
+  );
+  isInvalidResponse(() => parseContractCheck({ errors: [{ path: 1, message: 'm' }] }));
+  isInvalidResponse(() => parseContractCheck({}));
   const profile = {
     rows: 2, cols: 1, columns: ['a'], dtypes: { a: 'int' }, null_counts: { a: 0 }, n_unique: { a: 2 },
     roles: { a: 'numeric' }, role_evidence: { a: 'x' }, all_null: [],
@@ -248,4 +257,35 @@ test('setup parsers validate and transform backend payloads', () => {
   };
   assert.deepEqual(parseProjectDetail(detail).memory[0]?.value, { a: 1 });
   isInvalidResponse(() => parseProjectDetail({ ...detail, memory: [{ ...detail.memory[0], value_json: '{' }] }));
+});
+
+test('validateContract checks structure before the typed validate call', async () => {
+  const originalFetch = globalThis.fetch;
+  const contract = { target: { column: 'y' } };
+  const urls: string[] = [];
+  const bodies: unknown[] = [];
+  let issues: unknown[] = [{ path: 'zzz', message: 'Extra inputs are not permitted' }];
+  globalThis.fetch = async (input, init) => {
+    urls.push(String(input));
+    bodies.push(init?.body);
+    const body = String(input) === '/api/contracts/check'
+      ? { errors: issues }
+      : { valid: true, mismatches: [], warnings: [] };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  try {
+    assert.deepEqual(await validateContract('p1', 'd1', contract), {
+      valid: false,
+      mismatches: [{ field: 'zzz', message: 'Extra inputs are not permitted' }],
+      warnings: [],
+    });
+    assert.deepEqual(urls, ['/api/contracts/check']);
+    assert.equal(bodies[0], JSON.stringify({ contract }));
+    issues = [];
+    urls.length = 0;
+    assert.deepEqual(await validateContract('p1', 'd1', contract), { valid: true, mismatches: [], warnings: [] });
+    assert.deepEqual(urls, ['/api/contracts/check', '/api/projects/p1/contracts/validate']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

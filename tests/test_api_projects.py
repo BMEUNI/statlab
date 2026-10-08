@@ -1229,7 +1229,10 @@ async def test_vocabulary_lists_schema_and_registry(
     async with _open_project_api(tmp_path, monkeypatch, session=session) as (client, _, _, _):
         session.responses.append(
             ToolSuccess(
-                summary={"ridge": {"task": "regression"}, "inferential_models": {"ols": {}}}
+                summary={
+                    "estimators": {"ridge": {"task": "regression"}},
+                    "inferential_models": {"ols": {}},
+                }
             )
         )
         response = await client.get("/api/vocabulary")
@@ -1237,10 +1240,73 @@ async def test_vocabulary_lists_schema_and_registry(
         body = response.json()
         assert body["contract_schema"]["title"] == "DataContract"
         assert body["registry"] == {
-            "ridge": {"task": "regression"},
+            "estimators": {"ridge": {"task": "regression"}},
             "inferential_models": {"ols": {}},
         }
         name, arguments, timeout = session.calls[-1]
         assert name == "list_estimators"
         assert arguments == {}
         assert timeout == 60
+
+
+@pytest.mark.asyncio
+async def test_contract_check_reports_paths_and_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = SetupSession()
+    async with _open_project_api(tmp_path, monkeypatch, session=session) as (client, _, _, _):
+        calls = len(session.calls)
+        ok = await client.post(
+            "/api/contracts/check", json={"contract": {"target": {"column": "y"}}}
+        )
+        assert ok.status_code == 200
+        assert ok.json() == {"errors": []}
+        assert len(session.calls) == calls
+
+        bogus = await client.post(
+            "/api/contracts/check",
+            json={"contract": {"target": {"column": "y"}, "split": {"strategy": "bogus"}}},
+        )
+        assert bogus.status_code == 200
+        assert bogus.json()["errors"] == [
+            {
+                "path": "split.strategy",
+                "message": "Input should be 'random', 'stratified', 'temporal' or 'grouped'",
+            }
+        ]
+
+        overlap = await client.post(
+            "/api/contracts/check",
+            json={
+                "contract": {
+                    "target": {"column": "y"},
+                    "objective": {"inference_goals": [{"question": "q", "predictors": ["region"]}]},
+                    "features": {"exclude": ["region"]},
+                }
+            },
+        )
+        assert overlap.status_code == 200
+        assert overlap.json()["errors"] == [
+            {
+                "path": "",
+                "message": (
+                    "objective.inference_goals question 'q' has predictors ['region'] "
+                    "in features.exclude"
+                ),
+            }
+        ]
+
+        extra = await client.post(
+            "/api/contracts/check",
+            json={"contract": {"target": {"column": "y"}, "zzz": 1}},
+        )
+        assert extra.status_code == 200
+        assert extra.json() == {
+            "errors": [{"path": "zzz", "message": "Extra inputs are not permitted"}]
+        }
+        assert '"ctx"' not in extra.text and '"url"' not in extra.text
+        assert '"input":' not in extra.text
+
+        invalid = await client.post("/api/contracts/check", json={"contract": [1]})
+        assert invalid.status_code == 422
+        assert invalid.json() == {"detail": "invalid request"}

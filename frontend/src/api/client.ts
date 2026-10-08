@@ -266,8 +266,9 @@ export function parseVocabulary(value: unknown): Vocabulary {
   const registry = value.registry;
   if (!isJsonObject(contractSchema) || !isJsonObject(registry)) throw invalidResponse();
   const estimators: EstimatorInfo[] = [];
-  for (const [name, entry] of Object.entries(registry)) {
-    if (name === 'inferential_models' || !isJsonObject(entry) || typeof entry.task !== 'string') continue;
+  const registered = isJsonObject(registry.estimators) ? registry.estimators : {};
+  for (const [name, entry] of Object.entries(registered)) {
+    if (!isJsonObject(entry) || typeof entry.task !== 'string') continue;
     estimators.push({ name, task: entry.task });
   }
   estimators.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
@@ -282,6 +283,16 @@ export function parseVocabulary(value: unknown): Vocabulary {
 export function parseValidation(value: unknown): SetupValidation {
   if (!isJsonObject(value) || typeof value.valid !== 'boolean') throw invalidResponse();
   return { valid: value.valid, mismatches: objectArray(value.mismatches), warnings: stringArray(value.warnings) };
+}
+
+export function parseContractCheck(value: unknown): JsonObject[] {
+  if (!isJsonObject(value) || !Array.isArray(value.errors)) throw invalidResponse();
+  return value.errors.map((error: unknown) => {
+    if (!isJsonObject(error) || typeof error.path !== 'string' || typeof error.message !== 'string') {
+      throw invalidResponse();
+    }
+    return { field: error.path === '' ? 'contract' : error.path, message: error.message };
+  });
 }
 
 export function parseProposal(value: unknown): ContractProposal {
@@ -416,6 +427,10 @@ export async function validateContract(
   datasetId: string,
   contract: JsonObject,
 ): Promise<SetupValidation> {
+  const issues = parseContractCheck(
+    await request('/api/contracts/check', { method: 'POST', json: { contract } }),
+  );
+  if (issues.length > 0) return { valid: false, mismatches: issues, warnings: [] };
   return parseValidation(
     await request(`${projectPath(projectId)}/contracts/validate`, {
       method: 'POST',
