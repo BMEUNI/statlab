@@ -134,7 +134,12 @@ class CandidateSearchPlanner:
                 "Preserve every old specification, baseline and split. Respect remaining "
                 "candidate/fit/wave limits. Avoid duplicates; justify families above two. "
                 "Empty proposal ends search. "
-                "Never use test evidence. The engine saves this wave before cumulative approval.",
+                "Never use test evidence. The engine saves this wave before cumulative approval. "
+                "Estimator params hold single fixed values (never grids or lists). "
+                "Each new candidate's varies_from_baseline lists exactly the dimensions "
+                "that differ from the run's baseline candidate (is_baseline=true), not from "
+                "the candidate it was derived from; a different estimator always includes "
+                "'estimator'.",
                 check=_rejecting(cumulative),
             )
         except LlmOutputError:

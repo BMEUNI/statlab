@@ -1745,3 +1745,15 @@ Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tes
 Ruff check/format and mypy on all owned files (paths as separate arguments);
 `.venv/bin/python -m integration.run_scenarios --llm offline --only S01 > /tmp/f13_s01.log 2>&1`
 (report exit; main inspects `api.log`).
+
+## Fix F14 — search question states the two rules the live LLM broke
+
+Live S01 PASS run (`integration/out/20261008T064037Z-live`): the wave-2 `SearchDecision` was
+rejected twice — grid lists in estimator params, then `varies_from_baseline` measured against
+the wave-1 candidate it was derived from instead of the run's baseline. F11 ended search.
+
+Owned file: `backend/statlab/domains/candidate_search.py`. Recipe: append to the `SearchDecision`
+question string the sentences
+`" Estimator params hold single fixed values (never grids or lists). Each new candidate's varies_from_baseline lists exactly the dimensions that differ from the run's baseline candidate (is_baseline=true), not from the candidate it was derived from; a different estimator always includes 'estimator'."`
+No test change (prompt text only). Checks: Ruff check/format and mypy on the file;
+`LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_search.py'`.
