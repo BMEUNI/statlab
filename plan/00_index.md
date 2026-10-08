@@ -65,7 +65,7 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B12 | 31 recovery/lifecycle + 32 gates/rewind | M10, M11; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)) |
 | B13 | 33 API projects + 34 API runs | implemented/reviewed; static 2026-10-05; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); [receipt](./receipts/B13.md) |
 | B14 | 35 SSE + 36 frontend scaffold | implemented/reviewed; static 2026-10-05; frontend typecheck/build passed; offline runtime/coverage accepted 2026-10-07 (3006 passed, 100%; [offline receipt](./receipts/B9-B14-offline.md)); M12 browser smoke still deferred; [receipt](./receipts/B14.md) |
-| B15 | 36b read API + 37 setup flow + 38 run workspace (user requirement 2026-10-08: every backend feature usable in the UI) | in progress |
+| B15 | 36b read API + 37 setup flow + 38 run workspace (user requirement 2026-10-08: every backend feature usable in the UI) | implemented 2026-10-08 |
 | B16 | 39 comparison + 40 report | M13 |
 
 ## Phase A — Foundation (01–06)
@@ -145,7 +145,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 36 | [`36_frontend_scaffold.md`](./36_frontend_scaffold.md) — Vite + TS strict, typed API client, `EventSource` hook with `seq` tracking and reconnect | implemented (static only; tests stopped) | 35 |
 | 36b | [`36b_api_read.md`](./36b_api_read.md) — read-only API: datasets/contracts lists, executions + tool/LLM calls + cost, artifacts list/download/preview, run files and report plots | implemented 2026-10-08 (make check 3069 passed, 100%) | 33, 34, 35 |
 | 37 | [`37_frontend_setup_flow.md`](./37_frontend_setup_flow.md) — project picker, upload wizard, contract editor (columns/schema form/JSON), structural + data check, mode selection | implemented 2026-10-08 (make check 3074 passed, 100%; browser click-through) | 33, 36, 36b |
-| 38 | `38_frontend_run_workspace.md` — node graph (shared spine + candidate columns), chat with token streaming, inline gate forms | untouched | 35, 37 |
+| 38 | [`38_frontend_run_workspace.md`](./38_frontend_run_workspace.md) — step table (shared + candidate columns), step inspector with attempts/tool/agent calls and cost, chat with streamed replies, gate panels for all seven actions with edit check, pause/resume/stop/rewind | implemented 2026-10-08 (make check 3075 passed, 100%; browser acceptance) | 35, 37 |
 | 39 | `39_frontend_comparison.md` — candidate comparison table sortable by metric with `varies_from_baseline`, artifact browser, live cost | untouched | 38 |
 | 40 | `40_frontend_report.md` — report viewer with plots (**render `report.md` with raw HTML disabled**: section bodies are LLM text, chunk 19 D-e), champion card, downloads, run-history lineage tree | untouched | 39 |
 

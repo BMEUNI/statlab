@@ -27,7 +27,88 @@ export type RunSummary = {
   test_scored_at: string | null;
   test_fingerprint: string | null;
 };
-export type GateSummary = { id: string; run_id: string; node_execution_id: string; status: string };
+export type GateSummary = {
+  id: string;
+  run_id: string;
+  node_execution_id: string;
+  status: string;
+  question_json: string;
+  answer_json: string | null;
+  ts: string;
+};
+export type GateAction =
+  | 'approve'
+  | 'approve_with_edits'
+  | 'instruct'
+  | 'approve_all_remaining'
+  | 'skip_node'
+  | 'rewind'
+  | 'abort';
+export type GatePhase = 'before' | 'after' | 'failure';
+export type GateQuestion = {
+  node: string;
+  candidateId: string | null;
+  phase: GatePhase;
+  proposal: JsonObject;
+  decisionSchema: JsonObject;
+  evidence: JsonValue[];
+  reasoning: string;
+  editable: string[];
+  defaultAction: GateAction;
+  options: GateAction[];
+  context: string[];
+  revision: number;
+  history: JsonValue[];
+  failure: { errorClass: string; message: string } | null;
+};
+export type GateSubmission = {
+  revision: number;
+  action: GateAction;
+  edits?: JsonObject;
+  instruction?: string;
+  reason?: string;
+  target?: string;
+};
+export type ControlReply = { text: string; category: string; newRunId: string | null };
+export type ExecutionRecord = {
+  id: string;
+  candidateId: string | null;
+  node: string;
+  seq: number;
+  attempt: number;
+  status: string;
+  summary: JsonObject | null;
+  error: string | null;
+  startedAt: string;
+  endedAt: string | null;
+};
+export type ToolCallRecord = {
+  id: string;
+  executionId: string;
+  tool: string;
+  args: JsonValue | null;
+  result: JsonValue | null;
+  durationMs: number;
+  ts: string;
+};
+export type LlmCallRecord = {
+  id: string;
+  executionId: string;
+  signature: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  costUsd: number;
+  durationMs: number;
+  ts: string;
+};
+export type RunExecutions = {
+  executions: ExecutionRecord[];
+  toolCalls: ToolCallRecord[];
+  llmCalls: LlmCallRecord[];
+  costUsd: number;
+};
 export type RunSnapshot = {
   run: RunSummary;
   state: JsonObject;

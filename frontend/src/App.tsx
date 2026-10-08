@@ -37,7 +37,7 @@ export default function App() {
         {route.name === 'projects' && <ProjectsPage navigate={navigate} />}
         {route.name === 'project' && <ProjectPage projectId={route.projectId} navigate={navigate} />}
         {route.name === 'setup' && <SetupWizard projectId={route.projectId} navigate={navigate} />}
-        {route.name === 'run' && <RunPage runId={route.runId} />}
+        {route.name === 'run' && <RunPage key={route.runId} runId={route.runId} navigate={navigate} />}
         {route.name === 'notFound' && (
           <>
             <h1>Page not found</h1>

@@ -117,6 +117,16 @@ class GateService:
             raise EngineError("gate decision schema changed")
         return question
 
+    def check_edits(self, gate: GateRow, edits: dict[str, JsonValue]) -> None:
+        """Validate approve_with_edits edits without answering.
+
+        Raises ValidationError or EngineError.
+        """
+        question = self._validate(gate)
+        if not set(edits) <= set(question.editable):
+            raise EngineError("edits include a noneditable field")
+        self._schema(question).model_validate({**question.proposal, **edits})
+
     async def _event(self, name: str, payload: dict[str, JsonValue]) -> None:
         if not any(
             event.type == name and event.payload == payload

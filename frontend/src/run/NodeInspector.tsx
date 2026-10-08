@@ -1,0 +1,125 @@
+import { formatTime } from '../ui/format.ts';
+import type { RunExecutions } from '../api/types.ts';
+import DecisionView from './DecisionView.tsx';
+import { executionsFor, formatUsd, latestOutcome, nodeLabel, type RunView } from './model.ts';
+import type { Selection } from './RunGraph.tsx';
+
+type Props = { view: RunView; data: RunExecutions | undefined; selected: Selection | null };
+
+export default function NodeInspector({ view, data, selected }: Props) {
+  if (selected === null) {
+    return (
+      <section className="panel">
+        <p className="secondary-line">Select a step to see what the agent decided, which tools it ran and what it cost.</p>
+      </section>
+    );
+  }
+  const { node, candidateId } = selected;
+  const branchLabel = candidateId === null
+    ? null
+    : view.branches.find((item) => item.id === candidateId)?.label ?? candidateId;
+  const outcome = latestOutcome(view, node, candidateId);
+  const decision = outcome?.summary.decision;
+  const attempts = data === undefined ? null : executionsFor(node, candidateId, data);
+
+  return (
+    <section className="panel" aria-labelledby="inspector-heading">
+      <h2 id="inspector-heading">{nodeLabel(node)}{branchLabel === null ? '' : ` for ${branchLabel}`}</h2>
+      <h3>Outcome</h3>
+      {outcome === null ? <p>No result recorded yet.</p> : (
+        <>
+          <dl className="facts">
+            <dt>Status</dt><dd>{outcome.status}</dd>
+            <dt>Skip reason</dt><dd>{outcome.skipReason ?? '—'}</dd>
+            <dt>Error</dt><dd>{outcome.error === null ? '—' : `${outcome.error.errorClass}: ${outcome.error.message}`}</dd>
+            <dt>Warnings</dt>
+            <dd>{outcome.warnings.length === 0 ? '—' : outcome.warnings.map((warning, index) => <div key={index}>{warning}</div>)}</dd>
+            <dt>Artifacts</dt><dd>{`${outcome.artifacts.length} files`}</dd>
+          </dl>
+          {Object.keys(outcome.metrics).length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <caption>Metrics</caption>
+                <thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+                <tbody>
+                  {Object.entries(outcome.metrics).map(([key, value]) => (
+                    <tr key={key}><td>{key}</td><td>{value.toFixed(4)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {typeof decision === 'object' && decision !== null && !Array.isArray(decision) && (
+            <>
+              <h3>Decision</h3>
+              <DecisionView value={decision} />
+            </>
+          )}
+        </>
+      )}
+      {attempts === null && <p>Loading attempts…</p>}
+      {attempts !== null && attempts.length === 0 && <p>This step has not run yet.</p>}
+      {attempts !== null && attempts.length > 0 && (
+        <>
+          <h3>Attempts</h3>
+          {attempts.map(({ execution, toolCalls, llmCalls }, index) => (
+            <details key={execution.id} open={index === 0}>
+              <summary>{`Attempt ${execution.attempt}: ${execution.status}, ${formatTime(execution.startedAt)}`}</summary>
+              {execution.endedAt !== null && (
+                <p>{`${((Date.parse(execution.endedAt) - Date.parse(execution.startedAt)) / 1000).toFixed(1)} s`}</p>
+              )}
+              {execution.error && <p role="alert">{execution.error}</p>}
+              {toolCalls.length > 0 && (
+                <div className="table-wrap">
+                  <table>
+                    <caption>Tool calls</caption>
+                    <thead><tr><th scope="col">Tool</th><th scope="col">Time (ms)</th><th scope="col">Details</th></tr></thead>
+                    <tbody>
+                      {toolCalls.map((call) => (
+                        <tr key={call.id}>
+                          <td>{call.tool}</td>
+                          <td>{call.durationMs}</td>
+                          <td>
+                            <details>
+                              <summary>Arguments and result</summary>
+                              <pre className="json-view">{JSON.stringify(call.args, null, 2)}</pre>
+                              <pre className="json-view">{JSON.stringify(call.result, null, 2)}</pre>
+                            </details>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {llmCalls.length > 0 && (
+                <>
+                  <div className="table-wrap">
+                    <table>
+                      <caption>Agent calls</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Model</th><th scope="col">Prompt tokens</th><th scope="col">Completion tokens</th>
+                          <th scope="col">Cached tokens</th><th scope="col">Cost</th><th scope="col">Time (ms)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {llmCalls.map((call) => (
+                          <tr key={call.id}>
+                            <td>{call.model}</td><td>{call.promptTokens}</td><td>{call.completionTokens}</td>
+                            <td>{call.cachedTokens}</td><td>{formatUsd(call.costUsd)}</td><td>{call.durationMs}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p>Agent cost for this attempt: {formatUsd(llmCalls.reduce((sum, call) => sum + call.costUsd, 0))}</p>
+                </>
+              )}
+            </details>
+          ))}
+        </>
+      )}
+    </section>
+  );
+}

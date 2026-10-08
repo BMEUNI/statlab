@@ -821,6 +821,48 @@ async def test_gate_input_validation_and_stale_revision(
 
 
 @pytest.mark.asyncio
+async def test_gate_edit_check_reports_issues_without_answering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = FixtureRecords(replies=deque([_decision()]))
+    async with _open_run_api(tmp_path, monkeypatch, records=records) as api:
+        created = await _create_run(api)
+        run_id = str(created.json()["run_id"])
+        gate = await _gate(api, run_id)
+        url = f"/api/runs/{run_id}/gates/{gate.id}/check"
+        invalid = await api.client.post(url, json={"edits": {"rationale": 7}})
+        assert invalid.status_code == 200
+        assert invalid.json()["errors"] == [
+            {"path": "rationale", "message": "Input should be a valid string"}
+        ]
+        valid = await api.client.post(url, json={"edits": {"rationale": "Edited"}})
+        assert valid.status_code == 200
+        assert valid.json() == {"errors": []}
+        unknown = await api.client.post(url, json={"edits": {"unknown_field": "x"}})
+        assert unknown.status_code == 409
+        malformed = await api.client.post(url, json={"edits": []})
+        assert malformed.status_code == 422
+        missing_gate = await api.client.post(
+            f"/api/runs/{run_id}/gates/g_0000000000000000/check", json={"edits": {}}
+        )
+        assert missing_gate.status_code == 404
+        missing_run = await api.client.post(
+            f"/api/runs/missing/gates/{gate.id}/check", json={"edits": {}}
+        )
+        assert missing_run.status_code == 404
+        unchanged = await _gate(api, run_id)
+        assert unchanged.id == gate.id
+        assert unchanged.status == "pending" and unchanged.answer_json is None
+        approved = await api.client.post(
+            f"/api/runs/{run_id}/gates/{gate.id}", json={"action": "approve"}
+        )
+        assert approved.status_code == 200
+        executor = api.records.executors[run_id]
+        await executor.next_entered.wait()
+        await _pause_release(api, run_id)
+
+
+@pytest.mark.asyncio
 async def test_continuation_capacity_preserves_answered_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -26,15 +26,14 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: batch B15 — chunk 38 run workspace
+## Next: batch B16 — chunks 39 and 40
 
-36b and 37 accepted 2026-10-08 (see their spec frontmatter). User requirement: every backend
-feature usable in the UI. Next: spec 38a (run data layer: gate question parsing, graph model
-from state, event fold, gate/control/message/executions/artifacts clients) then 38b (graph +
-node inspector, timeline/chat with streaming, inline gate forms for all seven actions, run
-controls incl. rewind, live cost). Then B16: 39 comparison/artifacts, 40 report/downloads/
-lineage/memory. Offline click-through stack: `.venv/bin/python -m integration.serve_ui` +
-`STATLAB_API_ORIGIN=... make ui`. No paid run without fresh explicit user confirmation.
+B15 (36b, 37, 38) accepted 2026-10-08; see spec frontmatter. User requirement: every backend
+feature usable in the UI. Next: 39 candidate comparison, artifact list/preview/download with the
+D32 lock, live cost; then 40 report viewer (report.md, raw HTML disabled), pipeline/manifest
+downloads, lineage tree, project memory. Offline click-through stack:
+`.venv/bin/python -m integration.serve_ui` + `STATLAB_API_ORIGIN=http://127.0.0.1:8765 make ui`.
+No paid run without fresh explicit user confirmation.
 User authorizes automatic local commits after finished work; never push. Main writes no code;
 delegate resolved plans to the pinned `implementer` only.
 

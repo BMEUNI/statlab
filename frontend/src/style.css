@@ -104,3 +104,38 @@ summary { cursor: pointer; }
   .topbar { padding: 12px 16px; }
 }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) 22rem; gap: 24px; align-items: start; }
+@media (max-width: 64rem) { .workspace { grid-template-columns: minmax(0, 1fr); } }
+.chat { position: sticky; top: 16px; margin-top: 0; }
+.feed { list-style: none; margin: 0 0 12px; padding: 0; max-height: 60vh; overflow-y: auto; }
+.msg { margin: 8px 0; padding: 8px 12px; border-radius: 8px; }
+.msg.user { background: var(--target); }
+.msg.agent { border: 1px solid var(--rule); }
+.msg.draft { border-style: dashed; }
+.msg .who { display: block; font-size: 0.875rem; font-weight: 600; color: var(--graphite); }
+.msg.error { color: var(--fault); }
+.activity { margin: 4px 0; color: var(--graphite); font-size: 0.875rem; }
+.gate { border-left: 4px solid var(--gate); }
+button.danger { color: var(--fault); border-color: var(--fault); }
+.json-view { max-height: 20rem; overflow: auto; padding: 8px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); }
+.cell-link { padding: 0; border: 0; background: none; color: var(--ink); text-align: left; }
+.cell-link[aria-pressed="true"] { outline: 2px solid var(--signal); outline-offset: 4px; }
+.mark { white-space: nowrap; }
+.mark::before { content: ""; display: inline-block; width: 0.75em; height: 0.75em; margin-right: 6px; border: 2px solid currentColor; border-radius: 2px; vertical-align: -0.05em; }
+.mark-pending { color: var(--graphite); }
+.mark-running { color: var(--signal); }
+.mark-awaiting { color: var(--gate); }
+.mark-awaiting::before { background: currentColor; }
+.mark-completed { color: var(--signal); }
+.mark-completed::before { background: currentColor; }
+.mark-skipped { color: var(--graphite); }
+.mark-skipped::before { border-style: dashed; }
+.mark-failed { color: var(--fault); }
+.mark-failed::before { background: currentColor; }
+@media (prefers-reduced-motion: no-preference) {
+  .mark-running::before { animation: mark-pulse 1.2s ease-in-out infinite; }
+}
+@keyframes mark-pulse { 50% { opacity: 0.3; } }
+
+small.help { display: block; }

@@ -143,6 +143,17 @@ class ContractCheck(BaseModel):
     errors: tuple[ContractIssue, ...]
 
 
+def validation_issues(exc: ValidationError) -> tuple[ContractIssue, ...]:
+    """Pydantic errors as path and message only; never input, context or URL."""
+    return tuple(
+        ContractIssue(
+            path=".".join(str(part) for part in error["loc"]),
+            message=error["msg"].removeprefix("Value error, "),
+        )
+        for error in exc.errors(include_url=False, include_input=False, include_context=False)
+    )
+
+
 @dataclass(slots=True)
 class APIResources:
     settings: Settings
@@ -593,17 +604,7 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         try:
             DataContract.model_validate(body.contract)
         except ValidationError as exc:
-            return ContractCheck(
-                errors=tuple(
-                    ContractIssue(
-                        path=".".join(str(part) for part in error["loc"]),
-                        message=error["msg"].removeprefix("Value error, "),
-                    )
-                    for error in exc.errors(
-                        include_url=False, include_input=False, include_context=False
-                    )
-                )
-            )
+            return ContractCheck(errors=validation_issues(exc))
         return ContractCheck(errors=())
 
     return router

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ApiError,
+  answerGate,
+  checkGateEdits,
   createProject,
   createRun,
   datasetQuery,
@@ -9,6 +11,11 @@ import {
   isJsonValue,
   listProjects,
   parseContractCheck,
+  parseControlReply,
+  parseExecutions,
+  publicCandidateId,
+  rewindRun,
+  sendMessage,
   parseContracts,
   parseProfile,
   parseProjectDetail,
@@ -28,7 +35,7 @@ const snapshot = {
     contract_id: 'c1', champion_model_id: null, config_json: '{}', test_scored_at: null, test_fingerprint: null,
   },
   state: {},
-  gates: [{ id: 'g1', run_id: 'r1', node_execution_id: 'n1', status: 'pending' }],
+  gates: [{ id: 'g1', run_id: 'r1', node_execution_id: 'n1', status: 'pending', question_json: '{}', answer_json: null, ts: 'now' }],
   execution_failed: false,
 };
 
@@ -55,6 +62,7 @@ test('run snapshot parser validates identity, unions, nullable fields, state, an
     { ...snapshot, run: { ...snapshot.run, id: 'other' } },
     { ...snapshot, run: { ...snapshot.run, config_json: 1 } },
     { ...snapshot, gates: [{ ...snapshot.gates[0], run_id: 'other' }] },
+    { ...snapshot, gates: [{ ...snapshot.gates[0], question_json: 1 }] },
     { ...snapshot, state: [] },
     { ...snapshot, execution_failed: 0 },
   ]) isInvalidResponse(() => parseRunSnapshot(value, 'r1'));
@@ -288,4 +296,76 @@ test('validateContract checks structure before the typed validate call', async (
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('publicCandidateId strips the database prefix', () => {
+  assert.equal(publicCandidateId(null), null);
+  assert.equal(publicCandidateId('18:r_x:c_01'), 'c_01');
+  assert.equal(publicCandidateId('c_02'), 'c_02');
+});
+
+test('parseExecutions maps rows and tolerates malformed embedded JSON', () => {
+  const execution = {
+    id: 'e1', run_id: 'r1', node_name: 'intake', candidate_id: '5:r_abc:c_01', seq: 1, attempt: 1,
+    status: 'completed', summary: '{"a":1}', error: null, started_at: 's', ended_at: 'e',
+  };
+  const payload = {
+    executions: [execution, { ...execution, id: 'e2', candidate_id: null, summary: 'not json', ended_at: null }],
+    tool_calls: [{
+      id: 't1', node_execution_id: 'e1', tool_name: 'profile', args_json: '{bad', result_json: '{"ok":true}',
+      duration_ms: 3, ts: 'now',
+    }],
+    llm_calls: [{
+      id: 'l1', node_execution_id: 'e1', signature: 'sig', model: 'm', prompt_tokens: 1, completion_tokens: 2,
+      cached_tokens: 0, cost_usd: 0.25, duration_ms: 9, ts: 'now',
+    }],
+    cost_usd: 0.5,
+  };
+  assert.deepEqual(parseExecutions(payload), {
+    executions: [
+      {
+        id: 'e1', candidateId: 'c_01', node: 'intake', seq: 1, attempt: 1, status: 'completed',
+        summary: { a: 1 }, error: null, startedAt: 's', endedAt: 'e',
+      },
+      {
+        id: 'e2', candidateId: null, node: 'intake', seq: 1, attempt: 1, status: 'completed',
+        summary: null, error: null, startedAt: 's', endedAt: null,
+      },
+    ],
+    toolCalls: [{ id: 't1', executionId: 'e1', tool: 'profile', args: null, result: { ok: true }, durationMs: 3, ts: 'now' }],
+    llmCalls: [{
+      id: 'l1', executionId: 'e1', signature: 'sig', model: 'm', promptTokens: 1, completionTokens: 2,
+      cachedTokens: 0, costUsd: 0.25, durationMs: 9, ts: 'now',
+    }],
+    costUsd: 0.5,
+  });
+  isInvalidResponse(() => parseExecutions({ ...payload, cost_usd: 'x' }));
+});
+
+test('parseControlReply reads the optional new run id', () => {
+  assert.deepEqual(parseControlReply({ text: 't', category: 'c', new_run_id: 'r2' }), { text: 't', category: 'c', newRunId: 'r2' });
+  assert.deepEqual(parseControlReply({ text: 't', category: 'c' }), { text: 't', category: 'c', newRunId: null });
+  isInvalidResponse(() => parseControlReply({ text: 't', category: 'c', new_run_id: 1 }));
+});
+
+test('run actions POST the documented bodies', async () => {
+  const reply = { text: 't', category: 'c' };
+  await withFetch(reply, async (requests) => {
+    await answerGate('r1', 'g1', { revision: 2, action: 'skip_node', reason: 'r' });
+    assert.equal(requests[0]?.input, '/api/runs/r1/gates/g1');
+    assert.equal(requests[0]?.init?.body, '{"revision":2,"action":"skip_node","reason":"r"}');
+    await sendMessage('r1', 'hi');
+    assert.equal(requests[1]?.input, '/api/runs/r1/messages');
+    assert.equal(requests[1]?.init?.body, '{"text":"hi"}');
+  });
+  await withFetch({ new_run_id: 'r2' }, async (requests) => {
+    assert.equal(await rewindRun('r1', 'intake', 'u1'), 'r2');
+    assert.equal(requests[0]?.input, '/api/runs/r1/control');
+    assert.equal(requests[0]?.init?.body, '{"action":"rewind","target":"intake","request_id":"u1"}');
+  });
+  await withFetch({ errors: [] }, async (requests) => {
+    assert.deepEqual(await checkGateEdits('r1', 'g1', { a: 1 }), []);
+    assert.equal(requests[0]?.input, '/api/runs/r1/gates/g1/check');
+    assert.equal(requests[0]?.init?.body, '{"edits":{"a":1}}');
+  });
 });

@@ -24,7 +24,13 @@ from pydantic import (
 from statlab_contracts.gates import GateAction, GateAnswer
 from statlab_contracts.layout import RunPaths
 
-from statlab.api.projects import APIResources, ProjectsService, require_complete
+from statlab.api.projects import (
+    APIResources,
+    ContractCheck,
+    ProjectsService,
+    require_complete,
+    validation_issues,
+)
 from statlab.domains.binding import RunBinding, bind_tabular
 from statlab.domains.tabular import TABULAR_DOMAIN
 from statlab.errors import (
@@ -132,6 +138,11 @@ class GateSubmission(BaseModel):
     instruction: str | None = None
     reason: str | None = None
     target: str | None = None
+
+
+class GateEditCheck(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    edits: dict[str, JsonValue]
 
 
 class ControlRequest(BaseModel):
@@ -599,6 +610,20 @@ class RunRegistry:
             except EngineError:
                 raise HTTPException(409, "run transition rejected") from None
 
+    async def check_edits(self, run_id: str, gate_id: str, body: GateEditCheck) -> ContractCheck:
+        async with self.mutation():
+            binding = self.run(run_id)
+            gate = get_gate(self.resources.conn, gate_id)
+            if gate is None or gate.run_id != run_id:
+                raise HTTPException(404, "gate not found")
+            try:
+                binding.gates.check_edits(gate, dict(body.edits))
+            except ValidationError as exc:
+                return ContractCheck(errors=validation_issues(exc))
+            except EngineError:
+                raise HTTPException(409, "run transition rejected") from None
+            return ContractCheck(errors=())
+
     async def _lifecycle(
         self, binding: RunBinding, message: str, classified: InterruptClass, context: ControlContext
     ) -> ControlResponse:
@@ -743,6 +768,10 @@ def runs_router(registry: Callable[[], RunRegistry]) -> APIRouter:
     @router.post("/api/runs/{run_id}/gates/{gate_id}", response_model=ControlResponse)
     async def answer_endpoint(run_id: str, gate_id: str, body: GateSubmission) -> ControlResponse:
         return await registry().answer(run_id, gate_id, body)
+
+    @router.post("/api/runs/{run_id}/gates/{gate_id}/check", response_model=ContractCheck)
+    async def check_edits_endpoint(run_id: str, gate_id: str, body: GateEditCheck) -> ContractCheck:
+        return await registry().check_edits(run_id, gate_id, body)
 
     @router.post(
         "/api/runs/{run_id}/control",

@@ -3,18 +3,24 @@ import type {
   ContractRecord,
   DatasetProfile,
   DatasetRecord,
+  ControlReply,
   EstimatorInfo,
+  ExecutionRecord,
+  GateSubmission,
   GateSummary,
   JsonObject,
   JsonValue,
+  LlmCallRecord,
   MemoryEntry,
   ProjectDetail,
   ProjectSummary,
   RunMode,
+  RunExecutions,
   RunSnapshot,
   RunStatus,
   RunSummary,
   SetupValidation,
+  ToolCallRecord,
   Vocabulary,
 } from './types.ts';
 
@@ -182,6 +188,9 @@ export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
       run_id: gateRunId,
       node_execution_id: requiredString(gate, 'node_execution_id'),
       status: requiredString(gate, 'status'),
+      question_json: requiredString(gate, 'question_json'),
+      answer_json: nullableString(gate, 'answer_json'),
+      ts: requiredString(gate, 'ts'),
     };
   });
   return {
@@ -303,6 +312,87 @@ export function parseProposal(value: unknown): ContractProposal {
 export function parseRunAccepted(value: unknown): string {
   if (!isJsonObject(value)) throw invalidResponse();
   return requiredString(value, 'run_id');
+}
+
+export function publicCandidateId(value: string | null): string | null {
+  return value === null ? null : value.slice(value.lastIndexOf(':') + 1);
+}
+
+function lenientJson(text: string): JsonValue | null {
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    return null;
+  }
+}
+
+function lenientObject(text: string | null): JsonObject | null {
+  if (text === null) return null;
+  const parsed = lenientJson(text);
+  return isJsonObject(parsed) ? parsed : null;
+}
+
+function parseExecution(row: JsonObject): ExecutionRecord {
+  return {
+    id: requiredString(row, 'id'),
+    candidateId: publicCandidateId(nullableString(row, 'candidate_id')),
+    node: requiredString(row, 'node_name'),
+    seq: requiredNumber(row, 'seq'),
+    attempt: requiredNumber(row, 'attempt'),
+    status: requiredString(row, 'status'),
+    summary: lenientObject(nullableString(row, 'summary')),
+    error: nullableString(row, 'error'),
+    startedAt: requiredString(row, 'started_at'),
+    endedAt: nullableString(row, 'ended_at'),
+  };
+}
+
+function parseToolCall(row: JsonObject): ToolCallRecord {
+  return {
+    id: requiredString(row, 'id'),
+    executionId: requiredString(row, 'node_execution_id'),
+    tool: requiredString(row, 'tool_name'),
+    args: lenientJson(requiredString(row, 'args_json')),
+    result: lenientJson(requiredString(row, 'result_json')),
+    durationMs: requiredNumber(row, 'duration_ms'),
+    ts: requiredString(row, 'ts'),
+  };
+}
+
+function parseLlmCall(row: JsonObject): LlmCallRecord {
+  return {
+    id: requiredString(row, 'id'),
+    executionId: requiredString(row, 'node_execution_id'),
+    signature: requiredString(row, 'signature'),
+    model: requiredString(row, 'model'),
+    promptTokens: requiredNumber(row, 'prompt_tokens'),
+    completionTokens: requiredNumber(row, 'completion_tokens'),
+    cachedTokens: requiredNumber(row, 'cached_tokens'),
+    costUsd: requiredNumber(row, 'cost_usd'),
+    durationMs: requiredNumber(row, 'duration_ms'),
+    ts: requiredString(row, 'ts'),
+  };
+}
+
+export function parseExecutions(value: unknown): RunExecutions {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    executions: objectArray(value.executions).map(parseExecution),
+    toolCalls: objectArray(value.tool_calls).map(parseToolCall),
+    llmCalls: objectArray(value.llm_calls).map(parseLlmCall),
+    costUsd: requiredNumber(value, 'cost_usd'),
+  };
+}
+
+export function parseControlReply(value: unknown): ControlReply {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const newRunId = value.new_run_id;
+  if (newRunId !== undefined && newRunId !== null && typeof newRunId !== 'string') throw invalidResponse();
+  return {
+    text: requiredString(value, 'text'),
+    category: requiredString(value, 'category'),
+    newRunId: newRunId ?? null,
+  };
 }
 
 function abortError(error: unknown, signal?: AbortSignal): boolean {
@@ -468,4 +558,49 @@ export async function createRun(
       json: { mode, dataset_ids: [datasetId], contract_id: contractId },
     }),
   );
+}
+
+function runPath(runId: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}`;
+}
+
+export async function getExecutions(runId: string, signal?: AbortSignal): Promise<RunExecutions> {
+  return parseExecutions(await request(`${runPath(runId)}/executions`, { method: 'GET', signal }));
+}
+
+export async function answerGate(runId: string, gateId: string, submission: GateSubmission): Promise<ControlReply> {
+  const json: JsonObject = { revision: submission.revision, action: submission.action };
+  if (submission.edits !== undefined) json.edits = submission.edits;
+  if (submission.instruction !== undefined) json.instruction = submission.instruction;
+  if (submission.reason !== undefined) json.reason = submission.reason;
+  if (submission.target !== undefined) json.target = submission.target;
+  return parseControlReply(
+    await request(`${runPath(runId)}/gates/${encodeURIComponent(gateId)}`, { method: 'POST', json }),
+  );
+}
+
+export async function checkGateEdits(runId: string, gateId: string, edits: JsonObject): Promise<JsonObject[]> {
+  return parseContractCheck(
+    await request(`${runPath(runId)}/gates/${encodeURIComponent(gateId)}/check`, {
+      method: 'POST',
+      json: { edits },
+    }),
+  );
+}
+
+export async function controlRun(runId: string, action: 'pause' | 'resume' | 'cancel'): Promise<ControlReply> {
+  return parseControlReply(await request(`${runPath(runId)}/control`, { method: 'POST', json: { action } }));
+}
+
+export async function rewindRun(runId: string, target: string, requestId: string): Promise<string> {
+  const value = await request(`${runPath(runId)}/control`, {
+    method: 'POST',
+    json: { action: 'rewind', target, request_id: requestId },
+  });
+  if (!isJsonObject(value)) throw invalidResponse();
+  return requiredString(value, 'new_run_id');
+}
+
+export async function sendMessage(runId: string, text: string): Promise<ControlReply> {
+  return parseControlReply(await request(`${runPath(runId)}/messages`, { method: 'POST', json: { text } }));
 }
