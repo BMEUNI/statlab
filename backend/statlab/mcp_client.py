@@ -309,6 +309,21 @@ class McpClient:
             )
         return validated
 
+    async def list_estimators(self) -> ToolSuccess:
+        """Dispatch the read-only registry listing for the UI without run-scoped accounting."""
+        if self._session is None:
+            raise EngineError("MCP client is not entered")
+        spec = self.tools.get("list_estimators")
+        if spec is None or spec.phase != "training" or spec.heavy or spec.transform_only:
+            raise EngineError("list_estimators registry metadata is invalid")
+        validated = await self._dispatch_direct(spec, {}, read_timeout_seconds=60)
+        if validated.artifacts:
+            raise ToolCallError(
+                "list_estimators",
+                Failure(error_class="bug", message="registry tool returned unexpected artifacts"),
+            )
+        return validated
+
     async def describe_artifact(
         self,
         *,

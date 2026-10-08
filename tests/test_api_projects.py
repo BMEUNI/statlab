@@ -1176,3 +1176,71 @@ async def test_routes_before_lifespan_are_unavailable(tmp_path: Path) -> None:
     ) as client:
         assert (await client.get("/api/projects")).status_code == 503
         assert (await client.get("/api/runs/r_missing")).status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_dataset_profile_uses_options_and_scopes_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = SetupSession()
+    async with _open_project_api(tmp_path, monkeypatch, session=session) as (
+        client,
+        _,
+        _,
+        project,
+    ):
+        base = f"/api/projects/{project['id']}/datasets"
+        content = b"a,b\n1,2\n3,4\n"
+        uploaded = await client.post(base, files={"file": ("data.csv", content, "text/csv")})
+        dataset_id = uploaded.json()["id"]
+        profiled = await client.get(f"{base}/{dataset_id}/profile?delimiter=%3B")
+        assert profiled.status_code == 200
+        body = profiled.json()
+        assert set(body) == {
+            "rows",
+            "cols",
+            "columns",
+            "dtypes",
+            "null_counts",
+            "n_unique",
+            "roles",
+            "role_evidence",
+            "all_null",
+        }
+        assert body["columns"] == ["a", "b", "c"]
+        name, arguments, _ = session.calls[-1]
+        assert name == "setup_dataset"
+        options = arguments["options"]
+        assert isinstance(options, dict) and options["delimiter"] == ";"
+        missing = await client.get(f"{base}/missing/profile")
+        assert missing.status_code == 404
+        other = await client.post("/api/projects", json={"slug": "other", "name": "Other"})
+        cross = await client.get(
+            f"/api/projects/{other.json()['id']}/datasets/{dataset_id}/profile"
+        )
+        assert cross.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_vocabulary_lists_schema_and_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = SetupSession()
+    async with _open_project_api(tmp_path, monkeypatch, session=session) as (client, _, _, _):
+        session.responses.append(
+            ToolSuccess(
+                summary={"ridge": {"task": "regression"}, "inferential_models": {"ols": {}}}
+            )
+        )
+        response = await client.get("/api/vocabulary")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["contract_schema"]["title"] == "DataContract"
+        assert body["registry"] == {
+            "ridge": {"task": "regression"},
+            "inferential_models": {"ols": {}},
+        }
+        name, arguments, timeout = session.calls[-1]
+        assert name == "list_estimators"
+        assert arguments == {}
+        assert timeout == 60

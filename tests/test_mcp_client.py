@@ -2119,3 +2119,71 @@ async def test_describe_artifact_guards(
             await entered.describe_artifact(
                 project=paths.slug, run=paths.run_id, artifact=artifact, kind="dataframe"
             )
+
+
+_LIST_ESTIMATORS_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"task": {"type": ["string", "null"]}},
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.asyncio
+async def test_list_estimators_dispatches_without_audit(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    session = FakeSession(
+        (
+            served_tool(
+                "list_estimators",
+                _LIST_ESTIMATORS_SCHEMA,
+                allow_in=["experiment_design"],
+                phase="training",
+            ),
+        )
+    )
+    session.envelope = ToolSuccess(summary={"ridge": {}}).model_dump(mode="json")
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        result = await client.list_estimators()
+    assert result.summary == {"ridge": {}}
+    assert len(session.calls) == 1
+    name, arguments, timeout = session.calls[0]
+    assert name == "list_estimators"
+    assert arguments == {}
+    assert timeout == 60
+    assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_estimators_guards(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    client = McpClient(settings(paths, tmp_path), conn, session=FakeSession(()))
+    with pytest.raises(EngineError, match="MCP client is not entered"):
+        await client.list_estimators()
+    async with McpClient(settings(paths, tmp_path), conn, session=FakeSession(())) as missing:
+        with pytest.raises(EngineError):
+            await missing.list_estimators()
+    wrong = FakeSession((served_tool("list_estimators", _LIST_ESTIMATORS_SCHEMA, phase="intake"),))
+    async with McpClient(settings(paths, tmp_path), conn, session=wrong) as bad:
+        with pytest.raises(EngineError):
+            await bad.list_estimators()
+    assert wrong.calls == []
+    good = FakeSession(
+        (
+            served_tool(
+                "list_estimators",
+                _LIST_ESTIMATORS_SCHEMA,
+                allow_in=["experiment_design"],
+                phase="training",
+            ),
+        )
+    )
+    good.envelope = ToolSuccess(
+        artifacts=(ArtifactMeta(ref=new_artifact_ref(), kind="table"),)
+    ).model_dump(mode="json")
+    async with McpClient(settings(paths, tmp_path), conn, session=good) as entered:
+        with pytest.raises(ToolCallError):
+            await entered.list_estimators()

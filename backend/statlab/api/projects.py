@@ -56,6 +56,21 @@ PROJECT_SLUG_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 _JSON_LIMIT = 1024 * 1024
 _CHUNK_SIZE = 64 * 1024
 _DEFAULT_OPTIONS = DatasetOptions()
+_PROFILE_KEYS: tuple[str, ...] = (
+    "rows",
+    "cols",
+    "columns",
+    "dtypes",
+    "null_counts",
+    "n_unique",
+    "roles",
+    "role_evidence",
+    "all_null",
+)
+
+
+def _profile(summary: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: summary.get(key) for key in _PROFILE_KEYS}
 
 
 class ProjectCreate(BaseModel):
@@ -239,6 +254,16 @@ class ProjectsService:
         except ValueError, TypeError:
             raise EngineError("setup tool returned malformed validation summary") from None
 
+    async def profile(
+        self, project_id: str, dataset_id: str, options: DatasetOptions
+    ) -> dict[str, JsonValue]:
+        row = self.dataset(project_id, dataset_id)
+        project = self.project(project_id)
+        result = await self.resources.mcp.setup_dataset(
+            project=project.slug, dataset=row.sha256, options=options
+        )
+        return _profile(result.summary)
+
     async def propose(self, project_id: str, request: ContractProposalRequest) -> ContractProposal:
         row = self.dataset(project_id, request.dataset_id)
         project = self.project(project_id)
@@ -259,20 +284,7 @@ class ProjectsService:
         ]
         if target_findings:
             raise HTTPException(422, "target column is missing or entirely null")
-        profile = {
-            key: summary.get(key)
-            for key in (
-                "rows",
-                "cols",
-                "columns",
-                "dtypes",
-                "null_counts",
-                "n_unique",
-                "roles",
-                "role_evidence",
-                "all_null",
-            )
-        }
+        profile = _profile(summary)
         provided = request.contract.model_dump(mode="json", exclude_unset=True)
         messages = [
             {
@@ -542,6 +554,20 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
     )
     async def propose_contract(project_id: str, body: ContractProposalRequest) -> ContractProposal:
         return await ProjectsService(resources()).propose(project_id, body)
+
+    @router.get("/api/projects/{project_id}/datasets/{dataset_id}/profile")
+    async def dataset_profile(
+        project_id: str,
+        dataset_id: str,
+        options: Annotated[DatasetOptions, Query()] = _DEFAULT_OPTIONS,
+    ) -> dict[str, JsonValue]:
+        return await ProjectsService(resources()).profile(project_id, dataset_id, options)
+
+    @router.get("/api/vocabulary")
+    async def vocabulary() -> dict[str, JsonValue]:
+        resource = resources()
+        registry = await resource.mcp.list_estimators()
+        return {"contract_schema": DataContract.model_json_schema(), "registry": registry.summary}
 
     return router
 
