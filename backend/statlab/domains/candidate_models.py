@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 
 from pydantic import JsonValue, ValidationError
+from statlab_contracts.candidate import EstimatorSpec
+from statlab_contracts.contract import Tuning
 from statlab_contracts.envelope import Failure, ToolSuccess
 from statlab_contracts.vocabulary import TUNABLE_PARAMS
 
@@ -46,6 +48,40 @@ SELECTION_CAVEAT = (
     "Validation is used for candidate/parameter/threshold selection; validation scores "
     "and bootstrap intervals do not remove selection bias."
 )
+
+
+def _validate_training(
+    decision: TrainingDecision, *, tuning: Tuning, estimator: EstimatorSpec, retune: bool
+) -> None:
+    if "method" in tuning.model_fields_set and tuning.method != "random":
+        required = "direct" if tuning.method == "none" else "grid"
+        if decision.method != required:
+            raise _RefusalError(
+                f"training method {decision.method!r} conflicts with explicit tuning method "
+                f"{tuning.method!r}; use {required!r}"
+            )
+    tunable = TUNABLE_PARAMS.get(estimator.name)
+    if tunable is not None:
+        unknown = sorted((set(decision.params) | set(decision.param_grid or {})) - tunable)
+        if unknown:
+            raise _RefusalError(
+                f"parameters {unknown!r} are not tunable for {estimator.name}; "
+                f"allowed: {sorted(tunable)!r}"
+            )
+    if (
+        decision.params
+        and not retune
+        and decision.method == "direct"
+        and decision.params != estimator.params
+    ):
+        raise _RefusalError("initial direct parameters differ from approved candidate")
+    if decision.method == "grid":
+        if decision.params:
+            raise _RefusalError("grid decision must put fixed parameters in param_grid")
+        if decision.param_grid is None and estimator.params:
+            raise _RefusalError("approved parameters require an explicit grid")
+    elif decision.param_grid is not None:
+        raise _RefusalError("direct fitting cannot accept a parameter grid")
 
 
 def _validate_evaluation(problem: ProblemSpec, decision: EvaluationActions) -> None:
@@ -151,6 +187,8 @@ class CandidateModelExecutor:
         if branch.retune_count:
             previous = (candidate_result(branch, "model_evaluation").summary,)
         tunable = TUNABLE_PARAMS.get(branch.spec.estimator.name)
+        tuning = self.runtime.contract.modelling.tuning
+        estimator = branch.spec.estimator
         question = (
             "Fit the approved estimator on original prepared train only. Choose direct "
             "fit or bounded grid. Keep estimator/class weight/calibration/methodology fixed. "
@@ -166,39 +204,36 @@ class CandidateModelExecutor:
                 "param_grid; class_weight, calibrate, random_state and n_jobs are fixed "
                 "elsewhere and never appear there."
             )
+        if "method" in tuning.model_fields_set and tuning.method != "random":
+            required = "direct" if tuning.method == "none" else "grid"
+            question += (
+                f" The contract fixes tuning method {tuning.method!r}: use method {required!r}"
+            )
+            if required == "grid":
+                question += " with a param_grid over tunable keys and empty params"
+            question += "."
         decision = await self.runtime.decide(
             invocation,
             TrainingDecision,
             evidence=(pipeline.model_dump(mode="json"), *previous),
             question=question,
+            check=_rejecting(
+                lambda d: _validate_training(
+                    d, tuning=tuning, estimator=estimator, retune=bool(branch.retune_count)
+                )
+            ),
         )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:
             return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
         decision = approved
-        tuning = self.runtime.contract.modelling.tuning
         if tuning.method == "random":
             raise _RefusalError("random search has no supported tool")
-        if "method" in tuning.model_fields_set and decision.method != (
-            "direct" if tuning.method == "none" else "grid"
-        ):
-            raise _RefusalError("training method conflicts with explicit tuning method")
-        estimator = branch.spec.estimator
-        if tunable is not None:
-            unknown = sorted((set(decision.params) | set(decision.param_grid or {})) - tunable)
-            if unknown:
-                raise _RefusalError(
-                    f"parameters {unknown!r} are not tunable for {estimator.name}; "
-                    f"allowed: {sorted(tunable)!r}"
-                )
+        _validate_training(
+            decision, tuning=tuning, estimator=estimator, retune=bool(branch.retune_count)
+        )
         params = _object(estimator.model_dump(mode="json")["params"], "approved parameters")
         if decision.params:
-            if (
-                not branch.retune_count
-                and decision.method == "direct"
-                and decision.params != estimator.params
-            ):
-                raise _RefusalError("initial direct parameters differ from approved candidate")
             params = _object(decision.model_dump(mode="json")["params"], "training parameters")
         arguments: dict[str, JsonValue] = {
             "train": str(pipeline.train),
@@ -209,13 +244,9 @@ class CandidateModelExecutor:
         }
         tune_summary: dict[str, JsonValue] | None = None
         if decision.method == "grid":
-            if decision.params:
-                raise _RefusalError("grid decision must put fixed parameters in param_grid")
             grid = decision.model_dump(mode="json")["param_grid"]
             if isinstance(grid, dict):
                 grid = {**{name: [value] for name, value in params.items()}, **grid}
-            elif params:
-                raise _RefusalError("approved parameters require an explicit grid")
             tuned = await self._call(
                 invocation,
                 evidence,
@@ -228,8 +259,6 @@ class CandidateModelExecutor:
             )
             tune_summary = tuned.summary
             params = _object(tuned.summary.get("best_params"), "tuned parameters")
-        elif decision.param_grid is not None:
-            raise _RefusalError("direct fitting cannot accept a parameter grid")
         fitted = await self._call(
             invocation,
             evidence,

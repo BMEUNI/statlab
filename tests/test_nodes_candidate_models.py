@@ -217,7 +217,11 @@ async def test_bounded_grid_and_cv_keep_reserved_effective_parameters_out_of_cal
             modelling=ModellingRules(tuning=Tuning(method="none")),
         ),
     )
-    assert (await CandidateModelExecutor(h.runtime)(candidate_invocation(h, 8))).status == "failed"
+    output = await CandidateModelExecutor(h.runtime)(candidate_invocation(h, 8))
+    assert output.status == "failed" and output.error is not None
+    assert "conflicts with explicit tuning method 'none'; use 'direct'" in output.error.message
+    last = [m for kind, _, m in h.llm.calls if kind is TrainingDecision][-1]
+    assert "The contract fixes tuning method 'none': use method 'direct'." in last[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -494,6 +498,31 @@ async def test_training_refusals_and_exception_wait(
     )
     names = [name for _, name, _ in tools.calls]
     assert "train_estimator" not in names and "tune_estimator" not in names
+    check = h.llm.checks[TrainingDecision]
+    assert check(TrainingDecision(rationale="r")) is None
+    with pytest.raises(DecisionRejectedError, match="initial direct parameters differ"):
+        check(TrainingDecision(rationale="r", params={"fit_intercept": False}))
+    with pytest.raises(DecisionRejectedError, match="not tunable"):
+        check(TrainingDecision(rationale="r", method="grid", param_grid={"C": (0.5, 1.0)}))
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=contract.target,
+            objective=contract.objective,
+            features=contract.features,
+            modelling=ModellingRules(tuning=Tuning(method="grid")),
+        ),
+    )
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Explicit grid", method="grid", param_grid={"fit_intercept": (True, False)}
+    )
+    output = await _run(h, 8)
+    assert output.status == "completed"
+    last = [m for kind, _, m in h.llm.calls if kind is TrainingDecision][-1]
+    assert (
+        "The contract fixes tuning method 'grid': use method 'grid' with a param_grid over "
+        "tunable keys and empty params." in last[-1]["content"]
+    )
 
 
 @pytest.mark.parametrize(

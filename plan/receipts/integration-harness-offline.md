@@ -173,3 +173,16 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
   mypy 188; Ruff clean; 197 formatted.
 - Offline suite `integration/out/20261008T081322Z-offline`: 19/19 PASS. Rich suite
   `integration/out/20261008T082137Z-offline-rich`: 19/19 PASS.
+
+## Addendum — live S14 and F17, 2026-10-08
+
+- Live S14 (paid, user-confirmed, $0.10 cap) `integration/out/20261008T083426Z-live` at 694eefb:
+  $0.0845, 19 calls. Setup proposal passed (F16); run cancelled at model_training: explicit
+  contract `tuning.method="grid"` vs LLM `direct`, refused after the LLM call.
+- F17: `_validate_training` runs as `check` and post-approval; question states the contract's
+  fixed tuning method. Addendum A covers the explicit-grid path.
+- `make check` exit 0: 3062 passed, 1 designed skip; TOTAL 11462 stmts / 3300 branches 100%;
+  mypy 188; Ruff clean; 197 formatted.
+- Offline `integration/out/20261008T084054Z-offline` and rich
+  `integration/out/20261008T084855Z-offline-rich`: 19/19 PASS each (source identical; addendum A
+  is test-only).

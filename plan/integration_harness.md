@@ -1947,3 +1947,73 @@ multiclass `curves` becomes `("confusion",)` (roc/pr are now refused before tool
 binary-only MCP tools). Expected `plot_curve` count becomes `3 if target_type == "binary" else 0`;
 expected `compute_roc_curve` count becomes `1 if target_type == "binary" else 0`. Nothing else
 changes. Rerun the F16 pytest selector; report the pytest summary line and genuine exit codes.
+
+## Live S14 after F16 (2026-10-08, `integration/out/20261008T083426Z-live`, 694eefb)
+
+Paid, user-confirmed, $0.10 cap: $0.0845, 19 calls. Setup proposal passed (F16 check works).
+Run cancelled: setup LLM wrote every contract default explicitly, incl. `tuning.method="grid"`;
+all four TrainingDecisions chose `direct` (the question says "For the initial direct fit") and
+"training method conflicts with explicit tuning method" was refused after the LLM call -> failure
+gates -> abort. Same class as F16: LLM-fixable training refusals must run as `check`.
+
+## Fix F17 — training refusals reach the repair round
+
+Owned files: `backend/statlab/domains/candidate_models.py`, `tests/test_nodes_candidate_models.py`.
+
+Recipe (`candidate_models.py`):
+1. Imports: `EstimatorSpec` from `statlab_contracts.candidate`, `Tuning` from
+   `statlab_contracts.contract`.
+2. New module function
+   `_validate_training(decision: TrainingDecision, *, tuning: Tuning, estimator: EstimatorSpec, retune: bool) -> None`,
+   raising `_RefusalError`, checks in this order:
+   a. if `"method" in tuning.model_fields_set` and `tuning.method != "random"`: `required` =
+      `"direct"` if `tuning.method == "none"` else `"grid"`; if `decision.method != required`:
+      message `f"training method {decision.method!r} conflicts with explicit tuning method {tuning.method!r}; use {required!r}"`.
+   b. `tunable = TUNABLE_PARAMS.get(estimator.name)`; if not None, the existing unknown-parameter
+      refusal (same message text).
+   c. if `decision.params` and not `retune` and `decision.method == "direct"` and
+      `decision.params != estimator.params`: `"initial direct parameters differ from approved candidate"`.
+   d. if `decision.method == "grid"`: if `decision.params`: `"grid decision must put fixed parameters in param_grid"`;
+      elif `decision.param_grid is None` and `estimator.params`: `"approved parameters require an explicit grid"`.
+   e. elif `decision.param_grid is not None`: `"direct fitting cannot accept a parameter grid"`.
+3. `_training`:
+   - Read `tuning = self.runtime.contract.modelling.tuning` and `estimator = branch.spec.estimator`
+     before building the question. If `"method" in tuning.model_fields_set` and
+     `tuning.method != "random"`, append to the question
+     `f" The contract fixes tuning method {tuning.method!r}: use method {required!r}"` plus,
+     when `required == "grid"`, `" with a param_grid over tunable keys and empty params"`, then
+     `"."` (`required` as in 2a).
+   - `decide(..., check=_rejecting(lambda d: _validate_training(d, tuning=tuning, estimator=estimator, retune=bool(branch.retune_count))))`.
+   - After approval: keep the `random` refusal first, then call `_validate_training(decision, ...)`
+     with the same arguments. Delete the now-duplicated inline refusals: method conflict,
+     unknown parameters, initial-direct-differ (keep `if decision.params: params = ...`), the
+     grid `if decision.params: raise`, the `elif params: raise` after `isinstance(grid, dict)`
+     (keep the `isinstance` merge), and the trailing `elif decision.param_grid is not None: raise`.
+     No other behavior change.
+Tests (`tests/test_nodes_candidate_models.py`):
+- `test_training_refusals_and_exception_wait`: existing `_failed` messages stay valid. At the
+  end add `check = h.llm.checks[TrainingDecision]`; assert
+  `check(TrainingDecision(rationale="r")) is None`; `pytest.raises(DecisionRejectedError, match="initial direct parameters differ")`
+  for `TrainingDecision(rationale="r", params={"fit_intercept": False})`;
+  `pytest.raises(DecisionRejectedError, match="not tunable")` for
+  `TrainingDecision(rationale="r", method="grid", param_grid={"C": (0.5, 1.0)})`.
+- The test ending with the `Tuning(method="none")` contract (currently
+  `assert (...).status == "failed"`): capture the output; assert status `"failed"`, error not None
+  and `"conflicts with explicit tuning method 'none'; use 'direct'" in output.error.message`;
+  assert the last TrainingDecision call's last message content contains
+  `"The contract fixes tuning method 'none': use method 'direct'."`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_models.py tests/test_nodes_candidate_pipeline.py tests/test_candidate_fanout.py'`
+Ruff check + format --check and
+mypy on both owned files.
+
+### F17 addendum A — explicit grid coverage
+
+`make check` exit 2: `candidate_models.py` missing `58->63` (explicit method matched) and line
+213 (grid question suffix). `tests/test_nodes_candidate_models.py::test_training_refusals_and_exception_wait`,
+after the added check assertions: set `h.runtime = replace(h.runtime, contract=DataContract(target=contract.target, objective=contract.objective, features=contract.features, modelling=ModellingRules(tuning=Tuning(method="grid"))))`;
+`h.llm.responses[TrainingDecision] = TrainingDecision(rationale="Explicit grid", method="grid", param_grid={"fit_intercept": (True, False)})`;
+`output = await _run(h, 8)`; assert `output.status == "completed"`; assert the last
+TrainingDecision call's last message content contains
+`"The contract fixes tuning method 'grid': use method 'grid' with a param_grid over tunable keys and empty params."`.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_models.py'`; Ruff
+check + format --check and mypy on the test file.
