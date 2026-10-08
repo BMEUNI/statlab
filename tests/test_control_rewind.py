@@ -3,37 +3,44 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
+from collections.abc import Callable
 
 import pytest
+from pydantic import JsonValue
 from statlab.domains.base import NodeResult, NodeSpec
 from statlab.domains.rewind import champion_provenance, publish_retained_report
 from statlab.errors import EngineError, PersistenceError
 from statlab.graph.candidates import TraversalPlan
+from statlab.graph.control import ControlContext
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.reconciliation import RecoveryBinding, RestartReconciler
 from statlab.graph.rewind import ForkService, project_frontier
 from statlab.graph.router import InterruptClass
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
-from statlab.persistence.models import RunRow
+from statlab.persistence.models import ContractRow, RunRow
 from statlab.persistence.repository import (
     claim_test_scoring,
     count_prior_test_scorings,
+    create_contract,
     create_run,
     get_run,
     list_node_executions,
     list_runs,
     record_tool_call,
+    require_run,
     save_champion_model,
     set_test_fingerprint,
 )
 from statlab.storage import create_artifact, list_artifacts
 from statlab_contracts.artifacts import ArtifactMeta, new_artifact_ref
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
-from statlab_contracts.contract import DataContract
+from statlab_contracts.contract import DataContract, TargetSpec
 from statlab_contracts.envelope import Failure, ToolSuccess
+from statlab_contracts.gates import RewindIntent
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
 
@@ -668,3 +675,127 @@ async def test_fork_control_binding_mismatch(
             InterruptClass(category="qa"),
             context(engine_world.conn, minimal_contract, FakeClient()),
         )
+
+
+async def _edit_world(
+    world: World, contract: DataContract, client: FakeClient
+) -> tuple[ForkService, ContractRow, ControlContext]:
+    nodes = (node("prefix"), node("target"), node("tail"))
+    lifecycle = RunLifecycle(world.loop(nodes, complete), world.initial(nodes))
+    await lifecycle.start()
+    immutable_inputs(world)
+    row = create_contract(
+        world.conn,
+        project_id=require_run(world.conn, world.paths.run_id).project_id,
+        path=world.paths.root / "edited.json",
+        contract=DataContract(target=TargetSpec(column="edited")),
+    )
+    ctx = dataclasses.replace(
+        context(world.conn, contract, client, current_node=None), state=await lifecycle.state()
+    )
+    return service_for(world, lifecycle, nodes), row, ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intent_target", "owner", "expected"),
+    [("target", "tail", "target"), (None, "target", "target")],
+)
+async def test_handle_setting_edits_fork_with_new_contract(
+    engine_world: World,
+    minimal_contract: DataContract,
+    intent_target: str | None,
+    owner: str,
+    expected: str,
+) -> None:
+    client = FakeClient(RewindIntent(target=intent_target, edits={"split.test_size": 0.3}))
+    service, row, ctx = await _edit_world(engine_world, minimal_contract, client)
+    seen: list[dict[str, JsonValue]] = []
+
+    def editor(edits: dict[str, JsonValue]) -> tuple[str, ContractRow]:
+        seen.append(edits)
+        return owner, row
+
+    response = await service.handle(
+        "set the test size to 0.3",
+        InterruptClass(category="change"),
+        ctx,
+        request_id="req-edit",
+        edit_settings=editor,
+    )
+    assert seen == [{"split.test_size": 0.3}]
+    assert isinstance(response.new_run_id, str)
+    child_row = require_run(engine_world.conn, response.new_run_id)
+    assert child_row.contract_id == row.id
+    child_paths = RunPaths(engine_world.paths.data_dir, engine_world.paths.slug, child_row.id)
+    assert child_paths.contract_snapshot_json.read_bytes() == row.contract_json.encode("utf-8")
+    config = json.loads(child_row.config_json)
+    assert config["fork"]["target"] == expected
+    assert config["fork"]["edits"] == {"split.test_size": 0.3}
+    assert response.text == (
+        f"Changed split.test_size to 0.3. A new run starts from {expected}; "
+        "earlier steps are reused."
+    )
+    assert "Current contract: " in client.calls[0][2][0]["content"]
+
+
+def _invalid_contract_editor(edits: dict[str, JsonValue]) -> tuple[str, ContractRow]:
+    DataContract.model_validate({"target": {"column": "a"}, "split": {"test_size": 1.5}})
+    raise AssertionError("unreachable")
+
+
+def _value_error_editor(edits: dict[str, JsonValue]) -> tuple[str, ContractRow]:
+    raise ValueError("version cannot be changed from the chat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("editor", "starts", "ends"),
+    [
+        (
+            _invalid_contract_editor,
+            "I could not change that setting, so nothing was changed: split.test_size",
+            "",
+        ),
+        (_value_error_editor, "", "version cannot be changed from the chat"),
+    ],
+)
+async def test_handle_setting_edit_rejected_without_fork(
+    engine_world: World,
+    minimal_contract: DataContract,
+    editor: Callable[[dict[str, JsonValue]], tuple[str, ContractRow]],
+    starts: str,
+    ends: str,
+) -> None:
+    client = FakeClient(RewindIntent(edits={"split.test_size": 1.5}))
+    service, _, ctx = await _edit_world(engine_world, minimal_contract, client)
+    response = await service.handle(
+        "set the test size to 1.5",
+        InterruptClass(category="change"),
+        ctx,
+        edit_settings=editor,
+    )
+    assert response.new_run_id is None
+    assert response.text.startswith(starts)
+    assert response.text.endswith(ends)
+    project_id = require_run(engine_world.conn, engine_world.paths.run_id).project_id
+    assert not [
+        run
+        for run in list_runs(engine_world.conn, project_id)
+        if run.forked_from_run_id == engine_world.paths.run_id
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_setting_edits_guards(
+    engine_world: World, minimal_contract: DataContract
+) -> None:
+    client = FakeClient(
+        RewindIntent(edits={"a": 1}), RewindIntent(target="invented", edits={"a": 1})
+    )
+    service, row, ctx = await _edit_world(engine_world, minimal_contract, client)
+    change = InterruptClass(category="change")
+    with pytest.raises(EngineError, match="setting changes are not configured"):
+        await service.handle("x", change, ctx)
+    with pytest.raises(EngineError, match="rewind target is not declared"):
+        await service.handle("x", change, ctx, edit_settings=lambda edits: ("target", row))

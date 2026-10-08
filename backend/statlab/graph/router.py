@@ -59,7 +59,10 @@ class ControlRouter:
                     "role": "system",
                     "content": "Classify intent only; never answer or apply actions. "
                     "qa = evidence question; "
-                    "status = progress; decision = gate answer; change = change/rewind request; "
+                    "status = progress; decision = answer to the pending gate's proposal "
+                    "(approve, reject or edit a proposed field); "
+                    "change = rewind to a step, or change a run setting such as test size, "
+                    "folds, metric or candidate models; "
                     "lifecycle = explicit pause/resume/cancel; noise = acknowledgement/chatter. "
                     "lifecycle_action is required only for lifecycle. "
                     "Do not invent gate parameters "

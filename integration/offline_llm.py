@@ -10,6 +10,7 @@ from litellm import ModelResponse
 from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices, Usage
 from openai.types.completion_usage import PromptTokensDetails
 from pydantic import JsonValue
+from statlab.domains.tabular import TABULAR_DOMAIN
 from statlab_contracts.candidate import (
     CandidateSet,
     CandidateSpec,
@@ -22,6 +23,15 @@ from integration.model import Scenario
 
 RATIONALE = "Offline stand-in decision."
 REPORT_HEADING = "Stand-in methodology note"
+
+_SET = re.compile(r"\bset (?:the )?([a-z ]+?) to (\d+(?:\.\d+)?)")
+_FOLDS = re.compile(r"\buse (\d+) (?:cv )?folds\b")
+_SETTING_PHRASES = {
+    "test size": "split.test_size",
+    "validation size": "split.valid_size",
+    "cv folds": "modelling.tuning.cv_folds",
+    "folds": "modelling.tuning.cv_folds",
+}
 
 _RICH_TITLES = frozenset(
     {
@@ -170,6 +180,44 @@ def _champion(user_text: str) -> dict[str, JsonValue]:
         match = re.search(r"\b(c_\d{2,})\b", user_text)
     chosen = match.group(1) if match else "c_01"
     return {"candidate_id": chosen, "rationale": RATIONALE}
+
+
+def _number(text: str) -> JsonValue:
+    return float(text) if "." in text else int(text)
+
+
+def _interrupt(user_text: str) -> dict[str, JsonValue]:
+    t = user_text.lower()
+    if re.search(r"\bpause\b", t):
+        return {"category": "lifecycle", "lifecycle_action": "pause"}
+    if re.search(r"\bresume\b", t):
+        return {"category": "lifecycle", "lifecycle_action": "resume"}
+    if re.search(r"\b(stop|cancel)\b", t):
+        return {"category": "lifecycle", "lifecycle_action": "cancel"}
+    if "go back" in t or "rewind" in t or "redo" in t or _SET.search(t) or _FOLDS.search(t):
+        return {"category": "change", "lifecycle_action": None}
+    category = "status" if "current status" in t else "qa"
+    return {"category": category, "lifecycle_action": None}
+
+
+def _rewind(user_text: str) -> dict[str, JsonValue]:
+    t = user_text.lower()
+    edits: dict[str, JsonValue] = {}
+    for match in _SET.finditer(t):
+        path = _SETTING_PHRASES.get(match.group(1).strip())
+        if path is not None:
+            edits[path] = _number(match.group(2))
+    for match in _FOLDS.finditer(t):
+        edits["modelling.tuning.cv_folds"] = _number(match.group(1))
+    target = next(
+        (
+            node.name
+            for node in TABULAR_DOMAIN.nodes
+            if node.name in t or node.name.replace("_", " ") in t
+        ),
+        None,
+    )
+    return {"target": target, "edits": edits}
 
 
 def _obj(value: JsonValue, what: str) -> dict[str, JsonValue]:
@@ -542,9 +590,10 @@ class OfflineProvider:
             return _inference(contract, scenario)
         if title == "ChampionChoice":
             return _champion(user_text)
+        if title == "RewindIntent":
+            return _rewind(user_text)
         if title == "InterruptClass":
-            category = "status" if "current status" in user_text.lower() else "qa"
-            return {"category": category, "lifecycle_action": None}
+            return _interrupt(user_text)
         if title == "ControlText":
             return {"text": "Offline stand-in reply."}
         if title == "QaAnswer":

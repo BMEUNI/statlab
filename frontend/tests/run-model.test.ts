@@ -7,6 +7,7 @@ import {
   executionsFor,
   firstSentences,
   foldEvents,
+  forkNote,
   formatUsd,
   gateEdits,
   gateFieldSplit,
@@ -26,7 +27,7 @@ import {
   stepShortLabel,
   switchedToAutomatic,
 } from '../src/run/model.ts';
-import type { ExecutionRecord, GateQuestion, JsonObject, RunEvent, RunExecutions } from '../src/api/types.ts';
+import type { ExecutionRecord, GateQuestion, JsonObject, RunEvent, RunExecutions, RunSummary } from '../src/api/types.ts';
 
 const question = {
   node: 'intake', candidate_id: '5:r_abc:c_02', phase: 'before', proposal: { rationale: 'x' },
@@ -356,4 +357,23 @@ test('modeLabel and stepShortLabel', () => {
   assert.equal(modeLabel('autonomous', true), 'Guided, then automatic');
   assert.equal(stepShortLabel('model_training'), 'Train');
   assert.equal(stepShortLabel('custom_step'), 'Custom step');
+});
+
+function forkRun(forkedFrom: string | null, config: string): RunSummary {
+  return {
+    id: 'r_child', project_id: 'p_1', started_at: '2026-01-01T00:00:00Z', mode: 'guided', status: 'running',
+    current_node: null, forked_from_run_id: forkedFrom, ended_at: null, contract_id: 'ct_1',
+    champion_model_id: null, config_json: config, test_scored_at: null, test_fingerprint: null,
+  };
+}
+
+test('forkNote explains where a forked run restarts and what changed', () => {
+  assert.equal(forkNote(forkRun(null, '{"fork":{"target":"intake"}}')), null);
+  assert.equal(forkNote(forkRun('r_parent', '{')), null);
+  const plain = 'This run continues from run r_parent and starts again at Data profiling; earlier steps are reused.';
+  assert.equal(forkNote(forkRun('r_parent', '{"fork":{"target":"data_profiling"}}')), plain);
+  assert.equal(
+    forkNote(forkRun('r_parent', '{"fork":{"target":"intake","edits":{"split.test_size":0.3}}}')),
+    'This run continues from run r_parent and starts again at Intake; earlier steps are reused. Changed settings: split.test_size = 0.3.',
+  );
 });

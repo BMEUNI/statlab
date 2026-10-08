@@ -10,7 +10,7 @@ import { candidateRows } from '../run/compare.ts';
 import RunChat from '../chat/RunChat.tsx';
 import GatePanel from '../run/GatePanel.tsx';
 import { champion } from '../report/champion.ts';
-import { foldEvents, humanize, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
+import { foldEvents, forkNote, humanize, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
 import ReportView from '../report/ReportView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
@@ -75,6 +75,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
         view={view}
         status={data.run.status}
         mode={data.run.mode}
+        forkNote={forkNote(data.run)}
         pending={pending}
         navigate={navigate}
         onStep={(step) => { setSelected(step); setTab('progress'); setPane('side'); }}

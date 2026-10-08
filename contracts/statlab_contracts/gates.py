@@ -49,11 +49,28 @@ class GateAnswer(BaseModel):
 
 class RewindIntent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    target: str = Field(min_length=1)
+    target: str | None = Field(
+        default=None,
+        min_length=1,
+        description="The step to go back to, only when the user names one.",
+    )
+    edits: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description=(
+            "Run settings the user explicitly asked to change: dotted paths into the run "
+            'contract mapped to the new value, for example {"split.test_size": 0.3}.'
+        ),
+    )
 
     @field_validator("target")
     @classmethod
-    def _nonblank(cls, value: str) -> str:
-        if not value.strip():
+    def _nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("target must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _target_or_edits(self) -> RewindIntent:
+        if self.target is None and not self.edits:
+            raise ValueError("name a step to go back to or a setting to change")
+        return self

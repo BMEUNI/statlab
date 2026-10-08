@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from statlab_contracts.gates import RewindIntent
 from statlab_contracts.layout import RunPaths
 
@@ -20,6 +20,7 @@ from statlab.graph.router import InterruptClass
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
 from statlab.persistence.db import transaction
 from statlab.persistence.ids import utc_now
+from statlab.persistence.models import ContractRow
 from statlab.persistence.repository import (
     create_run,
     ensure_candidate,
@@ -139,6 +140,7 @@ class ForkResult:
 
 type ForkResolver = Callable[[RunPaths, RunState], RunLifecycle]
 type ForkPublisher = Callable[[RunPaths, RunPaths, RunState], Awaitable[None]]
+type SettingsEditor = Callable[[dict[str, JsonValue]], tuple[str, ContractRow]]
 
 
 class ForkService:
@@ -190,7 +192,14 @@ class ForkService:
             raise EngineError("fork resolver must return a fresh correctly bound lifecycle")
         return lifecycle
 
-    async def fork(self, target: str, *, request_id: str | None = None) -> ForkResult:
+    async def fork(
+        self,
+        target: str,
+        *,
+        request_id: str | None = None,
+        contract: ContractRow | None = None,
+        edits: dict[str, JsonValue] | None = None,
+    ) -> ForkResult:
         # Check obvious ownership/target failures before changing the parent's lifecycle.
         if target not in {spec.name for spec in self.parent.loop.nodes}:
             raise EngineError("rewind target is not declared")
@@ -212,6 +221,10 @@ class ForkService:
             source = await self.parent.state()
             parent_row = require_run(self.conn, source.run_id)
             projection = project_frontier(source, target)
+            if edits is not None:
+                projection = projection.model_copy(
+                    update={"fork_metadata": {**projection.fork_metadata, "edits": edits}}
+                )
             retained = validate_checkpoint_ownership(self.conn, source.run_id, projection)
             if any(row.pruned_at is not None or not Path(row.path).is_file() for row in retained):
                 raise PersistenceError("required retained artifact file is missing or pruned")
@@ -228,7 +241,7 @@ class ForkService:
             child = create_run(
                 self.conn,
                 project_id=parent_row.project_id,
-                contract_id=parent_row.contract_id,
+                contract_id=contract.id if contract is not None else parent_row.contract_id,
                 mode=source.mode,
                 config_json=json.dumps(config),
                 forked_from_run_id=source.run_id,
@@ -241,7 +254,9 @@ class ForkService:
                 ensure_run_layout(paths)
                 for name in immutable:
                     path = self.paths.root / name
-                    if path.is_file():
+                    if name == "contract.snapshot.json" and contract is not None:
+                        (paths.root / name).write_bytes(contract.contract_json.encode("utf-8"))
+                    elif path.is_file():
                         (paths.root / name).write_bytes(path.read_bytes())
                 fork_artifacts(self.paths, paths, retained)
                 for branch in child_state.branches:
@@ -323,6 +338,7 @@ class ForkService:
         context: ControlContext,
         *,
         request_id: str | None = None,
+        edit_settings: SettingsEditor | None = None,
     ) -> ControlResponse:
         if (
             classified.category != "change"
@@ -340,21 +356,74 @@ class ForkService:
             messages=(
                 {
                     "role": "system",
-                    "content": "Parse the user's explicit rewind target. Declared nodes: "
+                    "content": "Parse the user's explicit rewind target and/or run setting "
+                    "changes. Declared nodes: "
                     + ", ".join(entry.name for entry in context.state.spine)
-                    + ". Do not invent parameter changes or targets.",
+                    + ". Put setting changes in edits as dotted paths into the current run "
+                    'contract with the new value, for example {"split.test_size": 0.3} or '
+                    '{"modelling.tuning.cv_folds": 10}. Only include targets and settings the '
+                    "user explicitly asked for; never invent values. Current contract: "
+                    + json.dumps(context.contract.model_dump(mode="json"), sort_keys=True),
                 },
                 {"role": "user", "content": message},
             ),
             recovery=context.recovery,
         )
-        fork = await self.fork(intent.target, request_id=request_id)
+        if intent.edits:
+            return await self._handle_edits(intent, context, request_id, edit_settings)
+        fork = await self.fork(intent.target or "", request_id=request_id)
         return ControlResponse(
             category="change",
             text=(
                 f"Fork published at {intent.target}; "
                 f"source wave {fork.state.fork_metadata['source_wave']}; "
                 f"{fork.state.fork_metadata['projection']}."
+            ),
+            new_run_id=fork.new_run_id,
+        )
+
+    async def _handle_edits(
+        self,
+        intent: RewindIntent,
+        context: ControlContext,
+        request_id: str | None,
+        edit_settings: SettingsEditor | None,
+    ) -> ControlResponse:
+        if edit_settings is None:
+            raise EngineError("setting changes are not configured")
+        try:
+            owner, contract = edit_settings(dict(intent.edits))
+        except ValueError as exc:
+            if isinstance(exc, ValidationError):
+                details = "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc']) or 'contract'}: {error['msg']}"
+                    for error in exc.errors()
+                )
+            else:
+                details = str(exc)
+            return ControlResponse(
+                category="change",
+                text="I could not change that setting, so nothing was changed: " + details[:1500],
+            )
+        names = tuple(entry.name for entry in context.state.spine)
+        if owner not in names or (intent.target is not None and intent.target not in names):
+            raise EngineError("rewind target is not declared")
+        frontier = min(context.state.cursor, len(names) - 1)
+        indexes = [min(names.index(owner), frontier)]
+        if intent.target is not None:
+            indexes.append(names.index(intent.target))
+        target = names[min(indexes)]
+        fork = await self.fork(
+            target, request_id=request_id, contract=contract, edits=dict(intent.edits)
+        )
+        changes = ", ".join(
+            f"{path} to {json.dumps(value)}" for path, value in sorted(intent.edits.items())
+        )
+        return ControlResponse(
+            category="change",
+            text=(
+                f"Changed {changes}. A new run starts from {target.replace('_', ' ')}; "
+                "earlier steps are reused."
             ),
             new_run_id=fork.new_run_id,
         )

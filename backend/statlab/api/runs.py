@@ -21,6 +21,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from statlab_contracts.contract import DataContract
 from statlab_contracts.gates import GateAction, GateAnswer
 from statlab_contracts.layout import RunPaths
 
@@ -28,11 +29,12 @@ from statlab.api.projects import (
     APIResources,
     ContractCheck,
     ProjectsService,
+    missing_setup_fields,
     require_complete,
     validation_issues,
 )
 from statlab.domains.binding import RunBinding, bind_tabular
-from statlab.domains.tabular import TABULAR_DOMAIN
+from statlab.domains.tabular import SETTING_OWNERS, TABULAR_DOMAIN
 from statlab.errors import (
     ConfigError,
     EngineError,
@@ -51,7 +53,7 @@ from statlab.graph.state import RunState
 from statlab.llm.routing import check_provider_environment
 from statlab.llm.skills import load_run_skill, snapshot_skill
 from statlab.memory import read_memory
-from statlab.persistence.models import GateRow, MemoryRow, RunMode, RunRow
+from statlab.persistence.models import ContractRow, GateRow, MemoryRow, RunMode, RunRow
 from statlab.persistence.repository import (
     create_message,
     create_run,
@@ -634,6 +636,32 @@ class RunRegistry:
         except EngineError:
             raise HTTPException(409, "run transition rejected") from None
 
+    def _edit_settings(
+        self, binding: RunBinding, project_id: str, edits: dict[str, JsonValue]
+    ) -> tuple[str, ContractRow]:
+        data: dict[str, JsonValue] = binding.runtime.contract.model_dump(
+            mode="json", exclude_unset=True
+        )
+        for path, value in edits.items():
+            keys = path.split(".")
+            if keys[0] not in SETTING_OWNERS:
+                raise ValueError(f"{path} cannot be changed from the chat")
+            node = data
+            for key in keys[:-1]:
+                child = node.get(key)
+                if not isinstance(child, dict):
+                    child = {}
+                    node[key] = child
+                node = child
+            node[keys[-1]] = value
+        contract = DataContract.model_validate(data)
+        missing = missing_setup_fields(contract)
+        if missing:
+            raise ValueError("these settings would become empty: " + ", ".join(missing))
+        names = [node.name for node in TABULAR_DOMAIN.nodes]
+        owner = min((SETTING_OWNERS[path.split(".")[0]] for path in edits), key=names.index)
+        return owner, self.projects.persist_contract(project_id, contract)
+
     async def message(self, run_id: str, body: ControlText) -> ControlResponse:
         async with self.mutation():
             binding = self.run(run_id)
@@ -664,7 +692,15 @@ class RunRegistry:
             async def change(
                 message: str, classified: InterruptClass, ctx: ControlContext
             ) -> ControlResponse:
-                return await binding.forks.handle(message, classified, ctx, request_id=user.id)
+                return await binding.forks.handle(
+                    message,
+                    classified,
+                    ctx,
+                    request_id=user.id,
+                    edit_settings=lambda edits: self._edit_settings(
+                        binding, run_row.project_id, edits
+                    ),
+                )
 
             router = ControlRouter(
                 decision=binding.gates.handle,

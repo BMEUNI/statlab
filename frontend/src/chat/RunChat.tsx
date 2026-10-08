@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { FastForward, SlidersHorizontal, ThumbsUp } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { answerGate, sendMessage } from '../api/client.ts';
+import { ApiError, answerGate, sendMessage } from '../api/client.ts';
 import type { ControlReply, GateAction, GateQuestion, JsonValue, GateSummary, RunMode, RunStatus } from '../api/types.ts';
-import { firstSentences, gateFieldSplit, humanize, nodeLabel, type RunFeed, type RunView } from '../run/model.ts';
+import { STATUS_LABELS, firstSentences, gateFieldSplit, humanize, nodeLabel, type RunFeed, type RunView } from '../run/model.ts';
 import { formatRoute, type Route } from '../routes.ts';
 import { errorText } from '../ui/format.ts';
 import Composer from './Composer.tsx';
@@ -19,6 +19,7 @@ type Props = {
   view: RunView | null;
   status: RunStatus;
   mode: RunMode;
+  forkNote: string | null;
   pending: Pending[];
   navigate: (route: Route) => void;
   onStep: (step: Step) => void;
@@ -65,7 +66,7 @@ function gatePrompt(question: GateQuestion): string {
   return parts.join('\n\n');
 }
 
-export default function RunChat({ runId, feed, view, status, mode, pending, navigate, onStep, onShowGate, onTab }: Props) {
+export default function RunChat({ runId, feed, view, status, mode, forkNote, pending, navigate, onStep, onShowGate, onTab }: Props) {
   const queryClient = useQueryClient();
   const [setup] = useState(() => loadSession(browserStore(), runChatKey(runId)));
   const [showActivity, setShowActivity] = useState(false);
@@ -80,7 +81,11 @@ export default function RunChat({ runId, feed, view, status, mode, pending, navi
       if (reply.newRunId !== null) navigate({ name: 'run', runId: reply.newRunId });
     },
     onError: (error) => {
-      setExtra((list) => [...list, { id: `fault-${list.length}`, role: 'note', tone: 'fault', text: errorText(error) }]);
+      const text =
+        error instanceof ApiError && error.status === 409
+          ? `I can't do that right now because the run is ${STATUS_LABELS[status].toLowerCase()}. A run that waits for your decision can't be paused; answer the decision first.`
+          : errorText(error);
+      setExtra((list) => [...list, { id: `fault-${list.length}`, role: 'note', tone: 'fault', text }]);
     },
   });
 
@@ -106,6 +111,7 @@ export default function RunChat({ runId, feed, view, status, mode, pending, navi
   const messages: ChatMessage[] = [...(setup?.messages ?? [])];
   if (setup !== null) messages.push({ id: 'run-started', role: 'note', text: 'The run started.' });
   messages.push({ id: 'intro', role: 'assistant', text: mode === 'guided' ? INTRO + GUIDED : INTRO });
+  if (forkNote !== null) messages.push({ id: 'fork-note', role: 'assistant', text: forkNote });
   for (const item of feed.items) {
     if (!showActivity && item.kind === 'activity') continue;
     const id = `e${item.seq}`;

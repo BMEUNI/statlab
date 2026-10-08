@@ -28,9 +28,10 @@ are M9 prerequisites; B9–B11 domain/control behavior still needs runtime accep
 
 ## Next: paid run to measure chunk 43 cost (needs fresh explicit user go-ahead)
 
-Chunks 42 and 43 accepted 2026-10-08 ([43 spec + receipt](./43_cost_and_ui_polish.md)). Prompt
+Chunks 42–44 accepted 2026-10-08 ([43](./43_cost_and_ui_polish.md), [44](./44_chat_setting_changes.md): chat setting changes). Prompt
 context shrank about 4x and preprocessing/feature steps skip the LLM on clean data; the real
-per-run cost is unmeasured. Restart `make dev` first (API gained `switched_runs`).
+per-run cost is unmeasured, and the real model's routing of chat commands is untested. Open
+idea: thread random-forest fits and CV/learning-curve diagnostics (chunk 44 discussion). Restart `make dev` first (API gained `switched_runs`).
 
 ## Earlier: paid ONLINE runtime run (needs fresh explicit user go-ahead)
 

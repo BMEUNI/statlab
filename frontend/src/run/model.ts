@@ -13,6 +13,7 @@ import type {
   RunExecutions,
   RunMode,
   RunStatus,
+  RunSummary,
   ToolCallRecord,
   Vocabulary,
 } from '../api/types.ts';
@@ -44,6 +45,23 @@ export function humanize(text: string): string {
 
 export function nodeLabel(name: string): string {
   return humanize(name);
+}
+
+export function forkNote(run: RunSummary): string | null {
+  if (run.forked_from_run_id === null) return null;
+  let config: unknown;
+  try {
+    config = JSON.parse(run.config_json);
+  } catch {
+    return null;
+  }
+  if (!isJsonObject(config) || !isJsonObject(config.fork) || typeof config.fork.target !== 'string') return null;
+  const note = `This run continues from run ${run.forked_from_run_id} and starts again at ${nodeLabel(config.fork.target)}; earlier steps are reused.`;
+  const edits = config.fork.edits;
+  if (!isJsonObject(edits)) return note;
+  const entries = Object.entries(edits);
+  if (entries.length === 0) return note;
+  return `${note} Changed settings: ${entries.map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join(', ')}.`;
 }
 
 export function switchedToAutomatic(gates: GateSummary[]): boolean {

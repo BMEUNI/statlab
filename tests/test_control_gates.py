@@ -84,6 +84,12 @@ def test_rewind_intent_rejects_blank_target() -> None:
         RewindIntent.model_validate({"target": " "})
 
 
+def test_rewind_intent_needs_target_or_edits() -> None:
+    with pytest.raises(ValidationError):
+        RewindIntent.model_validate({})
+    assert RewindIntent(edits={"split.test_size": 0.3}).target is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["approve", "approve_with_edits", "approve_all_remaining"])
 async def test_pre_action_override_keeps_actual_mro_type_and_avoids_new_proposal(

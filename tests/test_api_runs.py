@@ -25,7 +25,7 @@ from statlab.config import Settings
 from statlab.domains.base import NodeResult
 from statlab.domains.decisions import IntakeDecision
 from statlab.domains.runtime import DomainRuntime
-from statlab.domains.tabular import TABULAR_DOMAIN
+from statlab.domains.tabular import SETTING_OWNERS, TABULAR_DOMAIN
 from statlab.errors import ConfigError, EngineError, PersistenceError
 from statlab.graph.control import ConversationTurn, QaAnswer
 from statlab.graph.engine import NodeInvocation
@@ -43,6 +43,7 @@ from statlab.persistence.repository import (
     get_dataset,
     get_project,
     get_run,
+    list_contracts,
     list_gates,
     list_messages,
     list_node_executions,
@@ -2025,3 +2026,107 @@ async def test_skill_snapshot_failure_maps_to_application_unavailable(
         rows = list_runs(api.conn, api.project_id)
         assert len(rows) == 1
         assert rows[0].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_message_change_with_setting_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    edits: dict[str, JsonValue] = {"split.test_size": 0.3, "modelling.tuning.cv_folds": 3}
+    replies: deque[str | BaseException] = deque([_decision()])
+    async with _open_run_api(tmp_path, monkeypatch, records=FixtureRecords(replies=replies)) as api:
+        created = await _create_run(api)
+        assert created.status_code == 201
+        parent = str(created.json()["run_id"])
+        await _gate(api, parent)
+        replies.extend(
+            (
+                InterruptClass(category="change").model_dump_json(),
+                RewindIntent(edits=edits).model_dump_json(),
+                _decision("Child"),
+            )
+        )
+        response = await api.client.post(
+            f"/api/runs/{parent}/messages",
+            json={"text": "set the test size to 0.3 and use 3 folds"},
+        )
+        assert response.status_code == 200
+        assert response.json()["category"] == "change"
+        child = response.json().get("new_run_id")
+        assert isinstance(child, str)
+        await _gate(api, child)
+        parent_row = get_run(api.conn, parent)
+        child_row = get_run(api.conn, child)
+        assert parent_row is not None and child_row is not None
+        assert child_row.contract_id != parent_row.contract_id
+        parent_contract = get_contract(api.conn, parent_row.contract_id)
+        child_contract = get_contract(api.conn, child_row.contract_id)
+        assert parent_contract is not None and child_contract is not None
+        changed = child_contract.contract()
+        assert changed.split.test_size == 0.3
+        assert changed.modelling.tuning.cv_folds == 3
+        expected = parent_contract.contract().model_dump()
+        expected["split"]["test_size"] = 0.3
+        expected["modelling"]["tuning"]["cv_folds"] = 3
+        assert changed.model_dump() == expected
+        child_config = RunConfig.model_validate_json(child_row.config_json)
+        assert child_config.fork is not None
+        assert child_config.fork["target"] == TABULAR_DOMAIN.nodes[0].name
+        assert child_config.fork["edits"] == {
+            "split.test_size": 0.3,
+            "modelling.tuning.cv_folds": 3,
+        }
+        parent_config = RunConfig.model_validate_json(parent_row.config_json)
+        texts = [
+            row.content
+            for row in list_messages(api.conn, parent_config.session_id)
+            if row.role == "assistant"
+        ]
+        assert any("split.test_size to 0.3" in text for text in texts)
+        assert parent_row.status == "superseded"
+
+
+@pytest.mark.parametrize(
+    ("edits", "fragment"),
+    [
+        ({"split.test_size": 1.5}, "split.test_size"),
+        ({"split.seed.extra": 1}, "split.seed"),
+        ({"version": 1}, "version cannot be changed from the chat"),
+        ({"split.strategy": None}, "these settings would become empty: split.strategy"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_message_change_rejects_invalid_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edits: dict[str, JsonValue],
+    fragment: str,
+) -> None:
+    replies: deque[str | BaseException] = deque([_decision()])
+    async with _open_run_api(tmp_path, monkeypatch, records=FixtureRecords(replies=replies)) as api:
+        created = await _create_run(api)
+        assert created.status_code == 201
+        parent = str(created.json()["run_id"])
+        await _gate(api, parent)
+        replies.extend(
+            (
+                InterruptClass(category="change").model_dump_json(),
+                RewindIntent(edits=edits).model_dump_json(),
+            )
+        )
+        response = await api.client.post(f"/api/runs/{parent}/messages", json={"text": "change it"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["category"] == "change"
+        assert body["new_run_id"] is None
+        assert body["text"].startswith("I could not change that setting")
+        assert fragment in body["text"]
+        assert not [
+            row for row in list_runs(api.conn, api.project_id) if row.forked_from_run_id == parent
+        ]
+        assert len(list_contracts(api.conn, api.project_id)) == 1
+
+
+def test_setting_owners_cover_contract_sections() -> None:
+    assert set(SETTING_OWNERS) == set(DataContract.model_fields) - {"version"}
+    assert set(SETTING_OWNERS.values()) <= {node.name for node in TABULAR_DOMAIN.nodes}

@@ -95,3 +95,16 @@ TABULAR_DOMAIN = Domain(
     tool_phases=tuple(dict.fromkeys(phase for node in TABULAR_SPINE for phase in node.tool_phases)),
     nodes=TABULAR_SPINE,
 )
+
+# The earliest consumer, so a fork from there re-runs everything the setting can affect.
+SETTING_OWNERS: dict[str, str] = {
+    "target": "intake",
+    "dataset": "intake",
+    "features": "intake",
+    "objective": "problem_definition",
+    "notes": "problem_definition",
+    "split": "data_splitting",
+    "preprocessing": "experiment_design",
+    "modelling": "experiment_design",
+    "constraints": "experiment_design",
+}
