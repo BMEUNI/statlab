@@ -143,3 +143,10 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
   27 responses, 27 decides, 85 tool calls.
 - `make check` exit 0: 3058 passed, 1 designed skip; TOTAL 11431 stmts / 3290 branches 100%;
   mypy 188; Ruff clean; 197 formatted.
+
+## Addendum — first live PASS, 2026-10-08
+
+- Live S01 (paid, user-confirmed, $0.45 cap) `integration/out/20261008T064037Z-live`: PASS
+  24/24, 0 soft warnings, $0.2034, 34 LLM calls, 184 s. Champion c_01 (logistic), test roc_auc
+  0.6822; planted inference found. Wave-2 `SearchDecision` rejected twice (grids in params, then
+  wrong `varies_from_baseline`); F11 ended search gracefully with a warning.
