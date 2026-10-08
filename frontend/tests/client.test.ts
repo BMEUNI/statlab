@@ -2,11 +2,20 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ApiError,
+  createProject,
+  createRun,
+  datasetQuery,
   getRun,
   isJsonValue,
   listProjects,
+  parseContracts,
+  parseProfile,
+  parseProjectDetail,
   parseProjects,
   parseRunSnapshot,
+  parseVocabulary,
+  uploadContract,
+  uploadDataset,
 } from '../src/api/client.ts';
 
 const project = { id: 'p1', slug: 'sample', name: 'Sample', created_at: '2026-01-01T00:00:00Z' };
@@ -14,6 +23,7 @@ const snapshot = {
   run: {
     id: 'r1', project_id: 'p1', started_at: '2026-01-01T00:00:00Z', mode: 'guided',
     status: 'awaiting_user', current_node: 'plan_models', forked_from_run_id: null, ended_at: null,
+    contract_id: 'c1', champion_model_id: null, config_json: '{}', test_scored_at: null, test_fingerprint: null,
   },
   state: {},
   gates: [{ id: 'g1', run_id: 'r1', node_execution_id: 'n1', status: 'pending' }],
@@ -41,6 +51,7 @@ test('run snapshot parser validates identity, unions, nullable fields, state, an
     { ...snapshot, run: { ...snapshot.run, status: 'unknown' } },
     { ...snapshot, run: { ...snapshot.run, ended_at: undefined } },
     { ...snapshot, run: { ...snapshot.run, id: 'other' } },
+    { ...snapshot, run: { ...snapshot.run, config_json: 1 } },
     { ...snapshot, gates: [{ ...snapshot.gates[0], run_id: 'other' }] },
     { ...snapshot, state: [] },
     { ...snapshot, execution_failed: 0 },
@@ -93,6 +104,8 @@ test('HTTP and network failures expose fixed messages and never read error bodie
   let bodyReads = 0;
   try {
     for (const [status, message] of [
+      [403, 'Locked until the test score is recorded.'], [410, 'Artifact was pruned.'],
+      [413, 'Upload is too large.'], [502, 'The agent could not produce a valid answer.'],
       [404, 'Resource not found.'], [409, 'Run transition rejected.'], [422, 'Invalid request.'],
       [503, 'Backend is unavailable.'], [500, 'Backend request failed.'],
     ] as const) {
@@ -132,4 +145,107 @@ test('malformed success JSON is fixed and cancellation identity is preserved', a
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+type Recorded = { input: RequestInfo | URL; init: RequestInit | undefined };
+
+async function withFetch(body: unknown, action: (requests: Recorded[]) => Promise<void>): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const requests: Recorded[] = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ input, init });
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  try {
+    await action(requests);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('createProject POSTs JSON', async () => {
+  await withFetch(project, async (requests) => {
+    assert.deepEqual(await createProject('sample', 'Sample'), project);
+    assert.equal(requests[0]?.input, '/api/projects');
+    assert.equal(requests[0]?.init?.method, 'POST');
+    assert.equal(requests[0]?.init?.body, JSON.stringify({ slug: 'sample', name: 'Sample' }));
+    assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), 'application/json');
+  });
+});
+
+const dataset = {
+  id: 'd1', project_id: 'p1', filename: 'data.csv', sha256: 'abc', n_rows: 3, n_cols: 2,
+  created_at: '2026-01-01T00:00:00Z', path: 'ignored',
+};
+
+test('uploadDataset sends query and multipart form without a Content-Type header', async () => {
+  await withFetch(dataset, async (requests) => {
+    await uploadDataset('p1', new Blob(['a,b']), 'data.csv', { delimiter: ';', na_values: ['NA', '-'] });
+    assert.equal(requests[0]?.input, '/api/projects/p1/datasets?delimiter=%3B&na_values=NA&na_values=-');
+    assert.equal(requests[0]?.init?.method, 'POST');
+    const body = requests[0]?.init?.body;
+    assert.ok(body instanceof FormData);
+    const file = body.get('file');
+    assert.ok(file instanceof File);
+    assert.equal(file.name, 'data.csv');
+    assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), null);
+  });
+});
+
+test('uploadContract sends the contract as contract.json', async () => {
+  const contract = { target: { column: 'y' } };
+  const row = { id: 'c1', project_id: 'p1', version: 1, created_at: 'now', contract_json: JSON.stringify(contract) };
+  await withFetch(row, async (requests) => {
+    assert.deepEqual((await uploadContract('p1', contract)).contract, contract);
+    const body = requests[0]?.init?.body;
+    assert.ok(body instanceof FormData);
+    const file = body.get('file');
+    assert.ok(file instanceof File);
+    assert.equal(file.name, 'contract.json');
+    assert.equal(await file.text(), JSON.stringify(contract));
+  });
+});
+
+test('createRun POSTs the run request and returns the run id', async () => {
+  await withFetch({ run_id: 'r1' }, async (requests) => {
+    assert.equal(await createRun('p1', 'guided', 'd1', 'c1'), 'r1');
+    assert.equal(requests[0]?.input, '/api/projects/p1/runs');
+    assert.equal(requests[0]?.init?.body, JSON.stringify({ mode: 'guided', dataset_ids: ['d1'], contract_id: 'c1' }));
+  });
+});
+
+test('datasetQuery serialises supported option values only', () => {
+  assert.equal(datasetQuery({}), '');
+  assert.equal(datasetQuery({ header_row: 0, x: null }), '?header_row=0');
+});
+
+test('setup parsers validate and transform backend payloads', () => {
+  const row = { id: 'c1', project_id: 'p1', version: 1, created_at: 'now' };
+  assert.deepEqual(parseContracts([{ ...row, contract_json: '{"a":1}' }])[0]?.contract, { a: 1 });
+  isInvalidResponse(() => parseContracts([{ ...row, contract_json: '[1]' }]));
+  isInvalidResponse(() => parseContracts([{ ...row, contract_json: '{' }]));
+  const vocabulary = parseVocabulary({
+    contract_schema: {},
+    registry: {
+      ridge: { task: 'regression' }, lr: { task: 'classification' }, bad: 1,
+      inferential_models: { ols: {}, logit: {} },
+    },
+  });
+  assert.deepEqual(vocabulary.estimators, [
+    { name: 'lr', task: 'classification' }, { name: 'ridge', task: 'regression' },
+  ]);
+  assert.deepEqual(vocabulary.inferentialModels, ['logit', 'ols']);
+  const profile = {
+    rows: 2, cols: 1, columns: ['a'], dtypes: { a: 'int' }, null_counts: { a: 0 }, n_unique: { a: 2 },
+    roles: { a: 'numeric' }, role_evidence: { a: 'x' }, all_null: [],
+  };
+  assert.equal(parseProfile(profile).columns[0], 'a');
+  isInvalidResponse(() => parseProfile({ ...profile, columns: [1] }));
+  const detail = {
+    project,
+    runs: [],
+    memory: [{ id: 'm1', key: 'k', value_json: '{"a":1}', source_run_id: null, ts: 'now' }],
+  };
+  assert.deepEqual(parseProjectDetail(detail).memory[0]?.value, { a: 1 });
+  isInvalidResponse(() => parseProjectDetail({ ...detail, memory: [{ ...detail.memory[0], value_json: '{' }] }));
 });

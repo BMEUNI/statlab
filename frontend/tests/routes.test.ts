@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { formatRoute, parseRoute, type Route } from '../src/routes.ts';
+
+test('routes round-trip', () => {
+  const routes: Route[] = [
+    { name: 'projects' },
+    { name: 'project', projectId: 'a/b c' },
+    { name: 'setup', projectId: 'a/b c' },
+    { name: 'run', runId: 'a/b c' },
+  ];
+  for (const route of routes) assert.deepEqual(parseRoute(formatRoute(route)), route);
+  assert.equal(formatRoute({ name: 'notFound' }), '#/');
+});
+
+test('root and invalid hashes', () => {
+  for (const hash of ['', '#', '#/']) assert.deepEqual(parseRoute(hash), { name: 'projects' });
+  for (const hash of ['#/projects/', '#/x', '#/runs/a/b', '#/projects/%E0%A4%A']) {
+    assert.deepEqual(parseRoute(hash), { name: 'notFound' });
+  }
+});

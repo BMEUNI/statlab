@@ -1,4 +1,22 @@
-import type { GateSummary, JsonObject, JsonValue, ProjectSummary, RunMode, RunSnapshot, RunStatus } from './types.ts';
+import type {
+  ContractProposal,
+  ContractRecord,
+  DatasetProfile,
+  DatasetRecord,
+  EstimatorInfo,
+  GateSummary,
+  JsonObject,
+  JsonValue,
+  MemoryEntry,
+  ProjectDetail,
+  ProjectSummary,
+  RunMode,
+  RunSnapshot,
+  RunStatus,
+  RunSummary,
+  SetupValidation,
+  Vocabulary,
+} from './types.ts';
 
 export class ApiError extends Error {
   readonly status: number | null;
@@ -49,14 +67,100 @@ function isRunStatus(value: JsonValue | undefined): value is RunStatus {
   );
 }
 
-export function parseProjects(value: unknown): ProjectSummary[] {
+function requiredNumber(object: JsonObject, key: string): number {
+  const value = object[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw invalidResponse();
+  return value;
+}
+
+function stringArray(value: JsonValue | undefined): string[] {
+  if (!Array.isArray(value)) throw invalidResponse();
+  return value.map((item) => {
+    if (typeof item !== 'string') throw invalidResponse();
+    return item;
+  });
+}
+
+function stringRecord(value: JsonValue | undefined): Record<string, string> {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== 'string') throw invalidResponse();
+    result[key] = item;
+  }
+  return result;
+}
+
+function numberRecord(value: JsonValue | undefined): Record<string, number> {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const result: Record<string, number> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== 'number' || !Number.isFinite(item)) throw invalidResponse();
+    result[key] = item;
+  }
+  return result;
+}
+
+function parseJsonText(text: string): JsonValue {
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    throw invalidResponse();
+  }
+}
+
+function parseJsonObjectText(text: string): JsonObject {
+  const parsed = parseJsonText(text);
+  if (!isJsonObject(parsed)) throw invalidResponse();
+  return parsed;
+}
+
+function objectArray(value: unknown): JsonObject[] {
   if (!Array.isArray(value) || !value.every(isJsonObject)) throw invalidResponse();
-  return value.map((project) => ({
+  return value;
+}
+
+function parseProject(project: JsonObject): ProjectSummary {
+  return {
     id: requiredString(project, 'id'),
     slug: requiredString(project, 'slug'),
     name: requiredString(project, 'name'),
     created_at: requiredString(project, 'created_at'),
-  }));
+  };
+}
+
+export function parseProjects(value: unknown): ProjectSummary[] {
+  return objectArray(value).map(parseProject);
+}
+
+export function parseProjectRow(value: unknown): ProjectSummary {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return parseProject(value);
+}
+
+function parseRunFields(run: JsonObject, id: string): RunSummary {
+  const mode = run.mode;
+  const status = run.status;
+  if (!isRunMode(mode) || !isRunStatus(status)) throw invalidResponse();
+  return {
+    id,
+    project_id: requiredString(run, 'project_id'),
+    started_at: requiredString(run, 'started_at'),
+    mode,
+    status,
+    current_node: nullableString(run, 'current_node'),
+    forked_from_run_id: nullableString(run, 'forked_from_run_id'),
+    ended_at: nullableString(run, 'ended_at'),
+    contract_id: requiredString(run, 'contract_id'),
+    champion_model_id: nullableString(run, 'champion_model_id'),
+    config_json: requiredString(run, 'config_json'),
+    test_scored_at: nullableString(run, 'test_scored_at'),
+    test_fingerprint: nullableString(run, 'test_fingerprint'),
+  };
+}
+
+export function parseRun(value: JsonObject): RunSummary {
+  return parseRunFields(value, requiredString(value, 'id'));
 }
 
 export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
@@ -69,9 +173,6 @@ export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
   }
   const id = requiredString(run, 'id');
   if (id !== runId) throw invalidResponse();
-  const mode = run.mode;
-  const status = run.status;
-  if (!isRunMode(mode) || !isRunStatus(status)) throw invalidResponse();
   const parsedGates: GateSummary[] = gates.map((gate) => {
     if (!isJsonObject(gate)) throw invalidResponse();
     const gateRunId = requiredString(gate, 'run_id');
@@ -84,38 +185,146 @@ export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
     };
   });
   return {
-    run: {
-      id,
-      project_id: requiredString(run, 'project_id'),
-      started_at: requiredString(run, 'started_at'),
-      mode,
-      status,
-      current_node: nullableString(run, 'current_node'),
-      forked_from_run_id: nullableString(run, 'forked_from_run_id'),
-      ended_at: nullableString(run, 'ended_at'),
-    },
+    run: parseRunFields(run, id),
     state,
     gates: parsedGates,
     execution_failed: value.execution_failed,
   };
 }
 
+function parseMemory(entry: JsonObject): MemoryEntry {
+  return {
+    id: requiredString(entry, 'id'),
+    key: requiredString(entry, 'key'),
+    value: parseJsonText(requiredString(entry, 'value_json')),
+    source_run_id: nullableString(entry, 'source_run_id'),
+    ts: requiredString(entry, 'ts'),
+  };
+}
+
+export function parseProjectDetail(value: unknown): ProjectDetail {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const project = value.project;
+  if (!isJsonObject(project)) throw invalidResponse();
+  return {
+    project: parseProject(project),
+    runs: objectArray(value.runs).map(parseRun),
+    memory: objectArray(value.memory).map(parseMemory),
+  };
+}
+
+export function parseDatasetRecord(value: unknown): DatasetRecord {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    id: requiredString(value, 'id'),
+    project_id: requiredString(value, 'project_id'),
+    filename: requiredString(value, 'filename'),
+    sha256: requiredString(value, 'sha256'),
+    n_rows: requiredNumber(value, 'n_rows'),
+    n_cols: requiredNumber(value, 'n_cols'),
+    created_at: requiredString(value, 'created_at'),
+  };
+}
+
+export function parseDatasets(value: unknown): DatasetRecord[] {
+  return objectArray(value).map(parseDatasetRecord);
+}
+
+export function parseContractRow(value: unknown): ContractRecord {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    id: requiredString(value, 'id'),
+    project_id: requiredString(value, 'project_id'),
+    version: requiredNumber(value, 'version'),
+    created_at: requiredString(value, 'created_at'),
+    contract: parseJsonObjectText(requiredString(value, 'contract_json')),
+  };
+}
+
+export function parseContracts(value: unknown): ContractRecord[] {
+  return objectArray(value).map(parseContractRow);
+}
+
+export function parseProfile(value: unknown): DatasetProfile {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    rows: requiredNumber(value, 'rows'),
+    cols: requiredNumber(value, 'cols'),
+    columns: stringArray(value.columns),
+    dtypes: stringRecord(value.dtypes),
+    null_counts: numberRecord(value.null_counts),
+    n_unique: numberRecord(value.n_unique),
+    roles: stringRecord(value.roles),
+    role_evidence: stringRecord(value.role_evidence),
+    all_null: stringArray(value.all_null),
+  };
+}
+
+export function parseVocabulary(value: unknown): Vocabulary {
+  if (!isJsonObject(value)) throw invalidResponse();
+  const contractSchema = value.contract_schema;
+  const registry = value.registry;
+  if (!isJsonObject(contractSchema) || !isJsonObject(registry)) throw invalidResponse();
+  const estimators: EstimatorInfo[] = [];
+  for (const [name, entry] of Object.entries(registry)) {
+    if (name === 'inferential_models' || !isJsonObject(entry) || typeof entry.task !== 'string') continue;
+    estimators.push({ name, task: entry.task });
+  }
+  estimators.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  const inferential = registry.inferential_models;
+  return {
+    contractSchema,
+    estimators,
+    inferentialModels: isJsonObject(inferential) ? Object.keys(inferential).sort() : [],
+  };
+}
+
+export function parseValidation(value: unknown): SetupValidation {
+  if (!isJsonObject(value) || typeof value.valid !== 'boolean') throw invalidResponse();
+  return { valid: value.valid, mismatches: objectArray(value.mismatches), warnings: stringArray(value.warnings) };
+}
+
+export function parseProposal(value: unknown): ContractProposal {
+  if (!isJsonObject(value) || !isJsonObject(value.contract)) throw invalidResponse();
+  return { contract: value.contract, reasoning: requiredString(value, 'reasoning') };
+}
+
+export function parseRunAccepted(value: unknown): string {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return requiredString(value, 'run_id');
+}
+
 function abortError(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError');
 }
 
-async function requestJson(path: string, signal?: AbortSignal): Promise<unknown> {
+type RequestOptions = { method: 'GET' | 'POST'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined };
+
+async function request(path: string, options: RequestOptions): Promise<unknown> {
+  const { method, json, form, signal } = options;
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  let body: string | FormData | null = null;
+  if (json !== undefined) {
+    body = JSON.stringify(json);
+    headers['Content-Type'] = 'application/json';
+  } else if (form !== undefined) {
+    body = form;
+  }
   let response: Response;
   try {
-    response = await fetch(path, { method: 'GET', headers: { Accept: 'application/json' }, signal: signal ?? null });
+    response = await fetch(path, { method, headers, body, signal: signal ?? null });
   } catch (error) {
     if (abortError(error, signal)) throw error;
     throw new ApiError('Cannot reach the backend.');
   }
   if (!response.ok) {
-    const message = response.status === 404 ? 'Resource not found.' :
+    const message = response.status === 403 ? 'Locked until the test score is recorded.' :
+      response.status === 404 ? 'Resource not found.' :
       response.status === 409 ? 'Run transition rejected.' :
+      response.status === 410 ? 'Artifact was pruned.' :
+      response.status === 413 ? 'Upload is too large.' :
       response.status === 422 ? 'Invalid request.' :
+      response.status === 502 ? 'The agent could not produce a valid answer.' :
       response.status === 503 ? 'Backend is unavailable.' : 'Backend request failed.';
     throw new ApiError(message, response.status);
   }
@@ -127,11 +336,121 @@ async function requestJson(path: string, signal?: AbortSignal): Promise<unknown>
   }
 }
 
+export function datasetQuery(options: JsonObject): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(options)) {
+    if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === 'string') params.append(key, item);
+    } else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      params.append(key, String(value));
+    }
+  }
+  const text = params.toString();
+  return text === '' ? '' : `?${text}`;
+}
+
 export async function listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
-  return parseProjects(await requestJson('/api/projects', signal));
+  return parseProjects(await request('/api/projects', { method: 'GET', signal }));
 }
 
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
   if (runId.trim() === '') throw new ApiError('Run ID is required.');
-  return parseRunSnapshot(await requestJson(`/api/runs/${encodeURIComponent(runId)}`, signal), runId);
+  return parseRunSnapshot(await request(`/api/runs/${encodeURIComponent(runId)}`, { method: 'GET', signal }), runId);
+}
+
+function projectPath(projectId: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}`;
+}
+
+export async function createProject(slug: string, name: string): Promise<ProjectSummary> {
+  return parseProjectRow(await request('/api/projects', { method: 'POST', json: { slug, name } }));
+}
+
+export async function getProject(projectId: string, signal?: AbortSignal): Promise<ProjectDetail> {
+  return parseProjectDetail(await request(projectPath(projectId), { method: 'GET', signal }));
+}
+
+export async function listDatasets(projectId: string, signal?: AbortSignal): Promise<DatasetRecord[]> {
+  return parseDatasets(await request(`${projectPath(projectId)}/datasets`, { method: 'GET', signal }));
+}
+
+export async function listContracts(projectId: string, signal?: AbortSignal): Promise<ContractRecord[]> {
+  return parseContracts(await request(`${projectPath(projectId)}/contracts`, { method: 'GET', signal }));
+}
+
+export async function uploadDataset(
+  projectId: string,
+  file: Blob,
+  filename: string,
+  options: JsonObject,
+): Promise<DatasetRecord> {
+  const form = new FormData();
+  form.append('file', file, filename);
+  return parseDatasetRecord(
+    await request(`${projectPath(projectId)}/datasets${datasetQuery(options)}`, { method: 'POST', form }),
+  );
+}
+
+export async function getDatasetProfile(
+  projectId: string,
+  datasetId: string,
+  options: JsonObject,
+  signal?: AbortSignal,
+): Promise<DatasetProfile> {
+  return parseProfile(
+    await request(
+      `${projectPath(projectId)}/datasets/${encodeURIComponent(datasetId)}/profile${datasetQuery(options)}`,
+      { method: 'GET', signal },
+    ),
+  );
+}
+
+export async function uploadContract(projectId: string, contract: JsonObject): Promise<ContractRecord> {
+  const form = new FormData();
+  form.append('file', new Blob([JSON.stringify(contract)], { type: 'application/json' }), 'contract.json');
+  return parseContractRow(await request(`${projectPath(projectId)}/contracts`, { method: 'POST', form }));
+}
+
+export async function validateContract(
+  projectId: string,
+  datasetId: string,
+  contract: JsonObject,
+): Promise<SetupValidation> {
+  return parseValidation(
+    await request(`${projectPath(projectId)}/contracts/validate`, {
+      method: 'POST',
+      json: { dataset_id: datasetId, contract },
+    }),
+  );
+}
+
+export async function proposeContract(
+  projectId: string,
+  datasetId: string,
+  contract: JsonObject,
+): Promise<ContractProposal> {
+  return parseProposal(
+    await request(`${projectPath(projectId)}/contracts/propose`, {
+      method: 'POST',
+      json: { dataset_id: datasetId, contract },
+    }),
+  );
+}
+
+export async function getVocabulary(signal?: AbortSignal): Promise<Vocabulary> {
+  return parseVocabulary(await request('/api/vocabulary', { method: 'GET', signal }));
+}
+
+export async function createRun(
+  projectId: string,
+  mode: RunMode,
+  datasetId: string,
+  contractId: string,
+): Promise<string> {
+  return parseRunAccepted(
+    await request(`${projectPath(projectId)}/runs`, {
+      method: 'POST',
+      json: { mode, dataset_ids: [datasetId], contract_id: contractId },
+    }),
+  );
 }
