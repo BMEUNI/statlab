@@ -235,6 +235,12 @@ families, inference questions, notes), the run mode, gate answers and chat messa
 - **Expect:** as S01 with `rmse` in the report; imputation tools appear in `tool_calls`.
 - **Soft:** test rmse ≤ 5.0.
 
+## Offline UI stack
+
+`.venv/bin/python -m integration.serve_ui`
+
+The stand-in LLM answers every agent call for free; use the printed sample CSVs (churn works with the default scenario S01).
+
 ## How failures are fixed
 
 The harness never hides a failure. After a run, `summary.md` lists each failed check with the

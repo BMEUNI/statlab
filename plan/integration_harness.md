@@ -2017,3 +2017,50 @@ TrainingDecision call's last message content contains
 `"The contract fixes tuning method 'grid': use method 'grid' with a param_grid over tunable keys and empty params."`.
 Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_models.py'`; Ruff
 check + format --check and mypy on the test file.
+
+## Stage H9 — offline UI stack (free local backend for browser click-throughs)
+
+Goal: start MCP + API with the offline stand-in LLM and sample CSVs so the UI (chunks 37–40) can
+be exercised in a browser without paid calls. Non-goals: no change to `run_scenarios.py`
+behavior, no backend change, no frontend change.
+
+Owned files: new `integration/serve_ui.py`; `integration/SCENARIOS.md` (one short section).
+
+`integration/serve_ui.py` (module docstring: "Offline backend for UI click-throughs: MCP + API
+with the stand-in LLM; no paid calls."):
+- `_parse(argv)`: `--llm` choices `offline`, `offline-rich`, default `offline`; `--scenario`
+  default `"S01"` (whose offline hints the stand-in uses); `--port` int default `8000`;
+  `--scenarios` Path default `integration/scenarios.toml`.
+- `async def _serve(args, scenario: Scenario) -> None`: `root = Path("integration/out") / (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-ui")`;
+  create `root/data` and `root/samples`; write sample CSVs with `write_csv(key, root / "samples" / f"{key}.csv")`
+  for keys `churn`, `churn_dirty`, `houses`, `species`; logging exactly as
+  `run_scenarios._setup_logging(root / "api.log")` (import and call it);
+  `token = secrets.token_urlsafe(32)`; `mcp = McpProcess(data_dir=(root / "data").resolve(), token=token, log_path=root / "mcp.log")`;
+  `settings = build_settings(token=token, mcp_url=mcp.start(), data_dir=(root / "data").resolve(), db_path=(root / "statlab.db").resolve(), api_port=args.port)`;
+  `provider = OfflineProvider(rich=args.llm == "offline-rich")`; `provider.scenario = scenario`;
+  `server = ApiServer(settings=settings, llm_client=LlmClient(settings, acompletion=provider))`;
+  `base_url = await server.start()`; print three lines: `f"API ready at {base_url} (offline LLM, scenario {scenario.id})"`,
+  `f"Sample CSVs: {root / 'samples'}"`, `f"Start the UI: STATLAB_API_ORIGIN={base_url} make ui"`;
+  then `await asyncio.Event().wait()`. A `finally` stops the server (`await server.stop()`) and
+  `mcp.stop()` (each only if started).
+- `main(argv) -> int`: same `uv.lock` repo-root check and SIGTERM handling as
+  `run_scenarios.main`; unknown `--scenario` id -> print `f"unknown scenario id: {id}"` to stderr,
+  return 2; `asyncio.run(_serve(...))`; `KeyboardInterrupt` -> print `"stopped"` to stderr, return 0.
+  `if __name__ == "__main__": raise SystemExit(main())`.
+- `SCENARIOS.md`: add a section "Offline UI stack" with the command
+  `.venv/bin/python -m integration.serve_ui` and one sentence: the stand-in LLM answers every agent
+  call for free; use the printed sample CSVs (churn works with the default scenario S01).
+
+Checks: Ruff check + format --check and mypy on `integration/serve_ui.py`; then start it in the
+background (`.venv/bin/python -m integration.serve_ui --port 8765 > <log> 2>&1 &`, record the PID;
+macOS has no `timeout`), poll the log up to 60 s until it contains `API ready`, run `curl -s http://127.0.0.1:8765/api/projects` (expect
+`[]`), then stop the process with SIGINT and confirm it exits; report outputs and exits.
+
+### H9 addendum A — always stop MCP
+
+On SIGTERM/Ctrl-C, `asyncio.run` cancels the uvicorn task, so `await server.stop()` raises
+`CancelledError` and the `finally` skipped `mcp.stop()` (orphaned MCP child). `_serve`'s
+`finally` becomes: `try:` (if `server is not None`: `await server.stop()`) `finally:`
+`mcp.stop()`. Smoke check repeats with SIGTERM (background jobs ignore SIGINT): after SIGTERM the
+process exits within 30 s and `pgrep -f statlab_tools` finds no MCP child started by the smoke run;
+report outputs/exits. Ruff/mypy as before.

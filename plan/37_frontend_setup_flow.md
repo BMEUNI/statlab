@@ -275,3 +275,287 @@ Checks (from `frontend/`): `npm test`, `npm run typecheck`, `npm run build`; rep
 Diff reviewed against recipe; added exported `parseProjectRow` (single project) is consistent.
 Main reran from `frontend/`: `npm test` 26/26 pass, `npm run typecheck` exit 0, `npm run build`
 exit 0 (retained dependency "use client" directive warning, as in B14).
+
+## Stage 37c — setup screens (projects, project page, setup wizard)
+
+### Goal and non-goals
+
+React screens for PLAN §12 items 1–2 on top of 37b. Every setup-side backend feature is
+reachable: create/list projects, project detail (runs, datasets, contracts, memory), CSV upload
+with all `DatasetOptions`, column profile, four contract sources (write, agent proposal with
+reasoning, saved contract, JSON file), the full contract editable (mapping table + schema form +
+raw JSON), validation preview, mode choice, start. Non-goals: run workspace (38; the current
+inspect panel moves to `RunPage` unchanged), comparison/report (39/40), new packages,
+component tests (logic lives in tested pure modules), routing library.
+
+### Design system (from the frontend-design pass; apply exactly)
+
+Subject: a local statistical modelling lab bench; user = the analyst supervising an agent.
+Tables over cards; colour only encodes state; one family for UI text, its mono sibling only
+for code/JSON.
+- Tokens on `:root` in `style.css`: `--paper: #F6F7F4` (page), `--surface: #FFFFFF` (panels),
+  `--ink: #18232E` (text), `--graphite: #5A6672` (secondary text), `--rule: #D5DBD6` (borders),
+  `--signal: #1F6F5C` (primary actions, focus ring), `--signal-ink: #FFFFFF`,
+  `--gate: #B7791F` (awaiting the user), `--fault: #B3261E` (errors, locks),
+  `--target: #E6F0EC` (target-row tint). Radius `--radius: 6px` on inputs/buttons only; panels
+  use 1px `--rule` borders, radius 8px, no shadows. Spacing scale 4/8/12/16/24/32/48 px.
+- Type: `index.html` loads Google Fonts `Atkinson Hyperlegible Next` (400, 600, 700) and
+  `Atkinson Hyperlegible Mono` (400) via one `<link rel="stylesheet">` (plus the two
+  `preconnect` links). `body` font: `"Atkinson Hyperlegible Next", system-ui, sans-serif`,
+  16px, line-height 1.5; `code, pre, textarea.json`: `"Atkinson Hyperlegible Mono", ui-monospace, monospace`, 14px.
+  Scale: h1 2rem/700, h2 1.25rem/700, h3 1rem/600. Numbers in tables: `font-variant-numeric: tabular-nums`.
+  Sentence case everywhere; no all-caps labels; no eyebrow text.
+- Layout: page column `max-width: 72rem`, left-aligned, 24px gutters (16px under 40rem).
+  Top bar: product name "Statlab" (link to `#/`) and a breadcrumb (`Projects › <name> › New run`)
+  separated by `›` characters; bottom border `--rule`.
+- Controls: primary button = `--signal` background, `--signal-ink` text; secondary = surface
+  with `--rule` border; disabled = 50% opacity, `cursor: not-allowed`. Focus: 3px `--signal`
+  outline, 2px offset. Errors: `role="alert"`, `--fault` text with a 3px left border.
+  Status pills (run status): text + 1px border, colour `--gate` for `awaiting_user`/`paused`,
+  `--fault` for `failed`/`cancelled`, `--signal` for `completed`, `--graphite` otherwise.
+- Motion: none except `prefers-reduced-motion`-guarded 120ms background transitions on buttons.
+- Responsive: tables scroll horizontally inside an `overflow-x: auto` wrapper; the wizard's step
+  list stacks above the content under 48rem.
+
+### Owned files (all under `frontend/`)
+
+`index.html`, `src/style.css` (rewrite), `src/App.tsx` (rewrite), new `src/useRoute.ts`,
+new `src/ui/format.ts`, new `src/pages/ProjectsPage.tsx`, new `src/pages/ProjectPage.tsx`,
+new `src/pages/RunPage.tsx`, new `src/setup/SetupWizard.tsx`, new `src/setup/DataStep.tsx`,
+new `src/setup/SourceStep.tsx`, new `src/setup/EditStep.tsx`, new `src/setup/MappingTable.tsx`,
+new `src/setup/SchemaForm.tsx`, new `src/setup/CheckStep.tsx`, new `src/setup/StartStep.tsx`,
+new `tests/format.test.ts`, `package.json` (add `tests/format.test.ts` to the test script).
+
+### Pure helpers — `src/ui/format.ts` (tested)
+
+- `slugify(name: string): string`: lowercase; replace each run of characters outside
+  `[a-z0-9]` with `-`; trim leading/trailing `-`; cut to 64 chars; trim a trailing `-` again.
+- `isValidSlug(slug: string): boolean`: `/^[a-z0-9][a-z0-9_-]{0,63}$/`.
+- `formatTime(iso: string | null): string`: null -> `'—'`; invalid date -> the input; else
+  `new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })`.
+- `lastActivity(createdAt: string, runs: RunSummary[]): string`: the maximum ISO string among
+  `createdAt`, every run `started_at` and every non-null `ended_at` (string comparison; ISO UTC).
+- `naValuesToText(values: string[]): string`: join with `\n`, mapping `''` to `(empty)`.
+  `naValuesFromText(text: string): string[]`: split on `\n`, trim each line, drop lines that are
+  empty after trimming, map `(empty)` to `''`, de-duplicate keeping first occurrence.
+- `errorText(error: Error): string`: `ApiError` -> its message; else `'Request failed.'`.
+- `pathKey(path: Path): string`: string segments joined with `.` (number segments dropped).
+- `tests/format.test.ts`: slugify (`'Churn Study 2026!'` -> `'churn-study-2026'`, `'  --  '` -> `''`,
+  a 100-char name -> length ≤ 64 without trailing `-`); isValidSlug true/false cases including
+  `'-a'` and `'A'`; lastActivity picks an `ended_at` later than all starts; NA text round-trip of
+  `['', 'NA', 'null']` and de-duplication; pathKey(`['objective','inference_goals',0,'predictors']`)
+  -> `'objective.inference_goals.predictors'`; formatTime(null) -> `'—'`, invalid -> unchanged.
+
+### Routing — `src/useRoute.ts`
+
+`useRoute(): { route: Route; navigate: (route: Route) => void }`: state initialised from
+`parseRoute(window.location.hash)`; `useEffect` adds a `hashchange` listener updating it (removed
+on cleanup); `navigate` sets `window.location.hash = formatRoute(route)`.
+
+### App shell — `src/App.tsx`
+
+Renders `<header class="topbar">` (link "Statlab" to `#/`, then breadcrumb: on project/setup a
+link to the project using the cached `['project', id]` query data name when available, else the
+id; on setup also `New run`; on run `Run <runId>`), then `<main class="page">` switching on
+`route.name`: projects -> `ProjectsPage`; project -> `ProjectPage`; setup -> `SetupWizard`; run
+-> `RunPage`; notFound -> heading "Page not found" and a link "Go to projects". Each page receives
+`navigate`. Query keys used across screens: `['projects']`, `['project', projectId]`,
+`['datasets', projectId]`, `['contracts', projectId]`,
+`['profile', projectId, datasetId, JSON.stringify(options)]`, `['vocabulary']`, `['run', runId]`.
+
+### `src/pages/RunPage.tsx`
+
+Move the current App "Inspect a run" snapshot + stream block into `RunPage({ runId })`, minus
+the run-id form: it shows the snapshot facts and stream status for `runId`. Behavior otherwise
+unchanged (38 replaces this page).
+
+### `src/pages/ProjectsPage.tsx`
+
+- Heading "Projects". A form "New project": label "Name" (text, required), label "Short name"
+  (text; auto-filled with `slugify(name)` until the user edits it; help text "Lowercase letters,
+  digits, - and _. Used for folder names."), button "Create project" (disabled while pending or
+  when `!isValidSlug(slug)` or name blank). On submit: `createProject(slug, name.trim())`; success
+  -> invalidate `['projects']`, `navigate({name:'project', projectId: created.id})`; failure ->
+  alert with `errorText` (409/422 messages come from the client's fixed table).
+- Table "Your projects" columns: Name (link to project), Short name, Runs, Last activity. Each
+  row is a `ProjectListRow` component that runs `useQuery(['project', id], getProject)`; while
+  loading show `…` in Runs/Last activity; on error show `—`. Runs = `runs.length`; Last activity
+  = `formatTime(lastActivity(created_at, runs))`. Loading state "Loading projects…", error alert,
+  empty state "No projects yet. Create one above to upload a dataset."
+
+### `src/pages/ProjectPage.tsx`
+
+`useQuery(['project', projectId])`, `['datasets', projectId]`, `['contracts', projectId]`.
+- Header: h1 project name, secondary line short name; primary button "New run" -> setup route.
+- Section "Runs" (table): Status (pill), Mode, Started, Ended, Forked from (link to run route or
+  `—`), Champion (`Yes` when `champion_model_id` not null else `No`), Run (link "Open" to run
+  route). Empty: "No runs yet. Start one with New run."
+- Section "Datasets" (table): File, Rows, Columns, Uploaded. Empty: "No datasets yet. Upload a
+  CSV when you start a run."
+- Section "Contracts" (table): Version, Target (`contract.target.column` via `getAt`), Saved,
+  and a `<details>` per row with summary "Show JSON" containing `<pre><code>` of
+  `JSON.stringify(contract, null, 2)`. Empty: "No saved contracts."
+- Section "Project memory" (table): Fact (`key`), Value (`<code>` of `JSON.stringify(value)`),
+  From run (link or `—`), Recorded (`formatTime(ts)`). Empty: "Nothing remembered yet. Completed
+  runs add what they learned here."
+Each section shows its own loading text and error alert.
+
+### Setup wizard — `src/setup/SetupWizard.tsx`
+
+State (all in the wizard component, `useState`): `step: 1|2|3|4|5`, `datasetId: string | null`,
+`datasetOptions: JsonObject` (sparse, `{}` initially), `draft: JsonObject | null`,
+`reasoning: string | null`, `validation: SetupValidation | null`.
+Queries: `['vocabulary']` (getVocabulary), `['project', projectId]`, profile query
+`['profile', projectId, datasetId, JSON.stringify(datasetOptions)]` enabled when `datasetId`
+is set.
+Layout: two columns — an `<ol class="steps">` with five items "Choose data", "Choose a starting
+contract", "Edit the contract", "Check against the data", "Start the run"; the current item has
+`aria-current="step"`; earlier items are buttons returning to that step; later items are plain
+text (not interactive). Right column renders the step component.
+Transitions: Data -> Source requires a loaded profile. Source -> Edit sets `draft` (and
+`reasoning` for agent proposals) and also applies `datasetOptions`: when non-empty
+`draft = setAt(draft, ['dataset'], datasetOptions)`. Edit -> Check clears `validation`. Going back
+to step 1 keeps `draft`; choosing a different dataset resets `draft`, `reasoning`, `validation`.
+Vocabulary or profile errors show an alert with "Try again" (refetch).
+
+### `src/setup/DataStep.tsx`
+
+Props: `projectId`, `datasetId`, `options`, `onSelect(datasetId)`, `onOptions(options)`,
+`profile` query result, `onContinue`.
+- Radio list "Use a dataset you uploaded" from `['datasets', projectId]`: label
+  `filename — rows × columns, uploaded <formatTime>`. (Hide the list when empty.)
+- Fieldset "Upload a new CSV": file input (`accept=".csv,text/csv"`); a `<details>` "Parsing
+  options" with: Delimiter (text, maxLength 4, placeholder `,`), Encoding (text, placeholder
+  `utf-8`), Decimal mark (text, maxLength 1, placeholder `.`), Header row (number, min 0,
+  placeholder `0`), Missing value markers (textarea, one per line, `(empty)` stands for an empty
+  cell, placeholder `naValuesToText(['', 'NA', 'N/A', 'null', 'NULL'])`). Each input writes the
+  sparse `options`: empty input -> `unsetAt`, else `setAt` (header row as integer; the markers via
+  `naValuesFromText`, unset when the textarea is empty). These options apply to uploads and to the
+  profile of the selected dataset.
+  Button "Upload CSV" (disabled without a file or while pending): `uploadDataset(projectId, file, file.name, options)`;
+  success -> invalidate `['datasets', projectId]`, `onSelect(row.id)`; failure -> alert.
+- Profile panel when a dataset is selected: loading "Reading columns…"; error alert; success:
+  "`rows` rows, `cols` columns" and a comma list of the first 12 column names (+ "and N more").
+- Button "Continue" enabled only when the profile query succeeded.
+
+### `src/setup/SourceStep.tsx`
+
+Props: `projectId`, `datasetId`, `profile: DatasetProfile`, `onDraft(draft, reasoning | null)`.
+Radio group "How do you want to start?" with four options and one-line descriptions:
+1. "Write it myself" — "Pick the target column, then set the rest yourself."
+2. "Let the agent draft it" — "The agent reads the column profile and proposes a full contract. Uses one LLM call."
+3. "Reuse a saved contract" — "Start from a contract saved in this project."
+4. "Upload a JSON file" — "Use a contract file you already have."
+Below, the selected option's controls:
+1/2: select "Target column" (profile columns; required). 1: button "Continue" ->
+`onDraft({target: {column}}, null)`. 2: button "Draft with the agent" ->
+`proposeContract(projectId, datasetId, {target: {column}})`; pending text "The agent is drafting
+the contract…"; success -> `onDraft(proposal.contract, proposal.reasoning)`; failure -> alert.
+3: radio list of `['contracts', projectId]` rows (`Version N — target <col>, saved <time>`); empty
+text "No saved contracts in this project."; button "Use this contract" -> `onDraft(record.contract, null)`.
+4: file input `accept=".json,application/json"`; on change read `file.text()` and run
+`parseContractText`; error -> alert with its message; ok -> button "Use this file" enabled ->
+`onDraft(contract, null)`.
+
+### `src/setup/EditStep.tsx`
+
+Props: `draft`, `onDraft`, `profile`, `vocabulary`, `reasoning`, `onBack`, `onContinue`.
+- When `reasoning` is non-null: `<details open>` "Why the agent proposed this" with the text in a
+  `<p>` (white-space: pre-wrap).
+- Tabs (`role="tablist"`, buttons `role="tab"` with `aria-selected`, panel `role="tabpanel"`):
+  "Columns", "Rules", "JSON".
+- Columns tab: `MappingTable`. Rules tab: `SchemaForm` at the root. JSON tab: textarea
+  (`class="json"`, 24 rows, spellcheck off) initialised with `JSON.stringify(draft, null, 2)`
+  whenever the tab is opened; button "Apply JSON" -> `parseContractText`; error -> alert; ok ->
+  `onDraft(contract)` and a status line "Applied.".
+- Footer: "Back" (secondary) and "Check against the data" (primary; disabled when
+  `target.column` is not a string).
+
+### `src/setup/MappingTable.tsx`
+
+Props: `draft`, `onDraft`, `profile`, `roleOptions: string[]` (from
+`fieldsOf(schema, 'FeatureRules')` entry `roles`, its `options`).
+Table caption "Columns"; columns: Target, Column, Type, Detected role, Role, Use, ID, Missing,
+Distinct. Per `columnRows(profile, draft)` row:
+- Target: radio `name="target"` checked when `isTarget`; change -> `onDraft(setTarget(draft, name))`.
+- Column: name; Type: dtype; Detected role: `inferredRole ?? '—'`.
+- Role: select: first option value `''` label `Detected (${inferredRole ?? 'unknown'})`, then
+  `roleOptions`; change -> `setRole(draft, name, value === '' ? null : value)`; disabled for the target row.
+- Use: checkbox `included`, disabled for the target row -> `setIncluded`.
+- ID: checkbox `isId`, disabled for the target row -> `setIdColumn`.
+- Missing: `nulls ?? '—'`; Distinct: `unique ?? '—'`. Target row class `is-target` (`--target` tint).
+- Every control has an accessible name including the column (e.g. `aria-label={`Use ${name}`}`).
+
+### `src/setup/SchemaForm.tsx`
+
+`SchemaForm({ schema, defName, path, draft, onDraft, columns, vocabulary })` renders
+`fieldsOf(schema, defName)`; root call uses `defName = null`, `path = []`.
+Skips: at the root the keys `target` is rendered first, then the remaining keys in schema order;
+within `FeatureRules` skip `include`, `exclude`, `id_columns`, `roles` (Columns tab owns them).
+Each field: `fieldPath = [...path, field.key]`, `value = getAt(draft, fieldPath)`,
+`key = pathKey(fieldPath)`; label = `field.title`; help line = `Default: <JSON of defaultValue>`
+when `defaultValue !== undefined && defaultValue !== null`, else `Not set by default`.
+Writes: `set(v)` = `onDraft(setAt(draft, fieldPath, v))`; `unset()` = `onDraft(unsetAt(draft, fieldPath))`.
+Widgets by kind (special cases first, matched on `key`):
+- `target.column`, `split.time_column`, `split.group_column`: select of `columns` with first
+  option `''` "Not set" (`target.column` has no empty option) -> unset/set.
+- `modelling.candidates`: checkbox list of `vocabulary.estimators` (label `name (task)`), only
+  those whose `task` equals `getAt(draft, ['objective','task'])` when that is a string; none
+  checked = unset; else set to the checked names in vocabulary order.
+- `modelling.inferential_model`: select `''` "Chosen from the target type" + `vocabulary.inferentialModels`.
+- keys ending in `.predictors`: checkbox list of `columns` (unset when none).
+- enum: select `''` (`Default (<default>)` or "Not set") + options.
+- boolean: select `''` (`Default (yes|no)` or "Not set"), `true` "Yes", `false` "No".
+- integer / number: `<input type="number">` (`step="1"` / `step="any"`), placeholder default;
+  local text state; on blur: empty -> unset; `Number(text)` finite (and integer for integer) ->
+  set; else inline error "Enter a whole number." / "Enter a number." and no write.
+- string: text input (key `notes` -> textarea 4 rows); on blur: empty -> unset; else set.
+- string-list: text input of comma-separated values (shown joined with `, `); on blur: split on
+  `,`, trim, drop empties; empty -> unset; else set.
+- enum-list: checkbox group of options (none -> unset).
+- enum-map / list-map / string-map (`features.ordinal_levels`, `preprocessing.missing.per_column`,
+  and any other map): a table of entries (Column, Value, Remove button) plus an add row (column
+  select of `columns` not yet used, value widget, "Add" button). Value widget: enum-map -> select of
+  options; list-map -> comma text (split like string-list); string-map -> text. Removing the last
+  entry unsets the map.
+- object: `<fieldset><legend>{title}</legend>` + recursive `SchemaForm` with `defName = field.ref`
+  and `path = fieldPath`.
+- object-list (`objective.inference_goals`): each existing item as a fieldset "Goal N" with a
+  recursive `SchemaForm` (`defName = field.ref`, `path = [...fieldPath, index]`) and a "Remove
+  goal" button (`unsetAt` of the index; when the list becomes empty unset the list); button "Add
+  goal" -> `set([...current, {}])`.
+- json (e.g. `target.positive_class`): text input showing `JSON.stringify(value)` when set; on
+  blur: empty -> unset; `JSON.parse` must succeed and give a string/number/boolean -> set; else
+  inline error `Enter a value such as 1, true or "yes".`.
+Every control has a `<label for>`; help lines are linked with `aria-describedby`.
+
+### `src/setup/CheckStep.tsx`
+
+Props: `projectId`, `datasetId`, `draft`, `validation`, `onValidation`, `onBack`, `onContinue`.
+On mount and on "Check again": `validateContract(projectId, datasetId, draft)` (useMutation);
+pending "Checking the contract against the data…"; failure -> alert.
+Result: valid -> status line "The contract matches the data." (colour `--signal`); invalid ->
+heading "Fix these before starting" and a list of mismatches: each item `<strong>{field}</strong> {message}`
+using string `field`/`message` when present, else `<code>JSON.stringify(item)</code>`.
+Warnings (if any) under "Warnings". Buttons: "Back to the contract", "Check again",
+"Continue" (enabled only when `validation?.valid === true`).
+
+### `src/setup/StartStep.tsx`
+
+Props: `projectId`, `datasetId`, `datasetName`, `draft`, `navigate`.
+- Summary list: Dataset (file name), Target (`target.column`), Task (`objective.task` or "The agent
+  decides"), Primary metric (`objective.primary_metric` or "The agent decides").
+- Radio group "How should the run proceed?": `guided` "Guided" — "The agent stops before each
+  decision so you can approve, edit or redirect it." (default checked); `autonomous`
+  "Autonomous" — "The agent runs to the end. You can still pause, step in or rewind."
+- Button "Start run": `uploadContract(projectId, draft)` then
+  `createRun(projectId, mode, datasetId, contract.id)`; pending text "Saving the contract and
+  starting the run…"; success -> invalidate `['project', projectId]` and `['contracts', projectId]`,
+  `navigate({name: 'run', runId})`; failure -> alert; the button stays disabled while pending.
+
+### Checks
+
+From `frontend/`: `npm test`, `npm run typecheck`, `npm run build` (genuine exits, test counts).
+Main then performs the browser click-through on the H9 offline stack (Playwright): create
+project, upload `churn.csv`, all four contract sources, edit columns/rules/JSON, check, start a
+guided run, land on the run page.
