@@ -123,3 +123,12 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - `make check` exit 0: 3058 passed, 1 designed skip; TOTAL 11418 stmts / 3290 branches 100%;
   mypy 188; Ruff clean; 197 formatted.
 - Full rich suite `integration/out/20261007T195055Z-offline-rich`: 19/19 PASS.
+
+## Addendum — live run 6 finding and F12, 2026-10-08
+
+- Live S01 (paid, user-confirmed, $0.45 cap) `integration/out/20261008T055412Z-live`: $0.1325;
+  provider 500s recovered by F9 retry; c_04 `ValidationConclusion` hit the 60 s request timeout
+  3 times -> abort. Healthy calls peaked at 50 s.
+- F12: `_REQUEST_TIMEOUT = 180`. `make check` exit 0: 3058 passed, 1 designed skip; TOTAL
+  11418 stmts / 3290 branches 100%; mypy 188; Ruff clean; 197 formatted. Offline suites not
+  rerun (constant only affects real provider waits).

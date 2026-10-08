@@ -1666,3 +1666,20 @@ Ruff check/format and mypy on the four owned files;
 F11 addendum A: `Failure(error_class="tool_param", ...)` requires nonempty `field_errors`. In the
 new test use `Failure(error_class="tool_param", message="LLM output remained invalid after one repair", field_errors={"output": "still invalid"})`
 (the shape `LlmClient` produces). Rerun the focused pytest command only.
+
+## Live run 6 finding (2026-10-08, `integration/out/20261008T055412Z-live`, S01, $0.1325)
+
+F9 logging worked: 3 parallel `InternalServerError status=500` (retried, recovered), then repeated
+`Timeout status=408` at exactly the 60 s request timeout. Candidate c_04's `ValidationConclusion`
+timed out 3 times -> transient budget exhausted -> failure gate -> abort. Healthy calls in runs
+3/5/6 peaked at 50 s (reasoning outputs of ~10k tokens), so 60 s leaves no margin under provider
+load.
+
+## Fix F12 — request timeout 180 s
+
+Owned files: `backend/statlab/llm/client.py`, `tests/test_llm_client.py`, `tests/test_llm_stream.py`.
+Recipe: `_REQUEST_TIMEOUT = 180` (supersedes chunk 25's "timeout 60"); change the four test
+assertions that compare the sent `timeout` to `60` (`test_llm_stream.py` ~130,
+`test_llm_client.py` ~164, ~291, ~329) to `180`. Nothing else.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_llm_stream.py'`;
+Ruff check/format and mypy on the three files.

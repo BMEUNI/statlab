@@ -127,7 +127,7 @@ async def test_prose_chunks_reset_validate_and_account(
     assert stream.closed
     assert calls[0]["stream"] is True
     assert calls[0]["stream_options"] == {"include_usage": True}
-    assert calls[0]["timeout"] == 60 and calls[0]["num_retries"] == 0
+    assert calls[0]["timeout"] == 180 and calls[0]["num_retries"] == 0
     assert _rows(conn)[0] == ("StreamResult", "test-model", 3, 2, 0, 0.2)
 
 

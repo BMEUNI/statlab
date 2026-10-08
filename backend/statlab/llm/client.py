@@ -36,7 +36,7 @@ from statlab.errors import LlmCallError, LlmOutputError, PersistenceError
 from statlab.persistence.repository import record_llm_call
 
 _LOGGER = logging.getLogger(__name__)
-_REQUEST_TIMEOUT = 60
+_REQUEST_TIMEOUT = 180
 _FLASH_MODELS = frozenset(
     {
         "deepseek/deepseek-flash",

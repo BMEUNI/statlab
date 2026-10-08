@@ -161,7 +161,7 @@ async def test_setup_completion_repairs_once_without_run_accounting(
     )
     assert result == Result(value="fixed")
     assert len(calls) == 2
-    assert all(call["num_retries"] == 0 and call["timeout"] == 60 for call in calls)
+    assert all(call["num_retries"] == 0 and call["timeout"] == 180 for call in calls)
     assert _rows(conn) == before
 
 
@@ -288,7 +288,7 @@ async def test_run_and_setup_share_one_llm_semaphore(
     assert await run_task == Result(value="ok")
     assert await setup_task == Result(value="ok")
     assert len(entries) == 2
-    assert all(item["timeout"] == 60 and item["num_retries"] == 0 for item in entries)
+    assert all(item["timeout"] == 180 and item["num_retries"] == 0 for item in entries)
     assert len(_rows(conn)) == 1
 
 
@@ -326,7 +326,7 @@ async def test_json_tier_repairs_once_and_records_cached_flash_cost(
     assert messages[0]["content"] == "Keep invariant prefix."
     assert len(calls) == 2
     assert calls[0]["response_format"] == {"type": "json_object"}
-    assert calls[0]["num_retries"] == 0 and calls[0]["timeout"] == 60
+    assert calls[0]["num_retries"] == 0 and calls[0]["timeout"] == 180
     assert calls[0]["thinking"] == {"type": "disabled"}
     first_messages = calls[0]["messages"]
     second_messages = calls[1]["messages"]
