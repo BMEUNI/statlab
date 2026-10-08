@@ -114,6 +114,7 @@ async def test_guided_preservation_awaits_approval_without_writes(
     assert output.summary["decision"] == {
         "rationale": "Preserve exact audited computation and immutable run inputs",
         "preserve": True,
+        "user_summary": None,
     }
     proposal = TypeAdapter(dict[str, JsonValue]).validate_python(output.summary["proposal"])
     assert proposal["target"] == h.state.shared_results[-1].result.summary["test_score"]
@@ -153,6 +154,7 @@ async def test_guided_preservation_approval_edits_only_rationale(
     assert output.summary["decision"] == {
         "rationale": "Approved exact preservation",
         "preserve": True,
+        "user_summary": None,
     }
     assert output.summary["target"] == tools.calls[0][2]["target"] == target
     assert len(seen) == 1 and len(h.llm.calls) == llm_count

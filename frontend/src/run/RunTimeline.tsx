@@ -3,10 +3,13 @@ import type { ExecutionRecord, GateQuestion } from '../api/types.ts';
 import {
   cellStatus,
   CELL_LABELS,
+  estimatorLabel,
   graphLayout,
   groupTone,
+  humanize,
   latestOutcome,
   mergedMetrics,
+  metricLabel,
   nodeLabel,
   TONES,
   type RunView,
@@ -20,11 +23,12 @@ type Props = {
   executions: ExecutionRecord[];
   pending: GateQuestion[];
   selected: Selection | null;
+  championId: string | null;
   onSelect: (next: Selection | null) => void;
   detail: ReactNode;
 };
 
-export default function RunTimeline({ view, executions, pending, selected, onSelect, detail }: Props) {
+export default function RunTimeline({ view, executions, pending, selected, championId, onSelect, detail }: Props) {
   const layout = graphLayout(view.spine);
   const isSelected = (node: string, candidateId: string | null) =>
     selected !== null && selected.node === node && selected.candidateId === candidateId;
@@ -71,50 +75,50 @@ export default function RunTimeline({ view, executions, pending, selected, onSel
             {view.branches.length === 0
               ? <p className="tl-note">Candidate models appear after the experiment design step.</p>
               : (
-                <>
-                  <p className="tl-note">
-                    Steps for each model, in order: {layout.perCandidate.map((node) => nodeLabel(node.name)).join(', ')}.
-                  </p>
-                  <ul className="lanes">
-                    {view.branches.map((branch) => {
-                      const entries = Object.entries(mergedMetrics(branch));
-                      return (
-                        <li className="lane" key={branch.id}>
-                          <div className="lane-name">
-                            <strong>{branch.label}</strong>
-                            <small>
-                              {branch.estimator !== null && branch.estimator !== branch.label ? branch.estimator : branch.id}
+                <ul className="lanes">
+                  {view.branches.map((branch) => {
+                    const first = Object.entries(mergedMetrics(branch))[0];
+                    const isChampion = branch.id === championId;
+                    const showDetail = selected !== null && selected.candidateId === branch.id;
+                    return (
+                      <li className={`lane${isChampion ? ' is-champion' : ''}`} key={branch.id}>
+                        <div className="lane-head">
+                          <div className="lane-title">
+                            <h4>{humanize(branch.label)}</h4>
+                            <p>
+                              {estimatorLabel(branch.estimator)}
                               {branch.retuneCount > 0 ? `, retuned ${branch.retuneCount} times` : ''}
-                            </small>
+                            </p>
                           </div>
-                          <div className="lane-steps">
-                            {layout.perCandidate.map((node) => {
-                              const status = statusOf(node.name, branch.id);
-                              const text = `${nodeLabel(node.name)} for ${branch.label}: ${CELL_LABELS[status]}`;
-                              return (
+                          {isChampion && <span className="pill signal">Champion</span>}
+                          <p className="lane-metric">
+                            {first === undefined ? 'Not scored yet' : `${metricLabel(first[0])} ${first[1].toFixed(4)}`}
+                          </p>
+                        </div>
+                        <ol className="lane-steps" aria-label={`Steps for ${humanize(branch.label)}`}>
+                          {layout.perCandidate.map((node) => {
+                            const status = statusOf(node.name, branch.id);
+                            return (
+                              <li key={node.name}>
                                 <button
                                   type="button"
-                                  key={node.name}
-                                  className={`lane-dot dot-${status}`}
+                                  className={`step-chip chip-${status}`}
                                   aria-pressed={isSelected(node.name, branch.id)}
-                                  aria-label={text}
-                                  title={text}
                                   onClick={() => toggle(node.name, branch.id)}
-                                />
-                              );
-                            })}
-                          </div>
-                          <div className="lane-metrics">
-                            {entries.length === 0
-                              ? '—'
-                              : entries.map(([key, value]) => <div key={key}>{`${key} ${value.toFixed(4)}`}</div>)}
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {selected !== null && selected.candidateId !== null && <div className="tl-detail">{detail}</div>}
-                </>
+                                >
+                                  <span className="chip-icon" aria-hidden="true" />
+                                  {nodeLabel(node.name)}
+                                  <span className="sr-only">: {CELL_LABELS[status]}</span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                        {showDetail && <div className="tl-detail">{detail}</div>}
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
           </div>
         </li>

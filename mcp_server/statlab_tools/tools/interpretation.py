@@ -5,15 +5,17 @@ diagnostics stay in node 6 (chunk 15).
 
 Same shape as the other tool modules (D22): sklearn is imported lazily inside the bodies (it pulls
 scipy, and `tools/__init__.py` imports this module at package init -- chunk 09's scipy-free
-invariant); `n_jobs=1` everywhere (D17); every summary number goes through `_frame.json_scalar`
+invariant); `n_jobs=1` except permutation repeats, which run on threads (D17 addendum 42);
+every summary number goes through `_frame.json_scalar`
 and tables/curves are strict JSON (no NaN/inf); labels and row order are never reset. The model
 knows its own `target` and `features` (D-a), so these tools take a frame without a separate target
 parameter and read the target off the model.
 
 sklearn/pandas facts this module is written against (verified under `-W error`, §1):
 - P1: `sklearn.inspection.permutation_importance(est, X, y, scoring=scorer_for(metric),
-  n_repeats, random_state=seed, n_jobs=1)` works for every metric and every model (RF, HGB,
-  calibrated), negating a `neg_*` scorer so "positive importance = relied on", one sign for all.
+  n_repeats, random_state=seed, n_jobs=parallel_jobs)` (threads, D17 addendum 42) works for every
+  metric and every model (RF, HGB, calibrated), negating a `neg_*` scorer so "positive
+  importance = relied on", one sign for all.
   The tool name shadows sklearn's function, so sklearn's is imported under an alias in the body.
 - P3: `CalibratedClassifierCV` has no `coef_`; `coefficient_importance` refuses it.
 - P4: binary `LogisticRegression.coef_` is `(1, p)` and refers to `classes_[1]`; when the
@@ -38,7 +40,7 @@ from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import Metric
 
 from statlab_tools.artifacts import load_dataframe, save_json
-from statlab_tools.registry import estimators, is_binary_only, scorer_for
+from statlab_tools.registry import estimators, is_binary_only, parallel_jobs, scorer_for
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolParamError, tool
 from statlab_tools.tools._frame import (
     as_str,
@@ -133,6 +135,7 @@ def permutation_importance(
     the encoder's levels) is the upgrade when per-source importance is wanted.
     """
     # the tool name shadows sklearn's; alias it so the body can call the real one.
+    from joblib import parallel_config
     from sklearn.inspection import permutation_importance as sk_permutation_importance
 
     fitted = load_fitted(paths, model, FittedModel, "model")
@@ -152,9 +155,11 @@ def permutation_importance(
     from sklearn.base import BaseEstimator
 
     est = cast(BaseEstimator, fitted.estimator)
-    result = sk_permutation_importance(
-        est, x, y, scoring=scorer, n_repeats=n_repeats, random_state=seed, n_jobs=1
-    )
+    jobs = parallel_jobs(fitted.name)
+    with parallel_config(backend="threading"):
+        result = sk_permutation_importance(
+            est, x, y, scoring=scorer, n_repeats=n_repeats, random_state=seed, n_jobs=jobs
+        )
     means = np.asarray(result.importances_mean, dtype="float64")
     stds = np.asarray(result.importances_std, dtype="float64")
     baseline = _baseline(est, x, y, scorer)

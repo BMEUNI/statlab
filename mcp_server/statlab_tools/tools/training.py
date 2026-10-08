@@ -1,8 +1,8 @@
 """The six training tools (`PLAN.md` §6.3's `training` phase, this chunk's `13_tools_training.md`):
 `list_estimators`, `train_estimator`, `tune_estimator`, `predict`, `predict_proba`,
 `get_model_params`. This is where D34a (tune by CV within train), D34b (calibrate on train), D34e
-(explicit seeds), D17 (`n_jobs=1`, the fit semaphore via `heavy=True`) and D36c (tuning stops at
-its budget) become code. It runs after chunk 12 in batch B1 and consumes its matrices.
+(explicit seeds), D17 (`n_jobs=1` for fits, the fit semaphore via `heavy=True`) and D36c (tuning
+stops at its budget) become code. It runs after chunk 12 in batch B1 and consumes its matrices.
 
 sklearn is untyped here (`ignore_missing_imports`), so its estimators, scorers and arrays are
 implicit dynamic values. Three rules keep that dynamic type out of this module's typed surface
@@ -22,7 +22,7 @@ rejects NaN while the forests and HistGB accept it (P2), gated by the registry's
 `make_scorer(..., zero_division=0)` or a zero-division `UndefinedMetricWarning` fails scoring under
 `-W error` (P4); fitting on a `DataFrame` then predicting on numpy emits a feature-name
 `UserWarning`, so every fit and predict is on a `float64` numpy matrix (D-note). `tune_estimator`
-reads `time.monotonic` through this module so a test can advance it (D-b); `warnings.catch_warnings`
+reads `_monotonic` through this module so a test can advance it (D-b); `warnings.catch_warnings`
 is never used -- it is process-global and bodies run in threads (D-e).
 """
 
@@ -55,6 +55,7 @@ from statlab_tools.registry import (
     greater_is_better,
     is_binary_only,
     is_negated,
+    parallel_jobs,
     scorer_for,
 )
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
@@ -469,6 +470,12 @@ def _fit(estimator: object, x: np.ndarray, y: pd.Series, task: Task) -> object:
 # --- 3.2 tune_estimator (H) ----------------------------------------------------------------------
 
 
+def _monotonic() -> float:
+    """The tuning budget clock; tests patch this function, never the global `time.monotonic`,
+    which joblib's threaded waits also read."""
+    return time.monotonic()
+
+
 @tool(phase="training", allow_in=_TRAIN_PHASES, heavy=True)
 def tune_estimator(
     paths: RunPaths,
@@ -488,7 +495,7 @@ def tune_estimator(
 
     The loop is a manual `ParameterGrid` iteration with `cross_val_score`, because a `GridSearchCV`
     call cannot stop partway (D-b). After each grid point the elapsed time (via this module's
-    `time.monotonic`, so a test can advance it) is checked against the snapshot's `max_fit_seconds`;
+    `_monotonic`, so a test can advance it) is checked against the snapshot's `max_fit_seconds`;
     when the budget is exceeded the loop stops and returns the best point so far with
     `points_evaluated < points_total` and a warning (D36c). At least one point is always evaluated.
     The splitter shuffles with the seed (D-c), and `cv_folds` comes from the snapshot (D-a).
@@ -497,8 +504,10 @@ def tune_estimator(
     `train_estimator`). Each key is validated as in `train_estimator`, each value is non-empty, and
     the grid has at most `MAX_GRID_POINTS` points. A multiclass `brier` is `tool_param` (no
     multiclass scorer). CV scores are sign-corrected to the metric's natural direction (an RMSE is
-    positive). No artifact.
+    positive). CV folds run on `jobs` threads (D17 addendum 42); results are identical to the
+    sequential loop. No artifact.
     """
+    from joblib import parallel_config
     from sklearn.model_selection import ParameterGrid, cross_val_score
 
     entry = _entry(name)
@@ -537,20 +546,20 @@ def tune_estimator(
     splitter = cv_splitter(cv_folds, entry.task, seed)
     y_arr = y.to_numpy() if entry.task == "classification" else y.to_numpy(dtype="float64")
 
+    jobs = min(cv_folds, parallel_jobs(name))
     points = list(ParameterGrid(dict(grid)))
     points_total = len(points)
     results: list[JsonValue] = []
     best_params: dict[str, ParamValue] = {}
     best_mean = -np.inf
-    started = time.monotonic()
+    started = _monotonic()
     evaluated = 0
     stopped_early = False
     for point in points:
         estimator = _set_params(entry.build(seed, class_weight), dict(point))
-        raw = np.asarray(
-            cross_val_score(estimator, x, y_arr, scoring=scorer, cv=splitter, n_jobs=1),
-            dtype="float64",
-        )
+        with parallel_config(backend="threading"):
+            scores = cross_val_score(estimator, x, y_arr, scoring=scorer, cv=splitter, n_jobs=jobs)
+        raw = np.asarray(scores, dtype="float64")
         evaluated += 1
         mean = float(raw.mean())
         std = float(raw.std())
@@ -565,7 +574,7 @@ def tune_estimator(
         if mean > best_mean:
             best_mean = mean
             best_params = {str(k): cast("ParamValue", v) for k, v in point.items()}
-        if time.monotonic() - started > budget_seconds and evaluated < points_total:
+        if _monotonic() - started > budget_seconds and evaluated < points_total:
             stopped_early = True
             break
 

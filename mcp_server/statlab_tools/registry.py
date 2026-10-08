@@ -12,7 +12,8 @@ and sklearn pulls scipy; building the registry only when a training tool actuall
 
 sklearn facts this module encodes (verified under `-W error`, the spec's §1):
 `LogisticRegression(max_iter=1000)` so it converges without a `ConvergenceWarning` (D-e, P4);
-the forests take `n_jobs=1` (D17: nothing oversubscribes the fit semaphore); `LinearRegression`
+the forests take `n_jobs=1` (D17: nothing oversubscribes the fit semaphore; tool loops use
+`parallel_jobs` threads under joblib's threading backend); `LinearRegression`
 has no `random_state` (P5), so its `build` ignores the seed; `make_scorer(..., zero_division=0)`
 on precision/recall/f1 so a zero-division `UndefinedMetricWarning` does not fail scoring (P4);
 `neg_brier_score` is binary-only, so a multiclass `brier` is refused by the caller.
@@ -20,6 +21,7 @@ on precision/recall/f1 so a zero-division `UndefinedMetricWarning` does not fail
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -204,6 +206,21 @@ _GREATER_IS_BETTER: dict[Metric, bool] = {
     "medae": False,
     "r2": True,
 }
+
+
+def fit_threads() -> int:
+    """Threads one heavy tool may use for its parallel loop (CV folds, permutation repeats); a
+    quarter of the cores so concurrent candidates do not oversubscribe badly; threads only, loky
+    processes deadlock (D17)."""
+    return max(1, (os.cpu_count() or 1) // 4)
+
+
+def parallel_jobs(name: str) -> int:
+    """`1` for histogram gradient boosting (already OpenMP-parallel on every core), else
+    `fit_threads()`."""
+    if estimators()[name].family == "hist_gradient_boosting":
+        return 1
+    return fit_threads()
 
 
 def greater_is_better(metric: Metric) -> bool:

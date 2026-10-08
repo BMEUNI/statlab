@@ -210,14 +210,16 @@ def _truth_fingerprint(truth: pd.Series) -> str:
 # --- bootstrap -------------------------------------------------------------------------------
 
 
-def _stratified_indices(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _strata(y: np.ndarray) -> list[np.ndarray]:
+    """Row indices of each true class, in `np.unique` order."""
+    return [np.flatnonzero(y == cls) for cls in np.unique(y)]
+
+
+def _stratified_indices(strata: list[np.ndarray], rng: np.random.Generator) -> np.ndarray:
     """Row indices for one classification resample, drawn **within each true class** (P2). Class
     counts are fixed, so every metric (AUC, balanced accuracy, ...) is defined in every resample
     -- a plain bootstrap can drop a rare class entirely and make AUC raise under `-W error`."""
-    parts: list[np.ndarray] = []
-    for cls in np.unique(y):
-        members = np.flatnonzero(y == cls)
-        parts.append(rng.choice(members, size=members.size, replace=True))
+    parts = [rng.choice(members, size=members.size, replace=True) for members in strata]
     return np.concatenate(parts)
 
 
@@ -246,8 +248,9 @@ def _bootstrap_cis(
     draws: dict[str, list[float]] = {name: [] for name in names}
     rng = np.random.default_rng(seed)
     n = int(y.shape[0])
+    strata = _strata(y) if stratified else None
     for _ in range(resamples):
-        idx = _stratified_indices(y, rng) if stratified else _plain_indices(n, rng)
+        idx = _stratified_indices(strata, rng) if strata is not None else _plain_indices(n, rng)
         resampled = compute(idx)
         for name in names:
             draws[name].append(float(cast(float, resampled[name])))
@@ -282,62 +285,102 @@ def hard_labels(
 ) -> np.ndarray:
     """Hard predicted labels from probabilities: argmax over classes, or for binary a
     `p(positive) >= threshold` rule when `threshold` is set (D-a)."""
-    if threshold is not None:
-        pos_idx = classes.index(positive)
-        is_pos = proba[:, pos_idx] >= threshold
-        neg = next(c for c in classes if c != positive)
-        return np.where(is_pos, positive, neg)
-    return np.asarray([classes[i] for i in np.argmax(proba, axis=1)])
+    return np.asarray(np.asarray(classes)[_hard_codes(proba, classes.index(positive), threshold)])
+
+
+# --- fast classification metrics ---
+
+
+def _class_codes(values: np.ndarray, classes: list[str]) -> np.ndarray:
+    """Position of each value in `classes` (every value is present: the caller has checked)."""
+    lookup = {c: i for i, c in enumerate(classes)}
+    return np.asarray([lookup[v] for v in values.tolist()], dtype=np.intp)
+
+
+def _hard_codes(proba: np.ndarray, pos_idx: int, threshold: float | None) -> np.ndarray:
+    """Hard class codes: argmax, or for binary `p(positive) >= threshold`."""
+    if threshold is None:
+        return np.argmax(proba, axis=1)
+    return np.where(proba[:, pos_idx] >= threshold, pos_idx, 1 - pos_idx)
+
+
+def _binary_auc(scores: np.ndarray, is_pos: np.ndarray) -> float:
+    """ROC AUC by the rank-sum (Mann-Whitney) identity; average ranks for ties."""
+    n_pos = int(is_pos.sum())
+    n_neg = is_pos.size - n_pos
+    if n_pos == 0 or n_neg == 0:
+        raise ToolDataError("roc_auc is undefined: the truth has only one class")
+    order = np.argsort(scores, kind="mergesort")
+    s = scores[order]
+    starts = np.r_[0, np.flatnonzero(np.diff(s)) + 1]
+    ends = np.r_[starts[1:], s.size]
+    ranks = np.empty(s.size, dtype=np.float64)
+    ranks[order] = np.repeat((starts + ends + 1) / 2.0, ends - starts)
+    return float((ranks[is_pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def _binary_ap(scores: np.ndarray, is_pos: np.ndarray) -> float:
+    """Step-wise average precision (sklearn's definition)."""
+    if int(is_pos.sum()) == 0:
+        raise ToolDataError("pr_auc is undefined: the truth has no positive rows")
+    order = np.argsort(scores, kind="mergesort")[::-1]
+    s = scores[order]
+    y = is_pos[order].astype(np.float64)
+    threshold_idx = np.r_[np.flatnonzero(np.diff(s)), y.size - 1]
+    tps = np.cumsum(y)[threshold_idx]
+    fps = threshold_idx + 1 - tps
+    precision = tps / (tps + fps)
+    recall = tps / tps[-1]
+    return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
 
 
 def _classification_metrics(
-    y_true: np.ndarray,
+    codes: np.ndarray,
     proba: np.ndarray,
-    y_pred: np.ndarray,
-    classes: list[str],
-    positive: str,
+    pred: np.ndarray,
+    pos_idx: int,
     average: str,
 ) -> dict[str, object]:
-    """Every `ClassificationMetric`, computed with sklearn as the oracle. Binary metrics use the
-    positive column; multiclass uses macro one-vs-rest (D-a, P3). precision/recall/f1 take
-    `zero_division=0` (fatal warning otherwise). All inputs are plain numpy over string labels."""
-    from sklearn.metrics import (
-        accuracy_score,
-        average_precision_score,
-        balanced_accuracy_score,
-        brier_score_loss,
-        f1_score,
-        log_loss,
-        precision_score,
-        recall_score,
-        roc_auc_score,
-    )
-
-    binary = len(classes) == 2
-    pos_idx = classes.index(positive)
+    """Every `ClassificationMetric`, numpy implementation (sklearn is the test oracle). Same
+    definitions as before: zero_division=0, macro one-vs-rest, clipped log loss. Class columns
+    are positional (the `proba__` order)."""
+    k = proba.shape[1]
+    n = codes.size
+    support = np.bincount(codes, minlength=k).astype(np.float64)
+    predicted = np.bincount(pred, minlength=k).astype(np.float64)
+    tp = np.bincount(codes[codes == pred], minlength=k).astype(np.float64)
+    recall_c = np.divide(tp, support, out=np.zeros(k), where=support > 0)
+    precision_c = np.divide(tp, predicted, out=np.zeros(k), where=predicted > 0)
+    den = support + predicted
+    f1_c = np.divide(2 * tp, den, out=np.zeros(k), where=den > 0)
+    eps = np.finfo(np.float64).eps
     out: dict[str, object] = {
-        "accuracy": accuracy_score(y_true, y_pred),
-        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
-        "log_loss": log_loss(y_true, proba, labels=classes),
+        "accuracy": float(np.mean(codes == pred)),
+        "balanced_accuracy": float(np.mean(recall_c[support > 0])),
+        "log_loss": float(-np.mean(np.log(np.clip(proba[np.arange(n), codes], eps, 1 - eps)))),
     }
-    if binary:
-        out["precision"] = precision_score(y_true, y_pred, pos_label=positive, zero_division=0)
-        out["recall"] = recall_score(y_true, y_pred, pos_label=positive, zero_division=0)
-        out["f1"] = f1_score(y_true, y_pred, pos_label=positive, zero_division=0)
-        out["roc_auc"] = roc_auc_score((y_true == positive).astype(int), proba[:, pos_idx])
-        out["pr_auc"] = average_precision_score((y_true == positive).astype(int), proba[:, pos_idx])
-        out["brier"] = brier_score_loss((y_true == positive).astype(int), proba[:, pos_idx])
+    if k == 2:
+        is_pos = codes == pos_idx
+        s = proba[:, pos_idx]
+        out["precision"] = float(precision_c[pos_idx])
+        out["recall"] = float(recall_c[pos_idx])
+        out["f1"] = float(f1_c[pos_idx])
+        out["roc_auc"] = _binary_auc(s, is_pos)
+        out["pr_auc"] = _binary_ap(s, is_pos)
+        out["brier"] = float(np.mean((is_pos - s) ** 2))
     else:
-        out["precision"] = precision_score(
-            y_true, y_pred, average=average, labels=classes, zero_division=0
-        )
-        out["recall"] = recall_score(
-            y_true, y_pred, average=average, labels=classes, zero_division=0
-        )
-        out["f1"] = f1_score(y_true, y_pred, average=average, labels=classes, zero_division=0)
-        one_hot = np.asarray([[1 if str(t) == c else 0 for c in classes] for t in y_true])
-        out["roc_auc"] = roc_auc_score(y_true, proba, multi_class="ovr", average="macro")
-        out["pr_auc"] = average_precision_score(one_hot, proba, average="macro")
+        if average == "macro":
+            out["precision"] = float(np.mean(precision_c))
+            out["recall"] = float(np.mean(recall_c))
+            out["f1"] = float(np.mean(f1_c))
+        else:
+            total = support.sum()
+            out["precision"] = float(np.sum(support * precision_c) / total)
+            out["recall"] = float(np.sum(support * recall_c) / total)
+            out["f1"] = float(np.sum(support * f1_c) / total)
+        out["roc_auc"] = float(np.mean([_binary_auc(proba[:, c], codes == c) for c in range(k)]))
+        out["pr_auc"] = float(np.mean([_binary_ap(proba[:, c], codes == c) for c in range(k)]))
+        one_hot = codes[:, None] == np.arange(k)[None, :]
         out["brier"] = float(np.mean(np.sum((proba - one_hot) ** 2, axis=1)))
     return out
 
@@ -366,10 +409,11 @@ def score_classification(
     or a truth class with no probability column, is `tool_param`. The positive class is the
     snapshot's `target.positive_class` by string form, else the last column (D-c).
 
-    All nine `ClassificationMetric` values are computed with sklearn as the oracle. The point
-    estimate is on the full data; the 95 % CI is a percentile interval over a **stratified**
-    bootstrap (P2: resampling within each true class keeps every metric defined). `threshold` is
-    binary only -- a value on a multiclass target is `tool_param`. Written as a `table` artifact
+    All nine `ClassificationMetric` values are computed with numpy (sklearn is the test
+    oracle). The point estimate is on the full data; the 95 % CI is a percentile interval over a
+    **stratified** bootstrap (P2: resampling within each true class keeps every metric
+    defined). `threshold` is binary only -- a value on a multiclass target is `tool_param`.
+    Written as a `table` artifact
     (D-d) carrying the metrics, `n_rows`, `task`, `positive_class` and a `truth_fingerprint`.
     """
     preds = load_dataframe(paths.artifact(probabilities, "predictions"))
@@ -387,15 +431,14 @@ def score_classification(
     positive, source = _positive_class(snapshot(paths), classes)
     y_true = as_str(aligned.truth).to_numpy()
     proba = aligned.frame[proba_cols].to_numpy(dtype="float64")
-    y_pred = hard_labels(proba, classes, positive, threshold)
+    pos_idx = classes.index(positive)
+    codes = _class_codes(y_true, classes)
+    pred = _hard_codes(proba, pos_idx, threshold)
 
-    full = _classification_metrics(y_true, proba, y_pred, classes, positive, average)
+    full = _classification_metrics(codes, proba, pred, pos_idx, average)
 
     def compute(idx: np.ndarray) -> dict[str, object]:
-        yt = y_true[idx]
-        pr = proba[idx]
-        yp = hard_labels(pr, classes, positive, threshold)
-        return _classification_metrics(yt, pr, yp, classes, positive, average)
+        return _classification_metrics(codes[idx], proba[idx], pred[idx], pos_idx, average)
 
     resamples = BOOTSTRAP_RESAMPLES
     metrics = _bootstrap_cis(

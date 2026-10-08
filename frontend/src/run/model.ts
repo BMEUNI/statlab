@@ -1,4 +1,5 @@
 import { isJsonObject, publicCandidateId } from '../api/client.ts';
+import { fieldsOf } from '../contract/schema.ts';
 import type {
   ExecutionRecord,
   GateAction,
@@ -34,9 +35,49 @@ export const ACTION_LABELS: Record<GateAction, string> = {
   abort: 'Stop the run',
 };
 
-export function nodeLabel(name: string): string {
-  const spaced = name.replaceAll('_', ' ');
+export function humanize(text: string): string {
+  const spaced = text.replaceAll('_', ' ').replace(/ +/g, ' ').trim();
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+export function nodeLabel(name: string): string {
+  return humanize(name);
+}
+
+export const ESTIMATOR_LABELS: Record<string, string> = {
+  logistic_regression: 'Logistic regression',
+  random_forest_classifier: 'Random forest',
+  hist_gb_classifier: 'Gradient boosting',
+  linear_regression: 'Linear regression',
+  ridge: 'Ridge regression',
+  random_forest_regressor: 'Random forest',
+  hist_gb_regressor: 'Gradient boosting',
+};
+
+export function estimatorLabel(name: string | null): string {
+  if (name === null) return 'Model';
+  return ESTIMATOR_LABELS[name] ?? humanize(name);
+}
+
+export const METRIC_LABELS: Record<string, string> = {
+  accuracy: 'Accuracy',
+  balanced_accuracy: 'Balanced accuracy',
+  precision: 'Precision',
+  recall: 'Recall',
+  f1: 'F1',
+  roc_auc: 'ROC AUC',
+  pr_auc: 'PR AUC',
+  brier: 'Brier score',
+  log_loss: 'Log loss',
+  rmse: 'RMSE',
+  mae: 'MAE',
+  r2: 'R²',
+  medae: 'Median absolute error',
+  mape: 'MAPE',
+};
+
+export function metricLabel(name: string): string {
+  return METRIC_LABELS[name] ?? humanize(name);
 }
 
 function isAction(value: unknown): value is GateAction {
@@ -268,6 +309,27 @@ export function gateEdits(proposal: JsonObject, draft: JsonObject, editable: str
   return edits;
 }
 
+export function gateFieldSplit(question: GateQuestion): { main: string[]; rest: string[] } {
+  const fields = fieldsOf(question.decisionSchema, null);
+  const editable = new Set(question.editable);
+  const requiredList = question.decisionSchema.required;
+  const required = new Set(Array.isArray(requiredList) ? requiredList.filter((item): item is string => typeof item === 'string') : []);
+  const usable = fields.filter((field) => editable.has(field.key) && field.key !== 'user_summary');
+  const isSet = (key: string, defaultValue: JsonValue | undefined): boolean => {
+    const value = question.proposal[key];
+    if (value === undefined || value === null) return false;
+    if (Array.isArray(value) && value.length === 0) return false;
+    if (isJsonObject(value) && Object.keys(value).length === 0) return false;
+    if (typeof value === 'string' && value.trim() === '') return false;
+    return JSON.stringify(value) !== JSON.stringify(defaultValue);
+  };
+  const main = usable
+    .filter((field) => field.key !== 'rationale' && (required.has(field.key) || isSet(field.key, field.defaultValue)))
+    .slice(0, 6)
+    .map((field) => field.key);
+  return { main, rest: usable.map((field) => field.key).filter((key) => !main.includes(key)) };
+}
+
 export function availableActions(question: GateQuestion, skippable: boolean): GateAction[] {
   return GATE_ACTIONS.filter((action) => {
     if (!question.options.includes(action)) return false;
@@ -282,8 +344,42 @@ export type FeedItem =
   | { kind: 'assistant'; seq: number; ts: string; replyTo: string; text: string; category: string | null; newRunId: string | null }
   | { kind: 'error'; seq: number; ts: string; replyTo: string; text: string }
   | { kind: 'activity'; seq: number; ts: string; text: string }
+  | {
+      kind: 'step';
+      seq: number;
+      ts: string;
+      node: string;
+      candidateId: string | null;
+      status: 'completed' | 'failed' | 'skipped';
+      text: string;
+    }
   | { kind: 'fork'; seq: number; ts: string; newRunId: string };
 export type RunFeed = { items: FeedItem[]; drafts: Record<string, string> };
+
+export function firstSentences(text: string, n: number): string {
+  return text.trim().split(/(?<=[.!?])\s+/).slice(0, n).join(' ');
+}
+
+export function narrate(
+  summary: JsonObject,
+  status: string,
+  skipReason: string | null,
+  errorMessage: string | null,
+): string {
+  if (status === 'failed') return errorMessage ? `It failed: ${errorMessage}` : 'It failed.';
+  if (status === 'skipped') return skipReason ? `Skipped: ${skipReason}` : 'Skipped.';
+  const { decision } = summary;
+  if (isJsonObject(decision)) {
+    const { user_summary: userSummary, rationale } = decision;
+    if (typeof userSummary === 'string' && userSummary.trim() !== '') return userSummary.trim();
+    if (typeof rationale === 'string' && rationale.trim() !== '') return firstSentences(rationale, 2);
+  }
+  return 'Done.';
+}
+
+export function narrateOutcome(outcome: NodeOutcome): string {
+  return narrate(outcome.summary, outcome.status, outcome.skipReason, outcome.error?.message ?? null);
+}
 
 function where(node: string, candidate: JsonValue | undefined): string {
   return typeof candidate === 'string' ? `${nodeLabel(node)} (${candidate})` : nodeLabel(node);
@@ -334,6 +430,28 @@ export function foldEvents(events: RunEvent[]): RunFeed {
       case 'node.failed':
         if (typeof p.node === 'string') {
           items.push({ ...base, kind: 'activity', text: `${where(p.node, p.candidate_id)} ${event.type.slice(5)}` });
+          if (event.type !== 'node.started') {
+            const candidate = typeof p.candidate_id === 'string' ? publicCandidateId(p.candidate_id) : null;
+            const result = isJsonObject(p.result) ? p.result : {};
+            if (candidate === null || event.type === 'node.failed' ||
+              (event.type === 'node.completed' && p.node === 'model_evaluation')) {
+              const status = event.type.slice(5) as 'completed' | 'failed' | 'skipped';
+              const error = isJsonObject(result.error) ? result.error : {};
+              items.push({
+                ...base,
+                kind: 'step',
+                node: p.node,
+                candidateId: candidate,
+                status,
+                text: narrate(
+                  isJsonObject(result.summary) ? result.summary : {},
+                  status,
+                  typeof result.skip_reason === 'string' ? result.skip_reason : null,
+                  typeof error.message === 'string' ? error.message : null,
+                ),
+              });
+            }
+          }
         }
         break;
       case 'gate.opened': {

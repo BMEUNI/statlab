@@ -7,7 +7,7 @@ const schema: JsonObject = {
   properties: {
     version: { const: 1, type: 'integer' },
     target: { $ref: '#/$defs/Target' },
-    notes: { type: 'string', title: 'Notes' },
+    notes: { type: 'string', title: 'Notes', description: 'Free text.' },
   },
   $defs: {
     Target: {
@@ -28,10 +28,10 @@ const schema: JsonObject = {
 
 test('fieldsOf classifies root and definition properties', () => {
   assert.deepEqual(fieldsOf(schema, null), [
-    { key: 'target', title: 'target', kind: 'object', nullable: false, options: [], defaultValue: undefined, ref: 'Target' },
-    { key: 'notes', title: 'Notes', kind: 'string', nullable: false, options: [], defaultValue: undefined, ref: null },
+    { key: 'target', title: 'target', description: null, kind: 'object', nullable: false, options: [], defaultValue: undefined, ref: 'Target' },
+    { key: 'notes', title: 'Notes', description: 'Free text.', kind: 'string', nullable: false, options: [], defaultValue: undefined, ref: null },
   ]);
-  const base = { title: '', nullable: false, options: [], defaultValue: undefined, ref: null };
+  const base = { title: '', description: null, nullable: false, options: [], defaultValue: undefined, ref: null };
   const expected = [
     { ...base, key: 'task', kind: 'enum', nullable: true, options: ['a', 'b'] },
     { ...base, key: 'metric', kind: 'enum', options: ['m1', 'm2', 'm3'] },

@@ -26,7 +26,14 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: paid ONLINE runtime run (needs fresh explicit user go-ahead)
+## Next: chunk 43 (cheaper runs + UI polish), then paid run
+
+Chunk 42 accepted 2026-10-08 ([spec + receipt](./42_speed_chat_redesign.md)). Chunk 43 per user
+asks after the first paid run ($0.32): prompt digest + prefix caching, skip LLM on fixed steps,
+ordered stepper, lucide icons, size-safe layout, mode/fit-time labels. Guided-gate browser review
+from 42 runs at 43 acceptance.
+
+## Earlier: paid ONLINE runtime run (needs fresh explicit user go-ahead)
 
 B15–B17 accepted 2026-10-08 (frontend 36b–41). The main screen is now a chat (`#/`): an LLM
 setup assistant (`POST /api/assistant/turn`, role `setup_assistant` on the default model) asks

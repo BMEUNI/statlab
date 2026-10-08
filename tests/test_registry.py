@@ -7,8 +7,18 @@ the seed into every estimator that has `random_state`, and that every forest is 
 
 from __future__ import annotations
 
+import os
+
+import pytest
 from statlab_contracts.vocabulary import TUNABLE_PARAMS, tunable_param_errors
-from statlab_tools.registry import estimators, greater_is_better, is_binary_only, scorer_for
+from statlab_tools.registry import (
+    estimators,
+    fit_threads,
+    greater_is_better,
+    is_binary_only,
+    parallel_jobs,
+    scorer_for,
+)
 
 
 def _params(estimator: object) -> dict[str, object]:
@@ -136,3 +146,17 @@ def test_greater_is_better_direction() -> None:
 def test_brier_is_binary_only() -> None:
     assert is_binary_only("brier") is True
     assert is_binary_only("roc_auc") is False
+
+
+@pytest.mark.parametrize(("cores", "expected"), [(16, 4), (2, 1), (None, 1)])
+def test_fit_threads_is_a_quarter_of_the_cores(
+    monkeypatch: pytest.MonkeyPatch, cores: int | None, expected: int
+) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: cores)
+    assert fit_threads() == expected
+
+
+def test_parallel_jobs_keeps_hist_gb_single_and_threads_the_rest() -> None:
+    assert parallel_jobs("hist_gb_classifier") == 1
+    assert parallel_jobs("hist_gb_regressor") == 1
+    assert parallel_jobs("random_forest_classifier") == fit_threads()

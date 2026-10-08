@@ -336,6 +336,8 @@ async def test_gate_revision_uses_captured_memory_and_exact_anchor(
         assert state.status == "awaiting_user"
         gate = next(row for row in list_gates(migrated_db, run.id) if row.status == "pending")
         question = GateQuestion.model_validate(gate.question())
+        assert "user_summary" not in question.editable
+        assert "rationale" in question.editable
         remember(
             migrated_db,
             project_id=project.id,

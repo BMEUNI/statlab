@@ -159,6 +159,52 @@ def test_permutation_equals_sklearn_oracle(run_paths: RunPaths) -> None:
     )
 
 
+def test_permutation_repeats_run_on_threads(
+    run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D17 addendum 42: the repeats run on joblib's threading backend with `parallel_jobs`
+    threads, and the numbers equal the sequential (`n_jobs=1`) oracle."""
+    import joblib.parallel
+    import sklearn.inspection as insp
+    import statlab_tools.tools.interpretation as interp
+    from statlab_tools.registry import scorer_for
+    from statlab_tools.tools.training import predict_matrix
+
+    frame = _regression_frame(noise=0.01)
+    ref = _save(run_paths, frame)
+    model = _fit(run_paths, frame, "linear_regression")
+    fitted = _loaded_model(run_paths, model)
+    x = predict_matrix(frame, fitted)
+    oracle = insp.permutation_importance(
+        fitted.estimator,
+        x,
+        frame["y"].to_numpy(dtype="float64"),
+        scoring=scorer_for("r2", multiclass=False),
+        n_repeats=5,
+        random_state=42,
+        n_jobs=1,
+    )
+
+    real = insp.permutation_importance
+    seen: list[tuple[object, str]] = []
+
+    def spy(*args: object, **kwargs: object) -> object:
+        backend = type(joblib.parallel.get_active_backend()[0]).__name__
+        seen.append((kwargs.get("n_jobs"), backend))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(insp, "permutation_importance", spy)
+    monkeypatch.setattr(interp, "parallel_jobs", lambda name: 3)
+    res = permutation_importance(run_paths, model, ref, metric="r2", seed=42, n_repeats=5)
+    assert seen == [(3, "ThreadingBackend")]
+    table = {str(_d(r)["feature"]): _d(r) for r in _l(_table(run_paths, res)["features"])}
+    assert np.allclose(
+        [_f(table["x1"]["importance_mean"]), _f(table["x2"]["importance_mean"])],
+        oracle.importances_mean,
+        atol=1e-12,
+    )
+
+
 def test_permutation_informative_ranks_first(run_paths: RunPaths) -> None:
     frame = _informative_noise_frame()
     ref = _save(run_paths, frame)

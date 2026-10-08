@@ -28,6 +28,16 @@ MetricRule = Literal["explicit", "classification_auto", "regression_auto", "over
 class Decision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     rationale: str = Field(min_length=1)
+    user_summary: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=600,
+        description=(
+            "Always fill this: one to three short plain-language sentences for the user's"
+            " chat saying what you did at this step and what you found. Name the columns"
+            " and numbers that matter. No internal ids, no jargon, no markdown."
+        ),
+    )
 
 
 class ChampionChoice(Decision):

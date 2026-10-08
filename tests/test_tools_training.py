@@ -2,7 +2,7 @@
 
 Frames are small and hand-built (150-300 rows); slow fits override `n_estimators` through
 `params`. The heart of the suite is the three tests the spec names as most likely to pass by
-construction: the budget stop monkeypatches `training.time.monotonic` to advance (not a real slow
+construction: the budget stop monkeypatches `training._monotonic` to advance (not a real slow
 grid) and asserts one point is evaluated while an un-advanced clock evaluates all; the shuffle
 test uses a TARGET-SORTED train so an unshuffled splitter would change results; the calibration
 test asserts probabilities DIFFER from the uncalibrated fit.
@@ -459,7 +459,7 @@ def test_budget_stops_after_one_point_when_clock_advances(
         state["t"] += 10_000.0
         return state["t"]
 
-    monkeypatch.setattr("statlab_tools.tools.training.time.monotonic", advancing)
+    monkeypatch.setattr("statlab_tools.tools.training._monotonic", advancing)
     res = tune_estimator(
         run_paths, ref, target="y", name="logistic_regression", metric="roc_auc", seed=1
     )
@@ -477,7 +477,7 @@ def test_budget_evaluates_every_point_when_clock_frozen(
 ) -> None:
     frame = _separable_binary()
     ref = _save(run_paths, frame)
-    monkeypatch.setattr("statlab_tools.tools.training.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr("statlab_tools.tools.training._monotonic", lambda: 100.0)
     res = tune_estimator(
         run_paths, ref, target="y", name="logistic_regression", metric="roc_auc", seed=1
     )
@@ -781,25 +781,47 @@ def test_predict_is_independent_of_frame_column_order(run_paths: RunPaths) -> No
     pd.testing.assert_frame_equal(straight, swapped)
 
 
-def test_tuning_cv_is_single_threaded(run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D17: nothing inside a tool body may spawn workers. `n_jobs=-1` in the tuning CV deadlocked
-    the test run when this chunk was first implemented (loky workers started from a tool-body
-    thread). The body imports `cross_val_score` at call time, so patching the module attribute
-    intercepts every call."""
+def test_tuning_cv_runs_folds_on_threads(
+    run_paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D17: no loky workers inside a tool body. `n_jobs=-1` in the tuning CV deadlocked the test
+    run when this chunk was first implemented (loky workers started from a tool-body thread).
+    Threads are the allowed path (D17 addendum 42): the folds run on joblib's threading backend.
+    The body imports `cross_val_score` at call time, so patching the module attribute intercepts
+    every call."""
+    import joblib.parallel
     import sklearn.model_selection as ms
+    import statlab_tools.tools.training as training
 
     real = ms.cross_val_score
-    seen: list[object] = []
+    seen: list[tuple[object, str]] = []
 
     def spy(*args: object, **kwargs: object) -> object:
-        seen.append(kwargs.get("n_jobs"))
+        backend = type(joblib.parallel.get_active_backend()[0]).__name__
+        seen.append((kwargs.get("n_jobs"), backend))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ms, "cross_val_score", spy)
+    monkeypatch.setattr(
+        training, "parallel_jobs", lambda name: 1 if name.startswith("hist_gb") else 3
+    )
     ref = _save(run_paths, _separable_binary())
     tune_estimator(run_paths, ref, target="y", name="logistic_regression", metric="roc_auc", seed=1)
     assert seen
-    assert set(seen) == {1}
+    assert set(seen) == {(3, "ThreadingBackend")}
+
+    seen.clear()
+    tune_estimator(
+        run_paths,
+        ref,
+        target="y",
+        name="hist_gb_classifier",
+        metric="roc_auc",
+        seed=1,
+        param_grid={"learning_rate": (0.1,)},
+    )
+    assert seen
+    assert {n_jobs for n_jobs, _ in seen} == {1}
 
 
 def test_tune_best_params_is_the_argmax_of_results(run_paths: RunPaths) -> None:

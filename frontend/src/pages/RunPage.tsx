@@ -8,7 +8,8 @@ import CandidateTable from '../run/CandidateTable.tsx';
 import { candidateRows } from '../run/compare.ts';
 import RunChat from '../chat/RunChat.tsx';
 import GatePanel from '../run/GatePanel.tsx';
-import { foldEvents, parseGateQuestion, parseRunView } from '../run/model.ts';
+import { champion } from '../report/champion.ts';
+import { foldEvents, humanize, parseGateQuestion, parseRunView } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
 import ReportView from '../report/ReportView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
@@ -44,6 +45,9 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   if (data.run.id !== runId) return <p>Loading run…</p>;
 
   const view = parseRunView(data.state);
+  const top = view === null ? null : champion(view);
+  const championId = top === null ? null : top.candidateId;
+  const championLabel = top === null ? null : humanize(top.label);
   const pending = data.gates
     .filter((gate) => gate.status === 'pending')
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
@@ -64,7 +68,18 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
           {pending.length > 0 ? `Progress (${pending.length} waiting)` : 'Progress'}
         </button>
       </div>
-      <RunChat runId={runId} feed={feed} waiting={pending.length} navigate={navigate} />
+      <RunChat
+        runId={runId}
+        feed={feed}
+        view={view}
+        status={data.run.status}
+        mode={data.run.mode}
+        pending={pending}
+        navigate={navigate}
+        onStep={(step) => { setSelected(step); setTab('progress'); setPane('side'); }}
+        onShowGate={() => setPane('side')}
+        onTab={(next) => { setTab(next); setPane('side'); }}
+      />
       <aside className="side-pane" aria-label="Run progress">
         <RunHeader
           run={data.run}
@@ -72,6 +87,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
           costUsd={executions.data?.costUsd ?? null}
           streamStatus={stream.status}
           navigate={navigate}
+          championLabel={championLabel}
         />
         {data.execution_failed && (
           <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
@@ -121,6 +137,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                     executions={executions.data?.executions ?? []}
                     pending={pending.flatMap(({ question }) => (question === null ? [] : [question]))}
                     selected={selected}
+                    championId={championId}
                     onSelect={setSelected}
                     detail={selected === null
                       ? null

@@ -7,6 +7,7 @@ export type FieldKind =
 export type FieldSpec = {
   key: string;
   title: string;
+  description: string | null;
   kind: FieldKind;
   nullable: boolean;
   options: string[];
@@ -82,7 +83,8 @@ export function classify(member: JsonObject): Classified {
 
 function fieldOf(key: string, property: JsonObject): FieldSpec {
   const title = typeof property.title === 'string' ? property.title : key;
-  const base = { key, title, defaultValue: property.default };
+  const description = typeof property.description === 'string' && property.description.trim() !== '' ? property.description : null;
+  const base = { key, title, description, defaultValue: property.default };
   if (!Array.isArray(property.anyOf)) return { ...base, nullable: false, ...classify(property) };
   const members = property.anyOf.filter(isJsonObject);
   const isNull = (member: JsonObject): boolean => member.type === 'null';

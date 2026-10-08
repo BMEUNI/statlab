@@ -9,7 +9,9 @@ import DecisionView from './DecisionView.tsx';
 import {
   availableActions,
   EMPTY_VOCABULARY,
+  firstSentences,
   gateEdits,
+  gateFieldSplit,
   nodeLabel,
   PHASE_LABELS,
   type SpineNode,
@@ -39,6 +41,7 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
   const edits = gateEdits(question.proposal, draft, question.editable);
   const hasEdits = Object.keys(edits).length > 0;
   const editable = actions.includes('approve_with_edits');
+  const { main, rest } = gateFieldSplit(question);
 
   const refresh = () =>
     Promise.all([
@@ -83,45 +86,59 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
   return (
     <article className="panel gate" aria-labelledby={`gate-${gate.id}`}>
       <h3 id={`gate-${gate.id}`}>
-        {`Decision at ${nodeLabel(question.node)}`}{question.candidateId === null ? '' : ` for ${question.candidateId}`}{' '}
+        {`Your decision: ${nodeLabel(question.node)}`}{question.candidateId === null ? '' : ` for ${question.candidateId}`}{' '}
         <span className="pill gate">{PHASE_LABELS[question.phase]}</span>
       </h3>
-      <p className="reasoning">{question.reasoning}</p>
+      <p className="gate-lead">
+        {question.phase === 'before'
+          ? "I'm about to run this step. Here is my plan."
+          : question.phase === 'after'
+            ? 'This step has finished. Please check the result.'
+            : `This step failed: ${question.failure?.message ?? 'unknown error'}`}
+      </p>
       {question.failure !== null && <p role="alert">{question.failure.message}</p>}
-      {question.context.length > 0 && (
-        <details>
-          <summary>Context</summary>
-          <ul>{question.context.map((line, index) => <li key={index}>{line}</li>)}</ul>
-        </details>
+      {question.reasoning.trim() !== '' && (
+        <>
+          <p>{firstSentences(question.reasoning, 3)}</p>
+          {firstSentences(question.reasoning, 3) !== question.reasoning.trim() && (
+            <details>
+              <summary>Read the full reasoning</summary>
+              <p className="reasoning">{question.reasoning}</p>
+            </details>
+          )}
+        </>
       )}
-      {question.evidence.length > 0 && (
-        <details>
-          <summary>{`Evidence the agent used (${question.evidence.length})`}</summary>
-          <pre className="json-view">{JSON.stringify(question.evidence, null, 2)}</pre>
-        </details>
-      )}
-      {question.history.length > 0 && (
-        <details>
-          <summary>{`Earlier proposals (${question.history.length})`}</summary>
-          <pre className="json-view">{JSON.stringify(question.history, null, 2)}</pre>
-        </details>
-      )}
-      <fieldset>
-        <legend>{editable ? 'Proposal (you can edit it)' : 'Proposal'}</legend>
-        {editable
-          ? (
-            <SchemaForm
-              schema={question.decisionSchema}
-              defName={null}
-              path={[]}
-              draft={draft}
-              onDraft={setDraft}
-              columns={[]}
-              vocabulary={EMPTY_VOCABULARY}
-            />
-          )
-          : <DecisionView value={question.proposal} />}
-      </fieldset>
+      {editable
+        ? (
+          <>
+            <fieldset className="gate-main">
+              <legend>Main settings</legend>
+              {main.length > 0
+                ? (
+                  <SchemaForm
+                    schema={question.decisionSchema} defName={null} path={[]} draft={draft} onDraft={setDraft}
+                    columns={[]} vocabulary={EMPTY_VOCABULARY} only={main}
+                  />
+                )
+                : <p className="help">The agent kept every setting at its default.</p>}
+            </fieldset>
+            {rest.length > 0 && (
+              <details className="all-settings">
+                <summary>{`All settings (${rest.length} more)`}</summary>
+                <SchemaForm
+                  schema={question.decisionSchema} defName={null} path={[]} draft={draft} onDraft={setDraft}
+                  columns={[]} vocabulary={EMPTY_VOCABULARY} only={rest}
+                />
+              </details>
+            )}
+          </>
+        )
+        : (
+          <fieldset>
+            <legend>Proposal</legend>
+            <DecisionView value={question.proposal} />
+          </fieldset>
+        )}
       {issues.length > 0 && (
         <div role="alert">
           <p>Fix these before approving:</p>
@@ -158,6 +175,26 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
         )}
       </div>
       {hasEdits && actions.includes('approve_all_remaining') && <p className="help">Approve or discard your edits first.</p>}
+      <details className="gate-more">
+        <summary>Other options</summary>
+      {question.context.length > 0 && (
+        <details>
+          <summary>Context</summary>
+          <ul>{question.context.map((line, index) => <li key={index}>{line}</li>)}</ul>
+        </details>
+      )}
+      {question.evidence.length > 0 && (
+        <details>
+          <summary>{`Evidence the agent used (${question.evidence.length})`}</summary>
+          <pre className="json-view">{JSON.stringify(question.evidence, null, 2)}</pre>
+        </details>
+      )}
+      {question.history.length > 0 && (
+        <details>
+          <summary>{`Earlier proposals (${question.history.length})`}</summary>
+          <pre className="json-view">{JSON.stringify(question.history, null, 2)}</pre>
+        </details>
+      )}
       {actions.includes('instruct') && (
         <details>
           <summary>Ask for a revision</summary>
@@ -211,6 +248,7 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
           >Stop the run</button>
         </div>
       )}
+      </details>
       {mutation.isError && (
         <div role="alert">
           <p>{errorText(mutation.error)}</p>

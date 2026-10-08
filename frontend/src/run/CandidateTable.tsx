@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { estimatorLabel, metricLabel } from './model.ts';
 import { defaultSort, formatMetric, metricColumns, sortRows, type CandidateRow, type SortKey } from './compare.ts';
 
 type Header = { metric: string | null; text: string; primary: boolean };
@@ -20,13 +21,13 @@ export default function CandidateTable({ rows }: { rows: CandidateRow[] }) {
 
   const headers: Header[] = [
     { metric: null, text: 'Rank', primary: false },
-    ...columns.map((name) => ({ metric: name, text: name, primary: name === primary })),
+    ...columns.map((name) => ({ metric: name, text: metricLabel(name), primary: name === primary })),
   ];
   function sortable(header: Header) {
     const active = sort.metric === header.metric;
     const ariaSort = active ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none';
     return (
-      <th scope="col" key={header.text} aria-sort={ariaSort}>
+      <th scope="col" key={header.metric ?? header.text} aria-sort={ariaSort}>
         <button type="button" className="cell-link" onClick={() => choose(header.metric)}>{header.text}</button>
         {header.primary && <small className="help">primary</small>}
       </th>
@@ -61,7 +62,7 @@ export default function CandidateTable({ rows }: { rows: CandidateRow[] }) {
                   {row.champion && <> <span className="pill signal">Champion</span></>}
                   <small className="help">{row.id}</small>
                 </td>
-                <td>{row.estimator ?? '—'}</td>
+                <td>{row.estimator === null ? '—' : estimatorLabel(row.estimator)}</td>
                 <td>{row.isBaseline ? 'Baseline' : row.varies.join(', ') || '—'}</td>
                 <td>{row.status}</td>
                 {columns.map((name) => {

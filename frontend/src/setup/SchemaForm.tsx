@@ -4,6 +4,7 @@ import { isJsonObject } from '../api/client.ts';
 import { getAt, setAt, unsetAt, type Path } from '../contract/draft.ts';
 import { fieldsOf, type FieldSpec } from '../contract/schema.ts';
 import { pathKey } from '../ui/format.ts';
+import { humanize } from '../run/model.ts';
 
 type FormProps = {
   schema: JsonObject;
@@ -13,6 +14,7 @@ type FormProps = {
   onDraft: (draft: JsonObject) => void;
   columns: string[];
   vocabulary: Vocabulary;
+  only?: string[];
 };
 type Parsed = { ok: true; value: JsonValue | undefined } | { ok: false; error: string };
 type Option = { value: string; label: string };
@@ -43,13 +45,13 @@ function TextControl(props: {
     <>
       {props.multiline ? (
         <textarea
-          id={props.id} rows={4} value={text} placeholder={props.placeholder} aria-describedby={props.describedBy}
+          id={props.id} rows={4} value={text} placeholder={props.placeholder} aria-describedby={props.describedBy === '' ? undefined : props.describedBy}
           onChange={(event) => setText(event.target.value)} onBlur={commit}
         />
       ) : (
         <input
           id={props.id} type={props.inputType} {...(props.step === null ? {} : { step: props.step })}
-          value={text} placeholder={props.placeholder} aria-describedby={props.describedBy}
+          value={text} placeholder={props.placeholder} aria-describedby={props.describedBy === '' ? undefined : props.describedBy}
           onChange={(event) => setText(event.target.value)} onBlur={commit}
         />
       )}
@@ -64,7 +66,7 @@ function SelectControl(props: {
 }) {
   return (
     <select
-      id={props.id} value={props.value} aria-describedby={props.describedBy}
+      id={props.id} value={props.value} aria-describedby={props.describedBy === '' ? undefined : props.describedBy}
       onChange={(event) => props.onValue(event.target.value)}
     >
       {props.emptyLabel !== null && <option value="">{props.emptyLabel}</option>}
@@ -78,7 +80,7 @@ function CheckGroup(props: {
   onValue: (selected: string[]) => void;
 }) {
   return (
-    <fieldset id={props.id} aria-describedby={props.describedBy}>
+    <fieldset id={props.id} aria-describedby={props.describedBy === '' ? undefined : props.describedBy}>
       <legend>{props.legend}</legend>
       {props.options.map((option) => (
         <label key={option.value} className="choice">
@@ -183,13 +185,18 @@ function Field(props: FormProps & { field: FieldSpec }) {
   const fieldPath: Path = [...props.path, field.key];
   const key = pathKey(fieldPath);
   const id = `f-${fieldPath.join('-')}`;
-  const helpId = `${id}-help`;
   const value = getAt(draft, fieldPath);
   const set = (next: JsonValue) => onDraft(setAt(draft, fieldPath, next));
   const unset = () => onDraft(unsetAt(draft, fieldPath));
   const put = (next: JsonValue | undefined) => (next === undefined ? unset() : set(next));
   const hasDefault = field.defaultValue !== undefined && field.defaultValue !== null;
-  const help = hasDefault ? `Default: ${JSON.stringify(field.defaultValue)}` : 'Not set by default';
+  const defaultText = typeof field.defaultValue === 'string'
+    ? field.defaultValue
+    : Array.isArray(field.defaultValue)
+      ? (field.defaultValue.length === 0 ? 'none' : field.defaultValue.join(', '))
+      : JSON.stringify(field.defaultValue);
+  const help = [field.description, hasDefault ? `Default: ${defaultText}` : null].filter((part) => part !== null).join(' ');
+  const helpId = help === '' ? '' : `${id}-help`;
   const columnOptions: Option[] = columns.map((name) => ({ value: name, label: name }));
   const textValue = typeof value === 'string' ? value : '';
   const placeholder = hasDefault ? String(field.defaultValue) : '';
@@ -346,9 +353,9 @@ function Field(props: FormProps & { field: FieldSpec }) {
   const groupLabelled = field.kind === 'enum-list' || key === 'modelling.candidates' || key.endsWith('.predictors');
   return (
     <div className="field">
-      {!groupLabelled && <label htmlFor={id}>{field.title}</label>}
+      {!groupLabelled && <label htmlFor={id}>{humanize(field.key)}</label>}
       {control}
-      <p className="help" id={helpId}>{help}</p>
+      {help !== '' && <p className="help" id={helpId}>{help}</p>}
     </div>
   );
 }
@@ -358,7 +365,10 @@ export default function SchemaForm(props: FormProps) {
   const all = fieldsOf(schema, defName).filter(
     (field) => !(defName === 'FeatureRules' && FEATURE_SKIPS.includes(field.key)),
   );
-  const fields = defName === null
+  const only = props.only;
+  const fields = only !== undefined
+    ? only.flatMap((key) => all.filter((field) => field.key === key))
+    : defName === null
     ? [...all.filter((field) => field.key === 'target'), ...all.filter((field) => field.key !== 'target')]
     : all;
   return (

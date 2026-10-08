@@ -321,10 +321,140 @@ def test_mutation_plain_bootstrap_fails(
     truth_ref = _save(run_paths, pd.DataFrame({"y": y}))
     proba_ref = _save(run_paths, _proba_frame(proba, [0, 1]), "predictions")
     monkeypatch.setattr(
-        ev, "_stratified_indices", lambda y, rng: ev._plain_indices(y.shape[0], rng)
+        ev,
+        "_stratified_indices",
+        lambda strata, rng: ev._plain_indices(sum(int(m.size) for m in strata), rng),
     )
-    with pytest.raises(Exception):  # noqa: B017 -- sklearn raises on an all-one-class resample
+    with pytest.raises(ToolDataError):
         score_classification(run_paths, proba_ref, truth_ref, target="y", seed=1)
+
+
+def _sklearn_reference(
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    y_pred: np.ndarray,
+    classes: list[str],
+    positive: str,
+    average: str,
+) -> dict[str, object]:
+    """The previous sklearn `_classification_metrics`, kept as the oracle for the numpy version."""
+    from sklearn.metrics import (
+        accuracy_score,
+        average_precision_score,
+        balanced_accuracy_score,
+        brier_score_loss,
+        f1_score,
+        log_loss,
+        precision_score,
+        recall_score,
+        roc_auc_score,
+    )
+
+    binary = len(classes) == 2
+    pos_idx = classes.index(positive)
+    out: dict[str, object] = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "log_loss": log_loss(y_true, proba, labels=classes),
+    }
+    if binary:
+        out["precision"] = precision_score(y_true, y_pred, pos_label=positive, zero_division=0)
+        out["recall"] = recall_score(y_true, y_pred, pos_label=positive, zero_division=0)
+        out["f1"] = f1_score(y_true, y_pred, pos_label=positive, zero_division=0)
+        out["roc_auc"] = roc_auc_score((y_true == positive).astype(int), proba[:, pos_idx])
+        out["pr_auc"] = average_precision_score((y_true == positive).astype(int), proba[:, pos_idx])
+        out["brier"] = brier_score_loss((y_true == positive).astype(int), proba[:, pos_idx])
+    else:
+        out["precision"] = precision_score(
+            y_true, y_pred, average=average, labels=classes, zero_division=0
+        )
+        out["recall"] = recall_score(
+            y_true, y_pred, average=average, labels=classes, zero_division=0
+        )
+        out["f1"] = f1_score(y_true, y_pred, average=average, labels=classes, zero_division=0)
+        one_hot = np.asarray([[1 if str(t) == c else 0 for c in classes] for t in y_true])
+        out["roc_auc"] = roc_auc_score(y_true, proba, multi_class="ovr", average="macro")
+        out["pr_auc"] = average_precision_score(one_hot, proba, average="macro")
+        out["brier"] = float(np.mean(np.sum((proba - one_hot) ** 2, axis=1)))
+    return out
+
+
+def _assert_fast_matches_reference(
+    y: np.ndarray,
+    proba: np.ndarray,
+    classes: list[str],
+    positive: str,
+    threshold: float | None,
+    average: str,
+    reference_labels: dict[str, str] | None = None,
+) -> None:
+    codes = ev._class_codes(y, classes)
+    pos_idx = classes.index(positive)
+    pred = ev._hard_codes(proba, pos_idx, threshold)
+    rng = np.random.default_rng(1)
+    strata = ev._strata(y)
+    indexes = [np.arange(y.size)] + [ev._stratified_indices(strata, rng) for _ in range(5)]
+    ref_y = y
+    ref_classes = classes
+    ref_positive = positive
+    if reference_labels is not None:
+        ref_y = np.asarray([reference_labels[v] for v in y.tolist()])
+        ref_classes = [reference_labels[c] for c in classes]
+        ref_positive = reference_labels[positive]
+    for idx in indexes:
+        fast = ev._classification_metrics(codes[idx], proba[idx], pred[idx], pos_idx, average)
+        ref_pred = np.asarray([ref_classes[i] for i in pred[idx]])
+        ref = _sklearn_reference(
+            ref_y[idx], proba[idx], ref_pred, ref_classes, ref_positive, average
+        )
+        assert set(fast) == set(ref)
+        for name, value in fast.items():
+            assert value == pytest.approx(ref[name], rel=1e-9, abs=1e-12), name
+
+
+def test_fast_metrics_match_sklearn_binary() -> None:
+    rng = np.random.default_rng(0)
+    n = 400
+    y = np.where(rng.uniform(size=n) < 0.15, "pos", "neg")
+    p = np.round(
+        np.where(y == "pos", rng.uniform(0.2, 0.9, size=n), rng.uniform(0.0, 0.6, size=n)), 2
+    )
+    proba = np.column_stack([1 - p, p])
+    for threshold in (None, 0.3):
+        _assert_fast_matches_reference(y, proba, ["neg", "pos"], "pos", threshold, "macro")
+
+
+def test_fast_metrics_match_sklearn_multiclass() -> None:
+    rng = np.random.default_rng(0)
+    n = 300
+    classes = ["a", "b", "c"]
+    y = rng.choice(classes, size=n)
+    raw = np.round(rng.dirichlet([1.0, 1.0, 1.0], size=n), 3) + 1e-3
+    proba = raw / raw.sum(axis=1, keepdims=True)
+    for average in ("macro", "weighted"):
+        _assert_fast_matches_reference(y, proba, classes, "c", None, average)
+
+
+def test_fast_metrics_use_positional_class_order() -> None:
+    rng = np.random.default_rng(0)
+    n = 300
+    classes = ["2", "10", "30"]
+    y = rng.choice(classes, size=n)
+    raw = np.round(rng.dirichlet([1.0, 1.0, 1.0], size=n), 3) + 1e-3
+    proba = raw / raw.sum(axis=1, keepdims=True)
+    _assert_fast_matches_reference(
+        y, proba, classes, "30", None, "macro", reference_labels={"2": "a", "10": "b", "30": "c"}
+    )
+
+
+def test_auc_and_ap_undefined_raise_tool_data_error() -> None:
+    scores = np.array([0.1, 0.5, 0.9])
+    with pytest.raises(ToolDataError):
+        ev._binary_auc(scores, np.array([True, True, True]))
+    with pytest.raises(ToolDataError):
+        ev._binary_auc(scores, np.array([False, False, False]))
+    with pytest.raises(ToolDataError):
+        ev._binary_ap(scores, np.array([False, False, False]))
 
 
 def test_real_1000_resamples_on_48_rows(

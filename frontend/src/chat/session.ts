@@ -1,7 +1,7 @@
 import { parseSetupState } from '../api/client.ts';
 import type { ChatTurn, SetupState } from '../api/types.ts';
 
-export type ChatMessage = { id: string; role: 'user' | 'assistant' | 'note'; text: string; tone?: 'fault'; link?: { href: string; label: string } };
+export type ChatMessage = { id: string; role: 'user' | 'assistant' | 'note'; text: string; tone?: 'fault'; link?: { href: string; label: string }; title?: string; step?: { node: string; candidateId: string | null } };
 export type SetupSession = { messages: ChatMessage[]; state: SetupState };
 export type SetupStep = 'project' | 'dataset' | 'target' | 'contract' | 'mode' | 'start';
 

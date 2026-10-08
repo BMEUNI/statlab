@@ -3,14 +3,20 @@ import { test } from 'node:test';
 import {
   availableActions,
   cellStatus,
+  estimatorLabel,
   executionsFor,
+  firstSentences,
   foldEvents,
   formatUsd,
   gateEdits,
+  gateFieldSplit,
   graphLayout,
   groupTone,
+  humanize,
   latestOutcome,
   mergedMetrics,
+  metricLabel,
+  narrate,
   nodeLabel,
   parseGateQuestion,
   parseRunView,
@@ -259,4 +265,72 @@ test('groupTone', () => {
   assert.equal(groupTone(['completed', 'skipped']), 'done');
   assert.equal(groupTone(['completed', 'pending']), 'current');
   assert.equal(groupTone(['pending', 'pending']), 'upcoming');
+});
+
+test('label helpers humanise ids', () => {
+  assert.equal(humanize('hist_gradient_boosting_default_capacity'), 'Hist gradient boosting default capacity');
+  assert.equal(humanize('a__b '), 'A b');
+  assert.equal(estimatorLabel('hist_gb_classifier'), 'Gradient boosting');
+  assert.equal(estimatorLabel(null), 'Model');
+  assert.equal(estimatorLabel('xgb'), 'Xgb');
+  assert.equal(metricLabel('roc_auc'), 'ROC AUC');
+  assert.equal(metricLabel('custom_thing'), 'Custom thing');
+});
+
+test('firstSentences and narrate', () => {
+  assert.equal(firstSentences('A b. C d! E f? G', 2), 'A b. C d!');
+  assert.equal(narrate({ decision: { user_summary: ' Loaded 10 rows. ', rationale: 'x' } }, 'completed', null, null), 'Loaded 10 rows.');
+  assert.equal(narrate({ decision: { rationale: 'One. Two. Three.' } }, 'completed', null, null), 'One. Two.');
+  assert.equal(narrate({}, 'completed', null, null), 'Done.');
+  assert.equal(narrate({}, 'failed', null, 'boom'), 'It failed: boom');
+  assert.equal(narrate({}, 'failed', null, null), 'It failed.');
+  assert.equal(narrate({}, 'skipped', 'not needed', null), 'Skipped: not needed');
+  assert.equal(narrate({}, 'skipped', null, null), 'Skipped.');
+});
+
+test('foldEvents posts step updates', () => {
+  nextSeq = 0;
+  const done = { status: 'completed', summary: { decision: { user_summary: 'Loaded 10 rows.' } } };
+  const feed = foldEvents([
+    event('node.completed', { node: 'intake', execution_id: 'e1', result: done }),
+    event('node.completed', { node: 'preprocessing', candidate_id: '5:r_x:c_02', result: done }),
+    event('node.completed', { node: 'model_evaluation', candidate_id: 'r_x:c_02', result: done }),
+    event('node.failed', {
+      node: 'model_training', candidate_id: 'r_x:c_02', result: { status: 'failed', error: { message: 'boom' } },
+    }),
+    event('node.started', { node: 'intake', execution_id: 'e2' }),
+  ]);
+  const steps = feed.items.flatMap((item) => (item.kind === 'step' ? [item] : []));
+  assert.equal(feed.items.filter((item) => item.kind === 'activity').length, 5);
+  assert.equal(steps.length, 3);
+  assert.deepEqual(
+    steps.map((item) => [item.node, item.candidateId, item.text]),
+    [
+      ['intake', null, 'Loaded 10 rows.'],
+      ['model_evaluation', 'c_02', 'Loaded 10 rows.'],
+      ['model_training', 'c_02', 'It failed: boom'],
+    ],
+  );
+});
+
+test('gateFieldSplit picks required or non-default editable fields', () => {
+  const base = {
+    node: 'intake', candidateId: null, phase: 'before', evidence: [], reasoning: '', defaultAction: 'approve',
+    options: ['approve'], context: [], revision: 0, history: [], failure: null,
+    proposal: { rationale: 'r', task: 'classification', metric: 'roc_auc', folds: 10, notes: [], user_summary: 's' },
+    decisionSchema: {
+      required: ['rationale', 'task'],
+      properties: {
+        rationale: { type: 'string' },
+        task: { enum: ['classification', 'regression'], default: null },
+        metric: { type: 'string', default: 'roc_auc' },
+        folds: { type: 'integer', default: 5 },
+        notes: { type: 'array', items: { type: 'string' }, default: [] },
+        user_summary: { type: 'string' },
+      },
+    },
+  } satisfies Omit<GateQuestion, 'editable'> & { proposal: JsonObject };
+  const all = ['rationale', 'task', 'metric', 'folds', 'notes', 'user_summary'];
+  assert.deepEqual(gateFieldSplit({ ...base, editable: all }), { main: ['task', 'folds'], rest: ['rationale', 'metric', 'notes'] });
+  assert.deepEqual(gateFieldSplit({ ...base, editable: [] }), { main: [], rest: [] });
 });

@@ -207,7 +207,9 @@ class GateService:
             decision_type=f"{type(decision).__module__}.{type(decision).__qualname__}",
             evidence=evidence,
             reasoning=str(getattr(decision, "rationale", "Review proposal")),
-            editable=() if invocation.after_action else tuple(type(decision).model_fields),
+            editable=()
+            if invocation.after_action
+            else tuple(name for name in type(decision).model_fields if name != "user_summary"),
             options=get_args(GateAction.__value__),
             context=self._context(invocation),
         )
