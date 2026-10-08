@@ -8,26 +8,33 @@ import {
   firstSentences,
   foldEvents,
   forkNote,
+  decisionLead,
   formatUsd,
   gateEdits,
+  gateNotes,
   gateFieldSplit,
   graphLayout,
+  groupDecisions,
   groupTone,
   humanize,
+  jsonBlock,
   latestOutcome,
-  mergedMetrics,
   metricLabel,
   modeLabel,
   narrate,
   nodeLabel,
+  nowLine,
   parseGateQuestion,
   parseRunView,
   runControls,
+  splitLead,
+  STEP_PURPOSES,
   statusTone,
   stepShortLabel,
   switchedToAutomatic,
 } from '../src/run/model.ts';
-import type { ExecutionRecord, GateQuestion, JsonObject, RunEvent, RunExecutions, RunSummary } from '../src/api/types.ts';
+import type { ExecutionRecord, GateQuestion, GateSummary, JsonObject, RunEvent, RunExecutions, RunSummary } from '../src/api/types.ts';
+import type { RunView } from '../src/run/model.ts';
 
 const question = {
   node: 'intake', candidate_id: '5:r_abc:c_02', phase: 'before', proposal: { rationale: 'x' },
@@ -193,6 +200,17 @@ test('foldEvents builds the feed', () => {
   assert.deepEqual(drafting.drafts, { m1: 'Hello' });
 });
 
+test('foldEvents records the completion seq', () => {
+  nextSeq = 0;
+  const folded = foldEvents([
+    event('run.status', { status: 'running' }),
+    event('run.status', { status: 'completed' }),
+    event('message.user', { message_id: 'm9', session_id: 's', text: 'Why?' }),
+  ]);
+  assert.equal(folded.completedSeq, 2);
+  assert.equal(foldEvents([]).completedSeq, null);
+});
+
 test('foldEvents dedupes repeated answers and forks', () => {
   nextSeq = 0;
   const answer = { gate_id: 'g', answer: { action: 'approve', revision: 1 } };
@@ -228,7 +246,7 @@ test('statusTone and formatUsd', () => {
   assert.equal(formatUsd(0.12345), '$0.1235');
 });
 
-test('latestOutcome and mergedMetrics', () => {
+test('latestOutcome', () => {
   const outcome = (node: string, executionId: string, metrics: Record<string, number>) => ({
     node, executionId, status: 'ok', summary: {}, artifacts: [], metrics, warnings: [], skipReason: null, error: null,
   });
@@ -244,7 +262,6 @@ test('latestOutcome and mergedMetrics', () => {
   assert.equal(latestOutcome(view, 'fit', 'c_01')?.executionId, 'e2');
   assert.equal(latestOutcome(view, 'fit', 'c_09'), null);
   assert.equal(latestOutcome(view, 'nope', null), null);
-  assert.deepEqual(mergedMetrics(branch), { a: 2, b: 3 });
 });
 
 test('cellStatus ties and inherited outcomes', () => {
@@ -376,4 +393,88 @@ test('forkNote explains where a forked run restarts and what changed', () => {
     forkNote(forkRun('r_parent', '{"fork":{"target":"intake","edits":{"split.test_size":0.3}}}')),
     'This run continues from run r_parent and starts again at Intake; earlier steps are reused. Changed settings: split.test_size = 0.3.',
   );
+});
+
+const summary = (id: string, ts: string): GateSummary => ({
+  id, run_id: 'r', node_execution_id: 'e', status: 'pending', question_json: '', answer_json: null, ts,
+});
+
+test('gateNotes', () => {
+  const q = gate({ proposal: { material_exceptions: ['A', 3, 'B'] }, evidence: [{ tool: 'x' }, { warnings: ['B', 'C', 4] }] });
+  assert.deepEqual(gateNotes(q), ['A', 'B', 'C']);
+});
+
+test('groupDecisions', () => {
+  const grouped = (g2Warnings: string[]) => groupDecisions([
+    {
+      gate: summary('g2', 't2'),
+      question: gate({ node: 'preprocessing', phase: 'after', candidateId: 'c_02', evidence: [{ warnings: g2Warnings }] }),
+    },
+    {
+      gate: summary('g1', 't1'),
+      question: gate({ node: 'preprocessing', phase: 'after', candidateId: 'c_01', evidence: [{ warnings: ['w'] }] }),
+    },
+    { gate: summary('g0', 't0'), question: gate({ node: 'intake', phase: 'before', candidateId: null }) },
+  ]);
+  const groups = grouped(['w']);
+  assert.deepEqual(groups.map((group) => group.key), ['gate:g0', 'preprocessing:after']);
+  const second = groups[1];
+  assert.deepEqual(second?.items.map((item) => item.gate.id), ['g1', 'g2']);
+  assert.equal(second?.candidate, true);
+  assert.deepEqual(second?.notes, ['w']);
+  assert.deepEqual(groups[0]?.notes, []);
+  assert.equal(grouped(['v'])[1]?.notes, null);
+});
+
+test('decisionLead', () => {
+  const lead = (question: GateQuestion, candidate: boolean) => decisionLead({
+    key: 'k', node: question.node, phase: question.phase, candidate, items: [{ gate: summary('a', 't'), question }], notes: null,
+  });
+  const purpose = STEP_PURPOSES.model_evaluation;
+  assert.equal(
+    lead(gate({ node: 'model_evaluation', candidateId: 'c_01', phase: 'before' }), true),
+    `${purpose} I noted points to check before I start.`,
+  );
+  assert.equal(
+    lead(gate({ node: 'model_evaluation', candidateId: 'c_01', phase: 'after' }), true),
+    `${purpose} Done; I noted points to check.`,
+  );
+  assert.equal(lead(gate({ proposal: { user_summary: 'One. Two. Three.' } }), false), 'One. Two.');
+  assert.equal(lead(gate({ reasoning: 'Alpha. Beta. Gamma.' }), false), 'Alpha. Beta.');
+  assert.equal(
+    lead(gate({ phase: 'failure', failure: { errorClass: 'data', message: 'boom' } }), false),
+    'This step failed: boom',
+  );
+});
+
+test('nowLine', () => {
+  const view: RunView = {
+    spine: [{ name: 'a', kind: 'SHARED', skippable: false }, { name: 'b', kind: 'PER_CANDIDATE', skippable: true }],
+    shared: [],
+    branches: [{ id: 'c_01', label: 'A', estimator: null, status: 'running', wave: 1, retuneCount: 0, outcomes: [], spec: {} }],
+    overlap: null,
+    wave: 1,
+    budget: null,
+  };
+  const pending = [
+    gate({ node: 'preprocessing', candidateId: 'c_01' }),
+    gate({ node: 'preprocessing', candidateId: 'c_02' }),
+    gate({ node: 'intake', candidateId: null }),
+  ];
+  assert.equal(nowLine('running', view, [], pending), 'Waiting for your decision: Preprocessing (2 models), Intake');
+  const running = [{ ...execution('x1', 1, 'running', 'c_01'), node: 'b' }, { ...execution('x2', 2, 'running'), node: 'a' }];
+  assert.equal(nowLine('running', view, running, []), 'Working on: A, B (1 model)');
+  assert.equal(nowLine('running', view, [], []), 'Starting the next step…');
+  assert.equal(nowLine('completed', view, [], []), 'Completed');
+  assert.equal(nowLine('running', null, [], []), 'Running');
+});
+
+test('jsonBlock and splitLead', () => {
+  assert.equal(jsonBlock('{"a":1}'), '{\n  "a": 1\n}');
+  assert.equal(jsonBlock(' [1,2] '), '[\n  1,\n  2\n]');
+  assert.equal(jsonBlock('hello'), null);
+  assert.equal(jsonBlock('{bad'), null);
+  assert.equal(jsonBlock('"str"'), null);
+  assert.deepEqual(splitLead('First one. Second one.'), { lead: 'First one.', more: 'Second one.' });
+  assert.deepEqual(splitLead('Only.'), { lead: 'Only.', more: null });
 });

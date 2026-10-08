@@ -403,7 +403,7 @@ export type FeedItem =
       text: string;
     }
   | { kind: 'fork'; seq: number; ts: string; newRunId: string };
-export type RunFeed = { items: FeedItem[]; drafts: Record<string, string> };
+export type RunFeed = { items: FeedItem[]; drafts: Record<string, string>; completedSeq: number | null };
 
 export function firstSentences(text: string, n: number): string {
   return text.trim().split(/(?<=[.!?])\s+/).slice(0, n).join(' ');
@@ -439,6 +439,7 @@ export function foldEvents(events: RunEvent[]): RunFeed {
   const drafts: Record<string, string> = {};
   const answered = new Set<string>();
   const forks = new Set<string>();
+  let completedSeq: number | null = null;
   for (const event of events) {
     const { seq, ts, payload: p } = event;
     const base = { seq, ts };
@@ -539,13 +540,14 @@ export function foldEvents(events: RunEvent[]): RunFeed {
       case 'run.status':
         if (typeof p.status === 'string') {
           items.push({ ...base, kind: 'activity', text: `Run ${p.status.replace('_', ' ')}` });
+          if (p.status === 'completed') completedSeq = seq;
         }
         break;
       default:
         break;
     }
   }
-  return { items, drafts };
+  return { items, drafts, completedSeq };
 }
 
 export const STATUS_LABELS: Record<RunStatus, string> = {
@@ -603,12 +605,6 @@ export function latestOutcome(view: RunView, node: string, candidateId: string |
   return list.filter((item) => item.node === node).at(-1) ?? null;
 }
 
-export function mergedMetrics(item: Branch): Record<string, number> {
-  const merged: Record<string, number> = {};
-  for (const entry of item.outcomes) Object.assign(merged, entry.metrics);
-  return merged;
-}
-
 export const EMPTY_VOCABULARY: Vocabulary = { contractSchema: {}, estimators: [], inferentialModels: [] };
 
 export const TONES: Record<CellStatus, string> = {
@@ -628,4 +624,125 @@ export function groupTone(statuses: CellStatus[]): string {
   if (statuses.every((status) => status === 'completed' || status === 'skipped')) return 'done';
   if (statuses.some((status) => status === 'completed' || status === 'skipped')) return 'current';
   return 'upcoming';
+}
+
+export const STEP_PURPOSES: Record<string, string> = {
+  preprocessing: 'Clean the data for each model: fill missing values and drop unusable columns.',
+  feature_engineering: "Build each model's inputs: encode categories and scale numbers.",
+  model_training: 'Train each model on the training rows.',
+  model_evaluation: 'Score each model on the validation rows.',
+  model_interpretation: 'Check which inputs each model relies on and where it makes mistakes.',
+};
+
+export function gateNotes(question: GateQuestion): string[] {
+  const notes: string[] = [];
+  const exceptions = question.proposal.material_exceptions;
+  if (Array.isArray(exceptions)) notes.push(...exceptions.filter((item): item is string => typeof item === 'string'));
+  for (const entry of question.evidence) {
+    if (isJsonObject(entry) && Array.isArray(entry.warnings)) {
+      notes.push(...entry.warnings.filter((item): item is string => typeof item === 'string'));
+    }
+  }
+  return [...new Set(notes)];
+}
+
+export type DecisionItem = { gate: GateSummary; question: GateQuestion };
+export type DecisionGroup = {
+  key: string;
+  node: string;
+  phase: GatePhase;
+  candidate: boolean;
+  items: DecisionItem[];
+  notes: string[] | null;
+};
+
+export function groupDecisions(items: DecisionItem[]): DecisionGroup[] {
+  const sorted = [...items].sort((a, b) => (a.gate.ts < b.gate.ts ? -1 : a.gate.ts > b.gate.ts ? 1 : 0));
+  const groups = new Map<string, DecisionGroup>();
+  for (const item of sorted) {
+    const { question } = item;
+    const key = question.candidateId === null ? `gate:${item.gate.id}` : `${question.node}:${question.phase}`;
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      groups.set(key, {
+        key,
+        node: question.node,
+        phase: question.phase,
+        candidate: question.candidateId !== null,
+        items: [item],
+        notes: null,
+      });
+    } else {
+      existing.items.push(item);
+    }
+  }
+  return [...groups.values()].map((group) => {
+    const all = group.items.map((item) => gateNotes(item.question));
+    const first = all[0] ?? [];
+    const same = all.every((notes) => JSON.stringify(notes) === JSON.stringify(first));
+    return { ...group, notes: same ? first : null };
+  });
+}
+
+export function decisionLead(group: DecisionGroup): string {
+  const first = group.items[0];
+  if (first === undefined) return '';
+  const { question: q } = first;
+  if (q.phase === 'failure') return `This step failed: ${q.failure?.message ?? 'unknown error'}`;
+  if (group.candidate) {
+    const purpose = STEP_PURPOSES[group.node] ?? `${nodeLabel(group.node)}.`;
+    return q.phase === 'before'
+      ? `${purpose} I noted points to check before I start.`
+      : `${purpose} Done; I noted points to check.`;
+  }
+  const summary = q.proposal.user_summary;
+  if (typeof summary === 'string' && summary.trim() !== '') return firstSentences(summary, 2);
+  return firstSentences(q.reasoning, 2);
+}
+
+export function nowLine(
+  status: RunStatus,
+  view: RunView | null,
+  executions: ExecutionRecord[],
+  pending: GateQuestion[],
+): string {
+  if (pending.length > 0) {
+    const counts = new Map<string, number>();
+    for (const question of pending) {
+      counts.set(question.node, (counts.get(question.node) ?? 0) + (question.candidateId === null ? 0 : 1));
+    }
+    const parts = [...counts].map(([node, n]) => (n > 1 ? `${nodeLabel(node)} (${n} models)` : nodeLabel(node)));
+    return `Waiting for your decision: ${parts.join(', ')}`;
+  }
+  if ((status === 'running' || status === 'pending') && view !== null) {
+    const parts: string[] = [];
+    for (const node of view.spine) {
+      const ids: (string | null)[] = node.kind === 'SHARED' ? [null] : view.branches.map((branch) => branch.id);
+      const n = ids.filter((id) =>
+        cellStatus(node.name, id, executions, [], latestOutcome(view, node.name, id)) === 'running').length;
+      if (n > 0) {
+        parts.push(node.kind === 'SHARED' ? nodeLabel(node.name) : `${nodeLabel(node.name)} (${n} model${n === 1 ? '' : 's'})`);
+      }
+    }
+    return parts.length > 0 ? `Working on: ${parts.join(', ')}` : 'Starting the next step…';
+  }
+  return STATUS_LABELS[status];
+}
+
+export function jsonBlock(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  return Array.isArray(value) || isJsonObject(value) ? JSON.stringify(value, null, 2) : null;
+}
+
+export function splitLead(text: string): { lead: string; more: string | null } {
+  const lead = firstSentences(text, 1);
+  const rest = text.trim().slice(lead.length).trim();
+  return { lead, more: rest === '' ? null : rest };
 }

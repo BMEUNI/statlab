@@ -1320,6 +1320,14 @@ Gates block indefinitely and are persisted, so an unanswered gate survives a ser
 restart; the run resumes in `awaiting_user` and the UI re-renders the pending gate from
 `gates` on reconnect.
 
+Addendum (chunk 46): a per-candidate exception check asks once per node attempt. The
+after-action check opens a gate only for warnings that appeared after the pre-action check, or
+for material exceptions when no pre-action check ran; exceptions already approved before the
+action are not asked again. The UI groups pending per-candidate gates of the same node and phase
+into one decision box (approve all, or approve/review per model) shown in both the chat and the
+progress pane; the API still answers one gate per request, and the run stays `awaiting_user`
+until every pending gate is answered.
+
 ---
 
 ## 9. The skill file

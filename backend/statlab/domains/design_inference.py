@@ -286,7 +286,14 @@ class DesignInferenceExecutor:
     async def _inference(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
         problem = problem_from_state(invocation.state)
         if not problem.inference_goals:
-            return NodeResult(status="skipped", skip_reason="No fixed inference goals")
+            return NodeResult(
+                status="skipped",
+                skip_reason=(
+                    "No inference question was set, so no effect test was run. To add one, tell "
+                    "me for example: test whether <column> affects "
+                    f"{problem.target}."
+                ),
+            )
         registry = _object(
             shared_result(invocation.state, "experiment_design").summary.get("registry"),
             "design registry",

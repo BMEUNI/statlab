@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { FastForward, SlidersHorizontal, ThumbsUp } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { ApiError, answerGate, sendMessage } from '../api/client.ts';
-import type { ControlReply, GateAction, GateQuestion, JsonValue, GateSummary, RunMode, RunStatus } from '../api/types.ts';
-import { STATUS_LABELS, firstSentences, gateFieldSplit, humanize, nodeLabel, type RunFeed, type RunView } from '../run/model.ts';
+import { ApiError, sendMessage } from '../api/client.ts';
+import type { ControlReply, GateQuestion, GateSummary, RunMode, RunStatus } from '../api/types.ts';
+import { STATUS_LABELS, humanize, nodeLabel, splitLead, type RunFeed, type RunView } from '../run/model.ts';
+import DecisionBox from '../run/DecisionBox.tsx';
 import { formatRoute, type Route } from '../routes.ts';
 import { errorText } from '../ui/format.ts';
 import Composer from './Composer.tsx';
@@ -22,8 +22,8 @@ type Props = {
   forkNote: string | null;
   pending: Pending[];
   navigate: (route: Route) => void;
+  now: string;
   onStep: (step: Step) => void;
-  onShowGate: () => void;
   onTab: (tab: 'candidates' | 'report') => void;
 };
 
@@ -35,42 +35,17 @@ You can write to me at any time, also while I wait for your decision:
 - redo part of the run ("go back to data profiling")
 - control the run ("pause", "resume", "stop")`;
 const GUIDED =
-  '\n\nIn guided mode I stop and ask you before each key decision. Answer with the buttons or in your own words.';
+  '\n\nIn guided mode I stop and ask you before each key decision. Answer in the box below the chat, or in your own words.';
 
-function valueText(value: JsonValue | undefined): string {
-  if (value === undefined || value === null) return 'not set';
-  if (typeof value === 'boolean') return value ? 'yes' : 'no';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return value.length === 0 ? 'none' : value.map(valueText).join(', ');
-  return JSON.stringify(value);
-}
-
-function gatePrompt(question: GateQuestion): string {
-  const parts = [
-    question.phase === 'before'
-      ? "I'm about to run this step. Here is my plan."
-      : question.phase === 'after'
-        ? 'This step has finished. Please check the result.'
-        : `This step failed: ${question.failure?.message ?? 'unknown error'}`,
-  ];
-  if (question.reasoning.trim() !== '') parts.push(firstSentences(question.reasoning, 3));
-  const keys = gateFieldSplit(question).main;
-  if (keys.length > 0) {
-    parts.push(
-      ['Main settings:', ...keys.slice(0, 6).map((key) => `- ${humanize(key)}: ${valueText(question.proposal[key])}`)]
-        .join('\n'),
-    );
-  }
-  parts.push('Reply with the buttons below, or tell me in your own words what to change. You can also ask me a question first, for example "what does inferential analysis mean?".');
-  return parts.join('\n\n');
-}
-
-export default function RunChat({ runId, feed, view, status, mode, forkNote, pending, navigate, onStep, onShowGate, onTab }: Props) {
+export default function RunChat({
+  runId, feed, view, status, mode, forkNote, pending, navigate, now, onStep, onTab,
+}: Props) {
   const queryClient = useQueryClient();
   const [setup] = useState(() => loadSession(browserStore(), runChatKey(runId)));
   const [showActivity, setShowActivity] = useState(false);
   const [extra, setExtra] = useState<ChatMessage[]>([]);
+  const [sent, setSent] = useState(0);
+  const [openGate, setOpenGate] = useState<string | null>(null);
   const mutation = useMutation<ControlReply, Error, string>({
     mutationFn: (text) => sendMessage(runId, text),
     onSuccess: async (reply) => {
@@ -89,19 +64,6 @@ export default function RunChat({ runId, feed, view, status, mode, forkNote, pen
     },
   });
 
-  const answer = useMutation<ControlReply, Error, { gateId: string; revision: number; action: GateAction }>({
-    mutationFn: ({ gateId, revision, action }) => answerGate(runId, gateId, { revision, action }),
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['run', runId] }),
-        queryClient.invalidateQueries({ queryKey: ['executions', runId] }),
-      ]);
-    },
-    onError: (error) => {
-      setExtra((list) => [...list, { id: `fault-${list.length}`, role: 'note', tone: 'fault', text: errorText(error) }]);
-    },
-  });
-
   const branchTitle = (node: string, candidateId: string | null): string => {
     if (candidateId === null) return nodeLabel(node);
     const label = view?.branches.find((item) => item.id === candidateId)?.label ?? candidateId;
@@ -109,18 +71,20 @@ export default function RunChat({ runId, feed, view, status, mode, forkNote, pen
   };
 
   const messages: ChatMessage[] = [...(setup?.messages ?? [])];
+  const tail: ChatMessage[] = [];
   if (setup !== null) messages.push({ id: 'run-started', role: 'note', text: 'The run started.' });
   messages.push({ id: 'intro', role: 'assistant', text: mode === 'guided' ? INTRO + GUIDED : INTRO });
   if (forkNote !== null) messages.push({ id: 'fork-note', role: 'assistant', text: forkNote });
   for (const item of feed.items) {
     if (!showActivity && item.kind === 'activity') continue;
+    const target = status === 'completed' && feed.completedSeq !== null && item.seq > feed.completedSeq ? tail : messages;
     const id = `e${item.seq}`;
     switch (item.kind) {
       case 'user':
-        messages.push({ id, role: 'user', text: item.text });
+        target.push({ id, role: 'user', text: item.text });
         break;
       case 'assistant':
-        messages.push({
+        target.push({
           id,
           role: 'assistant',
           text: item.text,
@@ -130,22 +94,25 @@ export default function RunChat({ runId, feed, view, status, mode, forkNote, pen
         });
         break;
       case 'error':
-        messages.push({ id, role: 'note', tone: 'fault', text: item.text });
+        target.push({ id, role: 'note', tone: 'fault', text: item.text });
         break;
       case 'activity':
-        messages.push({ id, role: 'note', text: item.text });
+        target.push({ id, role: 'note', text: item.text });
         break;
-      case 'step':
-        messages.push({
+      case 'step': {
+        const { lead, more } = splitLead(item.text);
+        target.push({
           id,
           role: 'assistant',
           title: branchTitle(item.node, item.candidateId),
-          text: item.text,
+          text: lead,
+          ...(more === null ? {} : { more }),
           step: { node: item.node, candidateId: item.candidateId },
         });
         break;
+      }
       case 'fork':
-        messages.push({
+        target.push({
           id,
           role: 'note',
           text: 'This run continues as a new run.',
@@ -161,47 +128,45 @@ export default function RunChat({ runId, feed, view, status, mode, forkNote, pen
       text: 'No messages yet. Ask the agent about the run, or tell it what to change.',
     });
   }
-  const asked = pending.flatMap(({ gate, question }) => (question === null ? [] : [{ gate, question }]));
-  for (const { gate, question } of asked) {
-    messages.push({
-      id: `gate-${gate.id}-${question.revision}`,
-      role: 'assistant',
-      title: `Your decision: ${branchTitle(question.node, question.candidateId)}`,
-      text: gatePrompt(question),
-    });
-  }
-  messages.push(...extra);
-  const last = asked.at(-1);
+  (status === 'completed' ? tail : messages).push(...extra);
 
   return (
     <section className="chat-pane" aria-label="Chat with the agent">
       <div className="chat-tools">
+        <p className="chat-now" aria-live="polite">{now}</p>
         <label>
           <input type="checkbox" checked={showActivity} onChange={(e) => setShowActivity(e.target.checked)} />
           Show step activity
         </label>
       </div>
-      <MessageList messages={messages} pending={mutation.isPending} drafts={Object.values(feed.drafts)} onStep={onStep}>
-        {last !== undefined && (
-          <div className="quick-replies">
-            {(['approve', 'approve_all_remaining'] as const).filter((action) => last.question.options.includes(action)).map((action) => (
-              <button
-                key={action}
-                type="button"
-                disabled={answer.isPending}
-                onClick={() => answer.mutate({ gateId: last.gate.id, revision: last.question.revision, action })}
-              >
-                {action === 'approve' ? <ThumbsUp className="icon" aria-hidden="true" /> : <FastForward className="icon" aria-hidden="true" />}
-                {action === 'approve' ? 'Approve' : 'Approve and run the rest automatically'}
-              </button>
-            ))}
-            <button type="button" onClick={onShowGate}><SlidersHorizontal className="icon" aria-hidden="true" />Review the details</button>
-          </div>
-        )}
+      <MessageList
+        messages={messages}
+        pending={mutation.isPending}
+        drafts={Object.values(feed.drafts)}
+        onStep={onStep}
+        followKey={sent}
+        tail={status === 'completed' ? tail : undefined}
+      >
         {status === 'completed' && view !== null && <RunSummary runId={runId} view={view} onTab={onTab} onStep={onStep} />}
       </MessageList>
+      {pending.length > 0 && (
+        <div className="decision-dock">
+          <DecisionBox
+            runId={runId}
+            mode={mode}
+            pending={pending}
+            view={view}
+            navigate={navigate}
+            openGate={openGate}
+            onOpenGate={setOpenGate}
+          />
+        </div>
+      )}
       <Composer
-        onSend={(text) => mutation.mutate(text)}
+        onSend={(text) => {
+          setSent((count) => count + 1);
+          mutation.mutate(text);
+        }}
         disabled={mutation.isPending}
         placeholder="Ask a question, change the plan, or say pause"
       />

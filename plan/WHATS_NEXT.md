@@ -26,12 +26,15 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: paid run to measure chunk 43 cost (needs fresh explicit user go-ahead)
+## Next: user's online test of chunk 46, then the next phase
 
-Chunks 42–44 accepted 2026-10-08 ([43](./43_cost_and_ui_polish.md), [44](./44_chat_setting_changes.md): chat setting changes). Prompt
-context shrank about 4x and preprocessing/feature steps skip the LLM on clean data; the real
-per-run cost is unmeasured, and the real model's routing of chat commands is untested. Open
-idea: thread random-forest fits and CV/learning-curve diagnostics (chunk 44 discussion). Restart `make dev` first (API gained `switched_runs`).
+Chunk [46](./46_calm_run_screen.md) accepted 2026-10-08: per-candidate exception gates ask once
+per attempt, pending gates are grouped per step in one chat decision box (approve all or per
+model), the chat no longer force-scrolls, chat renders markdown/JSON, step messages are one
+sentence plus "More", the setup card can add inference questions, lanes show validation scores.
+The user runs online tests themselves; no paid run without their fresh go-ahead. Real cost per
+run is still unmeasured. Open idea: thread random-forest fits and CV/learning-curve diagnostics.
+Restart `make dev` to pick up the changes.
 
 ## Earlier: paid ONLINE runtime run (needs fresh explicit user go-ahead)
 

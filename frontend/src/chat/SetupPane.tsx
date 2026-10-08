@@ -4,7 +4,7 @@ import {
   getDatasetProfile, getProject, getVocabulary, listContracts, listDatasets, uploadContract, validateContract,
 } from '../api/client.ts';
 import type { ContractRecord, JsonObject, JsonValue, SetupState, SetupValidation } from '../api/types.ts';
-import { getAt } from '../contract/draft.ts';
+import { getAt, setAt } from '../contract/draft.ts';
 import EditStep from '../setup/EditStep.tsx';
 import { errorText } from '../ui/format.ts';
 import { nextStep } from './session.ts';
@@ -15,6 +15,10 @@ function text(value: JsonValue | undefined): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function strings(value: JsonValue | undefined): string[] {
+  return Array.isArray(value) ? value.flatMap((item) => (typeof item === 'string' ? [item] : [])) : [];
+}
+
 function ContractCard({ projectId, datasetId, record, state, onState }: {
   projectId: string; datasetId: string; record: ContractRecord; state: SetupState; onState: (next: SetupState) => void;
 }) {
@@ -22,6 +26,7 @@ function ContractCard({ projectId, datasetId, record, state, onState }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const [draft, setDraft] = useState<JsonObject>(record.contract);
   const [validation, setValidation] = useState<SetupValidation | null>(null);
+  const [column, setColumn] = useState('');
   const contract = record.contract;
   const profile = useQuery({
     queryKey: ['profile', projectId, datasetId, '{}'],
@@ -29,14 +34,15 @@ function ContractCard({ projectId, datasetId, record, state, onState }: {
   });
   const vocabulary = useQuery({ queryKey: ['vocabulary'], queryFn: ({ signal }) => getVocabulary(signal) });
   const save = useMutation({
-    mutationFn: async () => {
-      const checked = await validateContract(projectId, datasetId, draft);
+    mutationFn: async (next: JsonObject) => {
+      const checked = await validateContract(projectId, datasetId, next);
       if (!checked.valid) return { checked, row: null };
-      return { checked, row: await uploadContract(projectId, draft) };
+      return { checked, row: await uploadContract(projectId, next) };
     },
     onSuccess: ({ checked, row }) => {
       setValidation(checked);
       if (row === null) return;
+      setColumn('');
       void client.invalidateQueries({ queryKey: ['contracts', projectId] });
       onState({ ...state, contract_id: row.id, target: text(getAt(row.contract, ['target', 'column'])) ?? state.target });
       dialog.current?.close();
@@ -49,6 +55,52 @@ function ContractCard({ projectId, datasetId, record, state, onState }: {
     ? goals.flatMap((goal) => { const q = text(getAt(goal, ['question'])); return q === null ? [] : [q]; })
     : [];
   const targetType = text(getAt(contract, ['target', 'type']));
+  const target = text(getAt(contract, ['target', 'column']));
+  const exclude = strings(getAt(contract, ['features', 'exclude']));
+  const include = strings(getAt(contract, ['features', 'include']));
+  const eligible = (profile.data?.columns ?? []).filter((name) =>
+    name !== target && !exclude.includes(name) && (include.length === 0 || include.includes(name)));
+  const existingGoals: JsonValue[] = Array.isArray(goals) ? goals : [];
+  const inference = target !== null && profile.data !== undefined ? (
+    <form
+      className="inline-add"
+      onSubmit={(event) => {
+        event.preventDefault();
+        save.mutate(setAt(contract, ['objective', 'inference_goals'], [
+          ...existingGoals,
+          { question: `Does ${column} affect ${target}?`, predictors: [column] },
+        ]));
+      }}
+    >
+      <div className="field">
+        <label htmlFor="inference-column">{`Also test whether an input affects ${target} (inferential analysis)`}</label>
+        <select id="inference-column" value={column} onChange={(event) => setColumn(event.target.value)}>
+          <option value="">Choose a column</option>
+          {eligible.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </div>
+      <button type="submit" disabled={column === '' || save.isPending}>Add question</button>
+    </form>
+  ) : null;
+  const feedback = (
+    <>
+      {save.isError && <p role="alert">{errorText(save.error)}</p>}
+      {validation !== null && !validation.valid && (
+        <>
+          <h3>Fix these before saving</h3>
+          <ul>
+            {validation.mismatches.map((item, index) => (
+              <li key={index}>
+                {typeof item.field === 'string' && typeof item.message === 'string'
+                  ? <><strong>{item.field}</strong> {item.message}</>
+                  : <code>{JSON.stringify(item)}</code>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  );
 
   function open() {
     setDraft(record.contract);
@@ -73,6 +125,8 @@ function ContractCard({ projectId, datasetId, record, state, onState }: {
         <dt>Inference questions</dt>
         <dd>{questions.length > 0 ? <ul>{questions.map((q, index) => <li key={index}>{q}</li>)}</ul> : 'None'}</dd>
       </dl>
+      {inference}
+      {feedback}
       <button type="button" onClick={open}>Edit details</button>
       <dialog className="drawer" ref={dialog}>
         <button type="button" className="close" onClick={() => dialog.current?.close()}>Close</button>
@@ -84,25 +138,11 @@ function ContractCard({ projectId, datasetId, record, state, onState }: {
             vocabulary={vocabulary.data}
             reasoning={null}
             onBack={() => dialog.current?.close()}
-            onContinue={() => save.mutate()}
+            onContinue={() => save.mutate(draft)}
           />
         )}
         {save.isPending && <p>Saving…</p>}
-        {save.isError && <p role="alert">{errorText(save.error)}</p>}
-        {validation !== null && !validation.valid && (
-          <>
-            <h3>Fix these before saving</h3>
-            <ul>
-              {validation.mismatches.map((item, index) => (
-                <li key={index}>
-                  {typeof item.field === 'string' && typeof item.message === 'string'
-                    ? <><strong>{item.field}</strong> {item.message}</>
-                    : <code>{JSON.stringify(item)}</code>}
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
+        {feedback}
       </dialog>
     </>
   );

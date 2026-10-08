@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
-import { Trophy } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import { Trophy, X } from 'lucide-react';
 import type { ExecutionRecord, GateQuestion } from '../api/types.ts';
 import {
   cellStatus,
@@ -9,7 +10,6 @@ import {
   groupTone,
   humanize,
   latestOutcome,
-  mergedMetrics,
   metricLabel,
   nodeLabel,
   stepShortLabel,
@@ -17,6 +17,7 @@ import {
   type RunView,
   type SpineNode,
 } from './model.ts';
+import { candidateRows } from './compare.ts';
 import { NodeIcon, StatusIcon } from '../ui/icons.tsx';
 
 export type Selection = { node: string; candidateId: string | null };
@@ -33,12 +34,25 @@ type Props = {
 
 export default function RunTimeline({ view, executions, pending, selected, championId, onSelect, detail }: Props) {
   const layout = graphLayout(view.spine);
+  const rows = candidateRows(view);
+  const detailRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    detailRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selected?.node, selected?.candidateId]);
   const isSelected = (node: string, candidateId: string | null) =>
     selected !== null && selected.node === node && selected.candidateId === candidateId;
   const toggle = (node: string, candidateId: string | null) =>
     onSelect(isSelected(node, candidateId) ? null : { node, candidateId });
   const statusOf = (node: string, candidateId: string | null) =>
     cellStatus(node, candidateId, executions, pending, latestOutcome(view, node, candidateId));
+  const detailBlock = () => (
+    <div className="tl-detail" ref={detailRef}>
+      <button type="button" className="link-button tl-close" onClick={() => onSelect(null)}>
+        <X className="icon" aria-hidden="true" />Close the details
+      </button>
+      {detail}
+    </div>
+  );
 
   const shared = (node: SpineNode) => {
     const status = statusOf(node.name, null);
@@ -59,7 +73,7 @@ export default function RunTimeline({ view, executions, pending, selected, champ
           </div>
           {node.name === view.overlap && <small className="help">Runs alongside the candidates.</small>}
           {note !== null && <p className="tl-note">{note}</p>}
-          {isSel && <div className="tl-detail">{detail}</div>}
+          {isSel && detailBlock()}
         </div>
       </li>
     );
@@ -83,7 +97,8 @@ export default function RunTimeline({ view, executions, pending, selected, champ
               : (
                 <ul className="lanes">
                   {view.branches.map((branch) => {
-                    const first = Object.entries(mergedMetrics(branch))[0];
+                    const row = rows.find((item) => item.id === branch.id);
+                    const score = row?.primaryMetric ? row.metrics[row.primaryMetric] : undefined;
                     const isChampion = branch.id === championId;
                     const n = layout.perCandidate.length;
                     const done = layout.perCandidate.filter((node) => {
@@ -104,7 +119,9 @@ export default function RunTimeline({ view, executions, pending, selected, champ
                           </div>
                           {isChampion && <span className="pill signal"><Trophy className="icon" aria-hidden="true" />Champion</span>}
                           <p className="lane-metric">
-                            {first === undefined ? 'Not scored yet' : `${metricLabel(first[0])} ${first[1].toFixed(4)}`}
+                            {score === undefined || row?.primaryMetric == null
+                              ? 'Not scored yet'
+                              : `${metricLabel(row.primaryMetric)} ${score.value.toFixed(3)}`}
                           </p>
                         </div>
                         <ol className="stepper" style={{ '--steps': n } as CSSProperties} aria-label={`Steps for ${humanize(branch.label)}`}>
@@ -127,7 +144,7 @@ export default function RunTimeline({ view, executions, pending, selected, champ
                             );
                           })}
                         </ol>
-                        {showDetail && <div className="tl-detail">{detail}</div>}
+                        {showDetail && detailBlock()}
                       </li>
                     );
                   })}

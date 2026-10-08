@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_models import (
     CV_CAVEAT,
@@ -646,6 +646,33 @@ async def test_evaluation_exception_wait_and_out_of_range_after_action_wait(
     assert output.metrics == {}
     assert "Primary metric is outside its mathematical range" in output.warnings
     assert "score_regression" in [name for _, name, _ in tools.calls]
+
+
+@pytest.mark.asyncio
+async def test_approved_exceptions_are_not_asked_again_after_scoring(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    _mode(h, "guided")
+    h.llm.responses[EvaluationActions] = EvaluationActions(
+        rationale="Review actions", material_exceptions=("Single validation split",)
+    )
+    phases: list[bool] = []
+
+    async def approve(
+        inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
+    ) -> BaseModel | None:
+        phases.append(inv.after_action)
+        return None if inv.after_action else decision
+
+    h.runtime = replace(h.runtime, approval=approve)
+    output = await _run(h, 9)
+    assert output.status == "completed"
+    assert phases == [False]
 
 
 @pytest.mark.asyncio

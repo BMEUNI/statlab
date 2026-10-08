@@ -328,7 +328,10 @@ async def answer_question(message: str, context: ControlContext) -> ControlRespo
             "content": "Answer the user's question from the captured evidence only. "
             "Cite only visible_refs. "
             "Disclose missing/unexecuted evidence. Never recommend test-based selection, "
-            "inspection or refitting. Do not perform actions or claim actions happened.",
+            "inspection or refitting. Do not perform actions or claim actions happened. "
+            "Reply briefly in plain language: at most three short sentences unless the user "
+            "asks for more detail. Use a markdown list or table only when it makes the answer "
+            "clearer.",
         },
         messages[1],
     )

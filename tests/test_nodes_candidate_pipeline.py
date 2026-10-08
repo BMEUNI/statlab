@@ -18,6 +18,7 @@ from statlab.domains.candidate_pipeline import (
     _FEATURE_RATIONALE,
     _FEATURE_SUMMARY,
     CandidatePipelineExecutor,
+    exception_approval,
     pipeline_from_state,
 )
 from statlab.domains.decisions import (
@@ -30,6 +31,7 @@ from statlab.domains.decisions import (
     TrainingDecision,
     ValidationConclusion,
 )
+from statlab.domains.foundation import _Evidence
 from statlab.domains.runtime import Approval
 from statlab.domains.tabular import TABULAR_SPINE, TABULAR_TRAVERSAL
 from statlab.errors import EngineError, LlmCallError, ToolCallError
@@ -511,6 +513,57 @@ async def test_material_exception_gate_precedes_actions(
     assert (
         await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
     ).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_exception_check_tracks_acknowledged_warnings(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    h.state = h.state.model_copy(update={"mode": "guided"})
+    seen: list[tuple[bool, tuple[JsonValue, ...]]] = []
+
+    async def approve(
+        inv: NodeInvocation, decision: BaseModel, evidence: tuple[JsonValue, ...]
+    ) -> BaseModel | None:
+        seen.append((inv.after_action, evidence))
+        return None if inv.after_action else decision
+
+    h.runtime = replace(h.runtime, approval=approve)
+    invocation = candidate_invocation(h, 6)
+    flagged = PreprocessingDecision(rationale="r", material_exceptions=("Sparse",))
+    clean = PreprocessingDecision(rationale="r")
+
+    quiet = _Evidence()
+    assert await exception_approval(h.runtime, invocation, clean, quiet) is clean
+    assert quiet.acknowledged == 0
+    assert seen == []
+
+    pre = _Evidence(warnings=["w0"])
+    assert await exception_approval(h.runtime, invocation, flagged, pre) == flagged
+    assert pre.acknowledged == 1
+    assert seen[-1] == (False, ({"warnings": ["w0"]},))
+
+    settled = _Evidence(warnings=["w0"], acknowledged=1)
+    assert (
+        await exception_approval(h.runtime, invocation, flagged, settled, after_action=True)
+        is flagged
+    )
+    assert len(seen) == 1
+
+    grown = _Evidence(warnings=["w0", "w1"], acknowledged=1)
+    assert (
+        await exception_approval(h.runtime, invocation, flagged, grown, after_action=True)
+    ) is None
+    assert seen[-1] == (True, ({"warnings": ["w1"]},))
+
+    unchecked = _Evidence()
+    assert (
+        await exception_approval(h.runtime, invocation, flagged, unchecked, after_action=True)
+    ) is None
+    assert seen[-1] == (True, ({"warnings": []},))
 
 
 @pytest.mark.asyncio

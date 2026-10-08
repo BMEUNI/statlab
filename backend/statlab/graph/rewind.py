@@ -361,7 +361,11 @@ class ForkService:
                     + ", ".join(entry.name for entry in context.state.spine)
                     + ". Put setting changes in edits as dotted paths into the current run "
                     'contract with the new value, for example {"split.test_size": 0.3} or '
-                    '{"modelling.tuning.cv_folds": 10}. Only include targets and settings the '
+                    '{"modelling.tuning.cv_folds": 10}; when the user asks to test whether '
+                    "inputs affect the target, add "
+                    '{"objective.inference_goals": [{"question": "Does <column> affect '
+                    '<target>?", "predictors": ["<column>"]}]} with the real column and target '
+                    "names, keeping any existing goals. Only include targets and settings the "
                     "user explicitly asked for; never invent values. Current contract: "
                     + json.dumps(context.contract.model_dump(mode="json"), sort_keys=True),
                 },

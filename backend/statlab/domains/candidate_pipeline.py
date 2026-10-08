@@ -102,17 +102,28 @@ async def exception_approval[T: CandidateDecision](
     *,
     after_action: bool = False,
 ) -> T | None:
-    if not decision.material_exceptions and not evidence.warnings:
+    if after_action:
+        start = evidence.acknowledged or 0
+        new_warnings = evidence.warnings[start:]
+        exceptions = decision.material_exceptions if evidence.acknowledged is None else ()
+    else:
+        new_warnings = evidence.warnings
+        exceptions = decision.material_exceptions
+    if not exceptions and not new_warnings:
+        if not after_action:
+            evidence.acknowledged = len(evidence.warnings)
         return decision
     approval_evidence: tuple[JsonValue, ...] = (
         *evidence.tools,
-        {"warnings": list(evidence.warnings)},
+        {"warnings": list(new_warnings)},
     )
     approved = await runtime.approve(
         invocation, decision, approval_evidence, after_action=after_action
     )
     if after_action and approved is not None and approved != decision:
         raise _RefusalError("completed actions cannot be changed by exception acknowledgment")
+    if not after_action and approved is not None:
+        evidence.acknowledged = len(evidence.warnings)
     return approved
 
 

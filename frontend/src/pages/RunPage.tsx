@@ -1,4 +1,4 @@
-import { FileText, FolderOpen, Hand, ListChecks, Table2, type LucideIcon } from 'lucide-react';
+import { FileText, FolderOpen, ListChecks, Table2, type LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getExecutions, getRun, listRunArtifacts } from '../api/client.ts';
@@ -8,9 +8,8 @@ import ArtifactBrowser from '../run/ArtifactBrowser.tsx';
 import CandidateTable from '../run/CandidateTable.tsx';
 import { candidateRows } from '../run/compare.ts';
 import RunChat from '../chat/RunChat.tsx';
-import GatePanel from '../run/GatePanel.tsx';
 import { champion } from '../report/champion.ts';
-import { foldEvents, forkNote, humanize, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
+import { foldEvents, forkNote, humanize, nowLine, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
 import ReportView from '../report/ReportView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
@@ -52,6 +51,8 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const pending = data.gates
     .filter((gate) => gate.status === 'pending')
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
+  const pendingQuestions = pending.flatMap(({ question }) => (question === null ? [] : [question]));
+  const now = nowLine(data.run.status, view, executions.data?.executions ?? [], pendingQuestions);
 
   const rows = view === null ? [] : candidateRows(view);
   const tabs = [
@@ -64,9 +65,11 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   return (
     <div className={`split run-split ${pane === 'side' ? 'show-side' : ''}`}>
       <div className="pane-switch" role="tablist">
-        <button type="button" role="tab" aria-selected={pane === 'chat'} onClick={() => setPane('chat')}>Chat</button>
+        <button type="button" role="tab" aria-selected={pane === 'chat'} onClick={() => setPane('chat')}>
+          {pending.length > 0 ? `Chat (${pending.length} waiting)` : 'Chat'}
+        </button>
         <button type="button" role="tab" aria-selected={pane === 'side'} onClick={() => setPane('side')}>
-          {pending.length > 0 ? `Progress (${pending.length} waiting)` : 'Progress'}
+          Progress
         </button>
       </div>
       <RunChat
@@ -78,87 +81,65 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
         forkNote={forkNote(data.run)}
         pending={pending}
         navigate={navigate}
+        now={now}
         onStep={(step) => { setSelected(step); setTab('progress'); setPane('side'); }}
-        onShowGate={() => setPane('side')}
         onTab={(next) => { setTab(next); setPane('side'); }}
       />
       <aside className="side-pane" aria-label="Run progress">
-        <RunHeader
-          run={data.run}
-          view={view}
-          costUsd={executions.data?.costUsd ?? null}
-          streamStatus={stream.status}
-          navigate={navigate}
-          championLabel={championLabel}
-          switched={switchedToAutomatic(data.gates)}
-        />
-        {data.execution_failed && (
-          <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
-        )}
-        {pending.length > 0 && (
-          <section aria-labelledby="gates-heading">
-            <h2 id="gates-heading"><Hand className="icon" aria-hidden="true" /> Waiting for you</h2>
-            {pending.map(({ gate, question }) =>
-              question === null
-                ? (
-                  <div className="panel gate" key={gate.id}>
-                    <p role="alert">This decision cannot be displayed.</p>
-                    <pre className="json-view">{gate.question_json}</pre>
-                  </div>
-                )
-                : (
-                  <GatePanel
-                    key={`${gate.id}:${question.revision}`}
-                    runId={runId}
-                    gate={gate}
-                    question={question}
-                    skippable={view?.spine.find((node) => node.name === question.node)?.skippable ?? false}
-                    spine={view?.spine ?? []}
-                    navigate={navigate}
-                  />
-                ))}
-          </section>
-        )}
-        {view === null
-          ? <p role="alert">This run's state cannot be displayed.</p>
-          : (
-            <>
-              <div className="tabs" role="tablist">
-                {tabs.map((item) => (
-                  <button
-                    key={item.id} type="button" role="tab" id={`run-tab-${item.id}`} aria-selected={tab === item.id}
-                    aria-controls="run-panel" onClick={() => setTab(item.id)}
-                  >
-                    <item.Icon className="icon" aria-hidden="true" /> {item.label}
-                  </button>
-                ))}
-              </div>
-              <div role="tabpanel" id="run-panel" aria-labelledby={`run-tab-${tab}`}>
-                {tab === 'progress' && (
-                  <RunTimeline
-                    view={view}
-                    executions={executions.data?.executions ?? []}
-                    pending={pending.flatMap(({ question }) => (question === null ? [] : [question]))}
-                    selected={selected}
-                    championId={championId}
-                    onSelect={setSelected}
-                    detail={selected === null
-                      ? null
-                      : <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} />}
-                  />
-                )}
-                {tab === 'candidates' && <CandidateTable rows={rows} />}
-                {tab === 'files' && (
-                  artifacts.isPending
-                    ? <p>Loading files…</p>
-                    : artifacts.isError
-                      ? <p role="alert">{errorText(artifacts.error)}</p>
-                      : <ArtifactBrowser entries={artifacts.data} />
-                )}
-                {tab === 'report' && <ReportView run={data.run} view={view} />}
-              </div>
-            </>
+        <div className="side-scroll">
+          <RunHeader
+            run={data.run}
+            view={view}
+            costUsd={executions.data?.costUsd ?? null}
+            streamStatus={stream.status}
+            navigate={navigate}
+            championLabel={championLabel}
+            switched={switchedToAutomatic(data.gates)}
+          />
+          {data.execution_failed && (
+            <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
           )}
+          {view === null
+            ? <p role="alert">This run's state cannot be displayed.</p>
+            : (
+              <>
+                <div className="tabs" role="tablist">
+                  {tabs.map((item) => (
+                    <button
+                      key={item.id} type="button" role="tab" id={`run-tab-${item.id}`} aria-selected={tab === item.id}
+                      aria-controls="run-panel" onClick={() => setTab(item.id)}
+                    >
+                      <item.Icon className="icon" aria-hidden="true" /> {item.label}
+                    </button>
+                  ))}
+                </div>
+                <div role="tabpanel" id="run-panel" aria-labelledby={`run-tab-${tab}`}>
+                  {tab === 'progress' && (
+                    <RunTimeline
+                      view={view}
+                      executions={executions.data?.executions ?? []}
+                      pending={pendingQuestions}
+                      selected={selected}
+                      championId={championId}
+                      onSelect={setSelected}
+                      detail={selected === null
+                        ? null
+                        : <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} />}
+                    />
+                  )}
+                  {tab === 'candidates' && <CandidateTable rows={rows} />}
+                  {tab === 'files' && (
+                    artifacts.isPending
+                      ? <p>Loading files…</p>
+                      : artifacts.isError
+                        ? <p role="alert">{errorText(artifacts.error)}</p>
+                        : <ArtifactBrowser entries={artifacts.data} />
+                  )}
+                  {tab === 'report' && <ReportView run={data.run} view={view} />}
+                </div>
+              </>
+            )}
+        </div>
       </aside>
     </div>
   );

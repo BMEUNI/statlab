@@ -2,7 +2,8 @@ import { formatTime } from '../ui/format.ts';
 import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
-import { executionsFor, formatUsd, latestOutcome, nodeLabel, type RunView } from './model.ts';
+import { executionsFor, formatUsd, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
+import { metricsOf, type MetricValue } from './compare.ts';
 import type { Selection } from './RunTimeline.tsx';
 
 type Props = {
@@ -25,6 +26,7 @@ export default function NodeInspector({ view, data, selected, artifacts }: Props
     ? null
     : view.branches.find((item) => item.id === candidateId)?.label ?? candidateId;
   const outcome = latestOutcome(view, node, candidateId);
+  const metrics: Record<string, MetricValue> = outcome === null ? {} : metricsOf(outcome);
   const decision = outcome?.summary.decision;
   const attempts = data === undefined ? null : executionsFor(node, candidateId, data);
 
@@ -41,14 +43,24 @@ export default function NodeInspector({ view, data, selected, artifacts }: Props
             <dt>Warnings</dt>
             <dd>{outcome.warnings.length === 0 ? '—' : outcome.warnings.map((warning, index) => <div key={index}>{warning}</div>)}</dd>
           </dl>
-          {Object.keys(outcome.metrics).length > 0 && (
+          {Object.keys(metrics).length > 0 && (
             <div className="table-wrap">
               <table>
                 <caption>Metrics</caption>
-                <thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+                <thead>
+                  <tr><th scope="col">Metric</th><th scope="col">Value</th><th scope="col">95% interval</th></tr>
+                </thead>
                 <tbody>
-                  {Object.entries(outcome.metrics).map(([key, value]) => (
-                    <tr key={key}><td>{key}</td><td>{value.toFixed(4)}</td></tr>
+                  {Object.entries(metrics).map(([key, metric]) => (
+                    <tr key={key}>
+                      <td>{metricLabel(key)}</td>
+                      <td>{metric.value.toFixed(4)}</td>
+                      <td>
+                        {metric.ciLow !== null && metric.ciHigh !== null
+                          ? `${metric.ciLow.toFixed(3)} to ${metric.ciHigh.toFixed(3)}`
+                          : '—'}
+                      </td>
+                    </tr>
                   ))}
                 </tbody>
               </table>

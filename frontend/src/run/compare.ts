@@ -25,7 +25,7 @@ function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function metricsOf(outcome: NodeOutcome): Record<string, MetricValue> {
+export function metricsOf(outcome: NodeOutcome): Record<string, MetricValue> {
   const result: Record<string, MetricValue> = {};
   const metrics = outcome.summary.metrics;
   if (!isJsonObject(metrics)) return result;

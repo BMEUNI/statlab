@@ -546,6 +546,7 @@ async def test_no_goals_skips_without_llm_or_tools(
     count = len(h.llm.calls)
     output = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
     assert output.status == "skipped" and output.skip_reason
+    assert output.skip_reason is not None and "test whether <column> affects" in output.skip_reason
     assert not tools.calls and len(h.llm.calls) == count
 
 
