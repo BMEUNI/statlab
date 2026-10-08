@@ -35,3 +35,4 @@ graphify-out/
 integration/out/
 integration/.cache/
 .playwright-mcp/
+/documents/test_dataframes/
