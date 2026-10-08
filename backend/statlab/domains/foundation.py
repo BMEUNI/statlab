@@ -334,7 +334,11 @@ class FoundationExecutor:
             IntakeDecision,
             evidence=tuple(evidence.tools),
             question="Read actual contract/data findings; propose review fixes. "
-            "Never edit columns.",
+            "Never edit columns. Escalate only when the contract cannot run on this data "
+            "(missing or ambiguous target, contract/data mismatch). Missing values are "
+            "handled later: a mean/median default falls back to most_frequent for "
+            "non-numeric columns, and inference reference levels default to the most "
+            "frequent level. Record such points as findings, not escalation.",
         )
         summary: dict[str, JsonValue] = {
             "raw": str(raw),
@@ -428,10 +432,14 @@ class FoundationExecutor:
         )
         allowed = self.runtime.skill.node(invocation.spec.name).allowed
         for selected, tool, compatible in selections:
-            if len(set(selected)) != len(selected) or set(selected) - compatible:
+            bad = sorted(
+                {entry for entry in selected if entry not in compatible}
+                | {entry for entry in selected if selected.count(entry) > 1}
+            )
+            if bad:
                 raise _RefusalError(
-                    f"{tool} selection has unknown, repeated or incompatible columns; "
-                    f"allowed: {sorted(compatible)!r}"
+                    f"{tool} entries must be exact column names; rejected {bad!r} "
+                    f"(unknown, repeated or incompatible); allowed: {sorted(compatible)!r}"
                 )
             if selected and tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")
@@ -465,7 +473,9 @@ class FoundationExecutor:
             question="Choose relevant typed columns and at most four descriptive plots. "
             "Profile uses the whole input; goals remain fixed before EDA. "
             "summarize_categorical takes only non-numeric columns; numeric, correlations and "
-            "outliers take only numeric columns (dtype or contract role).",
+            "outliers take only numeric columns (dtype or contract role). "
+            "Every list entry is one exact column name from the schema, never a sentence, "
+            "pair or comment.",
             check=_rejecting(
                 lambda d: self._validate_profile(invocation, d, schema.summary, problem.target)
             ),

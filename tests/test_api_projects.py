@@ -175,26 +175,19 @@ async def _open_project_api(
         max_upload_mb=max_upload_mb,
         max_concurrent_llm=1,
     )
-    responses = (
-        [
-            _model_response(
-                json.dumps(
-                    {
-                        "contract": answer.model_dump(mode="json"),
-                        "reasoning": "Typed profile-based proposal.",
-                    }
-                )
-            )
-        ]
-        if answer is not None
-        else []
-    )
 
     async def complete(**kwargs: object) -> ModelResponse:
         del kwargs
-        if not responses:
+        if answer is None:
             raise AssertionError("no canned setup LLM response remains")
-        return responses.pop(0)
+        return _model_response(
+            json.dumps(
+                {
+                    "contract": answer.model_dump(mode="json"),
+                    "reasoning": "Typed profile-based proposal.",
+                }
+            )
+        )
 
     monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
     fake_session = session if session is not None else SetupSession()
@@ -293,6 +286,7 @@ async def test_create_list_detail_and_csv_upload(
             }
         ),
     ]
+    answers.append(answers[1])
 
     async def canned_completion(**kwargs: object) -> ModelResponse:
         del kwargs
@@ -390,7 +384,7 @@ async def test_create_list_detail_and_csv_upload(
         scalar_change = await client.post(
             f"/api/projects/{project['id']}/contracts/propose", json=proposal_payload
         )
-        assert scalar_change.status_code == 422
+        assert scalar_change.status_code == 502
         assert len(session.calls) == calls_before_scalar_change + 1
 
         collision_paths = ProjectPaths(settings.data_dir, "metadata-conflict")
@@ -738,7 +732,7 @@ async def test_proposal_rejects_changed_supplied_contract_fields(
                 "contract": supplied.model_dump(mode="json", exclude_unset=True),
             },
         )
-        assert response.status_code == 422
+        assert response.status_code == 502
         assert len(session.calls) == before + 1
 
 
@@ -794,7 +788,7 @@ async def test_proposal_unresolved_and_data_mismatch_return_422(
                 "contract": incomplete.model_dump(mode="json", exclude_unset=True),
             },
         )
-        assert unresolved.status_code == 422 and len(session.calls) == before + 1
+        assert unresolved.status_code == 502 and len(session.calls) == before + 1
 
     session = SetupSession()
     async with _open_project_api(

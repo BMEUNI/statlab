@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, ValidationError
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_pipeline import CandidatePipelineExecutor, pipeline_from_state
 from statlab.domains.decisions import (
@@ -715,13 +715,10 @@ async def test_feature_stage_waits_and_refuses_skip(
     assert isinstance(decision, dict)
     assert decision["material_exceptions"] == ["Rare level collapse"]
     assert len(tools.calls) == offset
-    h.state = h.state.model_copy(update={"mode": "autonomous"})
-    h.llm.responses[FeatureDecision] = FeatureDecision(
-        rationale="Skip requested", skip_reason="No engineered features needed"
-    )
-    refused = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))
-    assert refused.status == "failed" and refused.error is not None
-    assert refused.error.message == "approved encoding must execute; feature stage cannot skip"
+    with pytest.raises(ValidationError):
+        FeatureDecision.model_validate(
+            {"rationale": "Skip requested", "skip_reason": "No engineered features needed"}
+        )
 
 
 @pytest.mark.asyncio

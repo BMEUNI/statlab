@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -101,8 +102,8 @@ def global_checks(
     results.append(
         _must(
             "G1",
-            "no ERROR in api log; MCP alive",
-            " ERROR " not in api_log_slice and mcp_alive,
+            "no ERROR-level record in api log; MCP alive",
+            re.search(r"^\S+ \S+ ERROR ", api_log_slice, re.MULTILINE) is None and mcp_alive,
             f"mcp_alive={mcp_alive}",
         )
     )

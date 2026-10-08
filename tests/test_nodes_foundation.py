@@ -687,8 +687,11 @@ async def test_profile_check_feeds_llm_repair(
     assert check(ProfileDecision(rationale="ok", numeric=("x",))) is None
     with pytest.raises(DecisionRejectedError, match="allowed"):
         check(ProfileDecision(rationale="bad", categorical=("x",)))
+    with pytest.raises(DecisionRejectedError, match=r"rejected \['x vs y'\]"):
+        check(ProfileDecision(rationale="bad", correlations=("x vs y",)))
     messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
     assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
+    assert "never a sentence, pair or comment" in messages[-1]["content"]
     assert "LLM decide node=data_profiling candidate=- output=ProfileDecision" in caplog.text
 
 

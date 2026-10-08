@@ -19,6 +19,7 @@ from statlab.domains.decisions import (
     EvaluationActions,
     EvaluationDecision,
     InterpretationDecision,
+    ProblemSpec,
     TrainingDecision,
     ValidationConclusion,
 )
@@ -28,6 +29,7 @@ from statlab.domains.foundation import (
     _object,
     _ref,
     _RefusalError,
+    _rejecting,
     problem_from_state,
     resolved_metric,
 )
@@ -44,6 +46,18 @@ SELECTION_CAVEAT = (
     "Validation is used for candidate/parameter/threshold selection; validation scores "
     "and bootstrap intervals do not remove selection bias."
 )
+
+
+def _validate_evaluation(problem: ProblemSpec, decision: EvaluationActions) -> None:
+    if problem.task == "regression" and (decision.curves or decision.threshold_objective):
+        raise _RefusalError("classification diagnostics require classification")
+    if problem.target_type != "binary" and (
+        decision.threshold_objective or set(decision.curves) & {"roc", "pr", "calibration"}
+    ):
+        raise _RefusalError(
+            "threshold, roc, pr and calibration curves require binary classification; "
+            "multiclass allows only the confusion curve"
+        )
 
 
 def evaluation_decision(branch: CandidateProgress) -> EvaluationDecision:
@@ -148,7 +162,9 @@ class CandidateModelExecutor:
         if tunable is not None:
             question += (
                 f" Tunable parameters for {branch.spec.estimator.name}: "
-                f"{', '.join(sorted(tunable))}."
+                f"{', '.join(sorted(tunable))}. Only these keys may appear in params or "
+                "param_grid; class_weight, calibrate, random_state and n_jobs are fixed "
+                "elsewhere and never appear there."
             )
         decision = await self.runtime.decide(
             invocation,
@@ -271,18 +287,16 @@ class CandidateModelExecutor:
             "curves and an optional binary threshold objective; train-only CV/learning curves are "
             "prepared-frame diagnostics. Choose actions now; conclude retuning after scoring. "
             "Selection/bootstrap estimates remain biased. Do not invent metric ranges "
-            "from success_threshold.",
+            "from success_threshold. threshold_objective and roc/pr/calibration curves are "
+            "binary-only; multiclass takes only the confusion curve; regression takes no "
+            "curves or threshold.",
+            check=_rejecting(lambda d: _validate_evaluation(problem, d)),
         )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:
             return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
         decision = approved
-        if problem.task == "regression" and (decision.curves or decision.threshold_objective):
-            raise _RefusalError("classification diagnostics require classification")
-        if problem.target_type != "binary" and (
-            decision.threshold_objective or "calibration" in decision.curves
-        ):
-            raise _RefusalError("threshold/calibration curve requires binary classification")
+        _validate_evaluation(problem, decision)
         predicted = await self._call(
             invocation, evidence, "predict", {"model": str(model), "frame": str(pipeline.valid)}
         )

@@ -9,7 +9,11 @@ from statlab_contracts.candidate import CandidateSet, CandidateSpec
 
 from statlab.domains.candidate_pipeline import candidate_result
 from statlab.domains.decisions import DesignDecision, SearchDecision
-from statlab.domains.design_inference import DesignInferenceExecutor, initial_candidate_planner
+from statlab.domains.design_inference import (
+    VARIATION_RULE,
+    DesignInferenceExecutor,
+    initial_candidate_planner,
+)
 from statlab.domains.foundation import (
     _object,
     _RefusalError,
@@ -136,10 +140,7 @@ class CandidateSearchPlanner:
                 "Empty proposal ends search. "
                 "Never use test evidence. The engine saves this wave before cumulative approval. "
                 "Estimator params hold single fixed values (never grids or lists). "
-                "Each new candidate's varies_from_baseline lists exactly the dimensions "
-                "that differ from the run's baseline candidate (is_baseline=true), not from "
-                "the candidate it was derived from; a different estimator always includes "
-                "'estimator'.",
+                + VARIATION_RULE,
                 check=_rejecting(cumulative),
             )
         except LlmOutputError:

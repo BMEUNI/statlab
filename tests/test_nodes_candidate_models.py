@@ -31,6 +31,7 @@ from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
+from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import create_node_execution, next_node_attempt
 from statlab_contracts.candidate import EstimatorSpec, FeatureSpec
@@ -64,7 +65,7 @@ async def test_training_validation_scoring_and_task_diagnostics(
         rationale="Task-compatible held-out diagnostics",
         curves=("confusion", "roc", "pr", "calibration")
         if target_type == "binary"
-        else ("confusion", "roc", "pr")
+        else ("confusion",)
         if target_type == "multiclass"
         else (),
         threshold_objective="f1" if target_type == "binary" else None,
@@ -88,8 +89,8 @@ async def test_training_validation_scoring_and_task_diagnostics(
     assert all(str(TEST) not in str(params) for _, _, params in tools.calls)
     assert "selection" in str(scored.summary["selection_bias"])
     plots = [params for _, name, params in tools.calls if name == "plot_curve"]
-    assert len(plots) == (3 if target_type == "binary" else 2 if target_type == "multiclass" else 0)
-    assert names.count("compute_roc_curve") == (0 if target_type == "continuous" else 1)
+    assert len(plots) == (3 if target_type == "binary" else 0)
+    assert names.count("compute_roc_curve") == (1 if target_type == "binary" else 0)
     assert all("confusion" not in str(params) for params in plots)
     curves = scored.summary["curves"]
     assert isinstance(curves, dict)
@@ -192,6 +193,7 @@ async def test_bounded_grid_and_cv_keep_reserved_effective_parameters_out_of_cal
         "Tunable parameters for linear_regression: fit_intercept, positive."
         in messages[-1]["content"]
     )
+    assert "class_weight, calibrate, random_state and n_jobs are fixed" in messages[-1]["content"]
     save_result(h, invocation, fit)
     assert fit.summary["cv_caveat"]
     h.llm.responses[EvaluationActions] = EvaluationActions(
@@ -518,7 +520,20 @@ async def test_multiclass_threshold_and_brier_refusals(
     h.llm.responses[EvaluationActions] = EvaluationActions(
         rationale="Threshold on multiclass", threshold_objective="f1"
     )
-    _failed(await _run(h, 9), "threshold/calibration curve requires binary classification")
+    _failed(
+        await _run(h, 9),
+        "threshold, roc, pr and calibration curves require binary classification; "
+        "multiclass allows only the confusion curve",
+    )
+    check = h.llm.checks[EvaluationActions]
+    assert check(EvaluationActions(rationale="r", curves=("confusion",))) is None
+    for rejected in (
+        EvaluationActions(rationale="r", curves=("roc",)),
+        EvaluationActions(rationale="r", curves=("pr",)),
+        EvaluationActions(rationale="r", threshold_objective="f1"),
+    ):
+        with pytest.raises(DecisionRejectedError, match="binary"):
+            check(rejected)
     h.llm.responses[EvaluationActions] = EvaluationActions(rationale="Compatible validation")
     await _run_save(h, 9)
     index = next(

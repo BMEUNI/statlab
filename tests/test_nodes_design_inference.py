@@ -519,7 +519,7 @@ async def test_explicit_gamma_and_reference_levels(
     h.llm.responses[InferenceDecision] = InferenceDecision(
         model="glm_gamma", predictors=("x",), rationale="Explicit compatible Gamma choice."
     )
-    assert (await DesignInferenceExecutor(h.runtime)(h.invocation(5))).status == "failed"
+    assert (await DesignInferenceExecutor(h.runtime)(h.invocation(5))).status == "completed"
     h.llm.responses[InferenceDecision] = InferenceDecision(
         model="glm_gamma",
         predictors=("x",),
@@ -529,11 +529,13 @@ async def test_explicit_gamma_and_reference_levels(
     output = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
     assert output.status == "completed"
     assert next(params["family"] for _, name, params in tools.calls if name == "fit_glm") == "gamma"
-    assert next(
+    assert [
         params["reference_levels"]
         for _, name, params in tools.calls
         if name == "assemble_inference_matrix"
-    ) == {"x": "reference"}
+    ] == [{}, {"x": "reference"}]
+    messages = [m for o, _, m in h.llm.calls if o is InferenceDecision][-1]
+    assert "omit a predictor" in messages[-1]["content"]
 
 
 @pytest.mark.asyncio

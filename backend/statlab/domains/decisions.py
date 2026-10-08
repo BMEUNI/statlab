@@ -164,7 +164,7 @@ class PreprocessingDecision(CandidateDecision):
 
 
 class FeatureDecision(CandidateDecision):
-    skip_reason: str | None = Field(default=None, min_length=1)
+    """Feature engineering executes the approved specification; it never skips."""
 
 
 class TrainingDecision(CandidateDecision):

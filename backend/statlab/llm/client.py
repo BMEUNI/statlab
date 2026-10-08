@@ -176,6 +176,7 @@ class LlmClient:
         output: type[T],
         reasoning: bool = False,
         example: dict[str, JsonValue] | None = None,
+        check: Callable[[T], None] | None = None,
     ) -> T:
         return await self._complete(
             None,
@@ -187,6 +188,7 @@ class LlmClient:
             reasoning=reasoning,
             example=example,
             recovery=None,
+            check=check,
         )
 
     async def _complete[T: BaseModel](

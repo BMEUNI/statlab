@@ -60,7 +60,7 @@ Neither offline mode judges the data.
 
 | ID | Check | Severity |
 | --- | --- | --- |
-| G1 | No `ERROR` record in `api.log`; MCP process still alive at the end | must |
+| G1 | No ERROR-level record in `api.log` (log level, not message text); MCP process still alive at the end | must |
 | G2 | Run reaches the scenario's expected terminal status within its timeout | must |
 | G3 | `events.jsonl` sequence numbers are 1..N without gaps; every `node.started` has a matching `node.completed`/`failed`/`skipped` or the run ended paused/cancelled | must |
 | G4 | No node execution left `running` or `pending` after a terminal status | must |
@@ -131,8 +131,8 @@ families, inference questions, notes), the run mode, gate answers and chat messa
 ### S05 — Guided mode with edits, an instruction and a skip
 - **Input:** D1, S01 contract; guided. Gate policy: `problem_definition` →
   `approve_with_edits` adding secondary metric `pr_auc`; `data_profiling` → `skip_node`
-  (reason "profiling not needed for this test"); `experiment_design` → `instruct` "Use only
-  logistic_regression and random_forest_classifier." then `approve` the revised proposal;
+  (reason "profiling not needed for this test"); `experiment_design` → `instruct` "Use exactly
+  two candidates: one logistic_regression and one random_forest_classifier." then `approve` the revised proposal;
   first per-candidate gate (if any) → `approve_all_remaining`.
 - **Expect:** `completed`; `data_profiling` execution `skipped`; experiment_design gate has
   revision ≥ 1; candidate set has exactly 2 families; `pr_auc` appears in the validation table;

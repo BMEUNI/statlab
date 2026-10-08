@@ -159,3 +159,17 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
 - F15: client drops stray trailing `}`/`]` after one complete JSON value (S01/S15); design
   refusal for non-numeric interaction columns (S02). `make check` exit 0: 3062 passed,
   1 designed skip; TOTAL 11447 stmts / 3294 branches 100%; mypy 188; Ruff clean; 197 formatted.
+
+## Addendum — F16 + H8, 2026-10-08
+
+- F16: profile/evaluation/setup refusals now feed the LLM repair round (`check`); FeatureDecision
+  has no `skip_reason`; inference reference levels optional (tool default most frequent,
+  recorded); prompts state variation, training-key, intake-escalation and column-name rules.
+  Addendum A: multiclass diagnostics test uses confusion only.
+- H8: G1 matches ERROR log level only; per-scenario cost caps recalibrated; S05 instruction
+  asks for exactly two candidates.
+- Implementer focused selector (8 files) exit 0, 303 passed; Ruff/mypy clean on owned files.
+- `make check` exit 0: 3062 passed, 1 designed skip; TOTAL 11448 stmts / 3292 branches 100%;
+  mypy 188; Ruff clean; 197 formatted.
+- Offline suite `integration/out/20261008T081322Z-offline`: 19/19 PASS. Rich suite
+  `integration/out/20261008T082137Z-offline-rich`: 19/19 PASS.

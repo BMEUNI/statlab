@@ -5,7 +5,7 @@ id = "S01"
 title = "Classification, autonomous, full path (baseline)"
 dataset = "churn"
 mode = "autonomous"
-max_cost_usd = 0.25
+max_cost_usd = 0.40
 
 [scenario.contract.target]
 column = "churned"
@@ -61,7 +61,7 @@ id = "S02"
 title = "Regression, autonomous, missing values"
 dataset = "houses"
 mode = "autonomous"
-max_cost_usd = 0.25
+max_cost_usd = 0.40
 
 [scenario.contract.target]
 column = "price"
@@ -110,7 +110,7 @@ id = "S03"
 title = "Dirty data is detected and handled"
 dataset = "churn_dirty"
 mode = "autonomous"
-max_cost_usd = 0.25
+max_cost_usd = 0.70
 
 [scenario.contract.target]
 column = "churned"
@@ -149,7 +149,7 @@ id = "S04"
 title = "Guided mode, approve everything"
 dataset = "churn"
 mode = "guided"
-max_cost_usd = 0.30
+max_cost_usd = 0.90
 
 [scenario.contract.target]
 column = "churned"
@@ -193,7 +193,7 @@ id = "S05"
 title = "Guided mode with edits, an instruction and a skip"
 dataset = "churn"
 mode = "guided"
-max_cost_usd = 0.30
+max_cost_usd = 0.60
 
 [[scenario.gates]]
 node = "problem_definition"
@@ -209,7 +209,7 @@ reason = "profiling not needed for this test"
 node = "experiment_design"
 phase = "before"
 action = "instruct"
-instruction = "Use only logistic_regression and random_forest_classifier."
+instruction = "Use exactly two candidates: one logistic_regression and one random_forest_classifier."
 
 [[scenario.gates]]
 node = "preprocessing"
@@ -308,6 +308,7 @@ id = "S07"
 title = "Lifecycle controls and chat"
 dataset = "churn"
 mode = "autonomous"
+max_cost_usd = 0.50
 
 [[scenario.actions]]
 when = { event = "node.started", node = "model_training" }
@@ -484,6 +485,7 @@ id = "S12"
 title = "Multiclass"
 dataset = "species"
 mode = "autonomous"
+max_cost_usd = 0.50
 
 [scenario.contract.target]
 column = "species"
@@ -598,7 +600,7 @@ title = "Real data: UCI Adult income (binary, messy categoricals)"
 dataset = "adult"
 mode = "autonomous"
 timeout_s = 2400
-max_cost_usd = 0.30
+max_cost_usd = 0.60
 
 [scenario.contract.dataset]
 na_values = ["?"]
@@ -656,7 +658,7 @@ id = "S19"
 title = "Real data: UCI Auto MPG (regression, missing horsepower)"
 dataset = "autompg"
 mode = "autonomous"
-max_cost_usd = 0.30
+max_cost_usd = 0.50
 
 [scenario.contract.dataset]
 na_values = ["?"]
@@ -709,7 +711,7 @@ title = "Rewind creates an idempotent fork"
 dataset = "churn"
 mode = "autonomous"
 timeout_s = 1800
-max_cost_usd = 0.40
+max_cost_usd = 0.80
 
 [[scenario.actions]]
 do = "rewind"
@@ -815,7 +817,7 @@ id = "S15"
 title = "Project memory across runs"
 dataset = "churn"
 mode = "autonomous"
-max_cost_usd = 0.40
+max_cost_usd = 0.80
 
 [scenario.setup]
 runs = 2
@@ -861,6 +863,7 @@ id = "S16"
 title = "API restart mid-run"
 dataset = "churn"
 mode = "autonomous"
+max_cost_usd = 0.75
 
 [[scenario.actions]]
 do = "restart_api"

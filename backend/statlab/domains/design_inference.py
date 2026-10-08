@@ -27,6 +27,14 @@ from statlab.errors import EngineError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import RunState
 
+VARIATION_RULE: str = (
+    "varies_from_baseline lists exactly the dimensions in which a candidate differs from the "
+    "run's baseline candidate (is_baseline=true), not from the candidate it was derived from: "
+    "a different estimator name is 'estimator', and 'hyperparameters' applies whenever its "
+    "params dict is not identical to the baseline's params dict, even across estimators. "
+    "Estimator params use only that estimator's tunable keys."
+)
+
 
 def candidate_set_from_state(state: RunState) -> CandidateSet:
     summary = shared_result(state, "experiment_design").summary
@@ -209,7 +217,8 @@ class DesignInferenceExecutor:
             "confirm that exact cumulative set, preserving every specification. "
             "Do not fit or probe parameters. Estimator params hold single fixed values "
             "(empty for defaults); never put tuning grids or lists there, grids are chosen "
-            "later at model_training. Interactions only between numeric-role columns.",
+            "later at model_training. Interactions only between numeric-role columns. "
+            + VARIATION_RULE,
             check=_rejecting(
                 lambda d: self.validate_design(invocation, d, registry.summary, problem)
             ),
@@ -272,14 +281,6 @@ class DesignInferenceExecutor:
             raise _RefusalError(
                 "reference levels must name selected predictors and nonblank levels"
             )
-        roles = self._roles(invocation.state)
-        categorical = {
-            column
-            for column in predictors
-            if roles.get(column) in ("categorical", "ordinal", "text", "datetime")
-        }
-        if categorical - set(decision.reference_levels):
-            raise _RefusalError("categorical inference predictors need explicit reference levels")
         return entry, tool
 
     async def _inference(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
@@ -299,7 +300,9 @@ class DesignInferenceExecutor:
             InferenceDecision,
             evidence=(registry,),
             question="Choose the fixed compatible inference model, all original goal predictors "
-            "and explicit categorical reference levels. Added controls are exploratory. Fit "
+            "and reference levels only for exact level values seen in recorded evidence; omit a "
+            "predictor to use its most frequent train+valid level, which the matrix manifest "
+            "records. Added controls are exploratory. Fit "
             "one canonical unscaled train+valid matrix, never test; request an optional residual "
             "plot only where supported. Do not revise goals or make causal claims.",
             check=_rejecting(check_inference),

@@ -366,8 +366,6 @@ class CandidatePipelineExecutor:
         if approved is None:
             return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
         decision = approved
-        if decision.skip_reason is not None:
-            raise _RefusalError("approved encoding must execute; feature stage cannot skip")
         if feature.encoding == "frequency":
             raise _RefusalError("frequency encoding has no supported tool")
         for column, parts in feature.datetime_parts.items():
