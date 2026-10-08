@@ -88,6 +88,15 @@ class DesignInferenceExecutor:
             columns &= set(rules.include)
         return columns - {target, *rules.exclude, *rules.id_columns}
 
+    def _roles(self, state: RunState) -> dict[str, JsonValue]:
+        return {
+            **_object(
+                _tool_summary(shared_result(state, "intake"), "infer_column_roles").get("roles"),
+                "column roles",
+            ),
+            **self.runtime.contract.features.roles,
+        }
+
     def validate_design(
         self,
         invocation: NodeInvocation,
@@ -103,6 +112,7 @@ class DesignInferenceExecutor:
             raise _RefusalError("shortlist exceeds max_candidates")
         entries = _object(registry.get("estimators"), "estimator registry")
         eligible = self._eligible(invocation.state, problem.target)
+        roles = self._roles(invocation.state)
         families: Counter[str] = Counter()
         for candidate in candidates:
             estimator = candidate.estimator
@@ -158,6 +168,19 @@ class DesignInferenceExecutor:
             }
             if named - eligible:
                 raise _RefusalError("candidate choices name unknown or ineligible columns")
+            bad = sorted(
+                {
+                    column
+                    for pair in candidate.features.interactions
+                    for column in pair
+                    if roles.get(column) != "numeric"
+                }
+            )
+            if bad:
+                raise _RefusalError(
+                    f"interaction columns {bad!r} are not numeric; "
+                    "interactions need numeric columns"
+                )
         for family, count in families.items():
             if count > 2 and not decision.family_justifications.get(family, "").strip():
                 raise _RefusalError(
@@ -186,7 +209,7 @@ class DesignInferenceExecutor:
             "confirm that exact cumulative set, preserving every specification. "
             "Do not fit or probe parameters. Estimator params hold single fixed values "
             "(empty for defaults); never put tuning grids or lists there, grids are chosen "
-            "later at model_training.",
+            "later at model_training. Interactions only between numeric-role columns.",
             check=_rejecting(
                 lambda d: self.validate_design(invocation, d, registry.summary, problem)
             ),
@@ -249,11 +272,7 @@ class DesignInferenceExecutor:
             raise _RefusalError(
                 "reference levels must name selected predictors and nonblank levels"
             )
-        intake = shared_result(invocation.state, "intake")
-        roles = {
-            **_object(_tool_summary(intake, "infer_column_roles").get("roles"), "column roles"),
-            **self.runtime.contract.features.roles,
-        }
+        roles = self._roles(invocation.state)
         categorical = {
             column
             for column in predictors

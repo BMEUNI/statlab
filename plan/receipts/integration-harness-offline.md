@@ -150,3 +150,12 @@ Candidate: parent `236a47e` plus the working-tree diff committed with this recei
   24/24, 0 soft warnings, $0.2034, 34 LLM calls, 184 s. Champion c_01 (logistic), test roc_auc
   0.6822; planted inference found. Wave-2 `SearchDecision` rejected twice (grids in params, then
   wrong `varies_from_baseline`); F11 ended search gracefully with a warning.
+
+## Addendum — full live suite and F15, 2026-10-08
+
+- Full live suite (paid, user-confirmed) `integration/out/20261008T070208Z-live` at 59abc4d:
+  6/19 PASS (S06 S08 S10 S11 S13 S17), $3.4739, 506 LLM calls. Failure breakdown recorded in
+  `plan/integration_harness.md`.
+- F15: client drops stray trailing `}`/`]` after one complete JSON value (S01/S15); design
+  refusal for non-numeric interaction columns (S02). `make check` exit 0: 3062 passed,
+  1 designed skip; TOTAL 11447 stmts / 3294 branches 100%; mypy 188; Ruff clean; 197 formatted.

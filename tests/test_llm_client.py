@@ -437,6 +437,68 @@ async def test_semantic_check_rejection_gets_one_repair(
     assert "LLM output rejected" in caplog.text
 
 
+async def _run_scripted(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replies: list[str],
+) -> tuple[Result, int]:
+    conn, run_id, execution_id = llm_context
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda model: True)
+    calls: list[dict[str, object]] = []
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return _response(replies[min(len(calls), len(replies)) - 1])
+
+    result = await LlmClient(_settings(tmp_path), acompletion=fake).complete(
+        conn,
+        run_id=run_id,
+        node_execution_id=execution_id,
+        model="openai/test",
+        messages=[],
+        output=Result,
+    )
+    return result, len(calls)
+
+
+@pytest.mark.asyncio
+async def test_trailing_closing_brackets_are_tolerated(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, count = await _run_scripted(llm_context, tmp_path, monkeypatch, ['{"value":"ok"}}\n'])
+    assert result.value == "ok"
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_other_trailing_text_still_repairs(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, count = await _run_scripted(
+        llm_context, tmp_path, monkeypatch, ['{"value":"ok"} trailing', '{"value":"ok"}']
+    )
+    assert result.value == "ok"
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_undecodable_json_still_repairs(
+    llm_context: tuple[sqlite3.Connection, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, count = await _run_scripted(
+        llm_context, tmp_path, monkeypatch, ['{"value":', '{"value":"ok"}']
+    )
+    assert result.value == "ok"
+    assert count == 2
+
+
 @pytest.mark.asyncio
 async def test_semantic_check_rejected_twice_is_output_error(
     llm_context: tuple[sqlite3.Connection, str, str],

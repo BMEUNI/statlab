@@ -40,6 +40,20 @@ _TRANSCRIPT = logging.getLogger("statlab.llm.transcript")
 _REQUEST_TIMEOUT = 180
 
 
+def _without_trailing_closers(content: str) -> str:
+    """Drop stray closing brackets a provider appends after one complete JSON value."""
+    stripped = content.strip()
+    try:
+        _, end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
+        return content
+    rest = stripped[end:]
+    if rest and all(char in "}] \n\r\t" for char in rest):
+        _TRANSCRIPT.info("LLM response had stray trailing brackets %r; ignored", rest.strip())
+        return stripped[:end]
+    return content
+
+
 def _render_messages(messages: Sequence[dict[str, str]]) -> str:
     return "\n".join(f"--- {m['role']} ---\n{m['content']}" for m in messages)
 
@@ -243,7 +257,7 @@ class LlmClient:
             try:
                 if not prior_content:
                     raise ValueError("response content is empty")
-                result = output.model_validate_json(prior_content)
+                result = output.model_validate_json(_without_trailing_closers(prior_content))
                 if check is not None:
                     check(result)
                 return result

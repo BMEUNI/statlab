@@ -313,6 +313,7 @@ async def test_approved_design_and_durable_initial_planner(
         "family",
         "explicit",
         "pool",
+        "interaction_type",
     ],
 )
 async def test_candidate_set_valid_external_refusals(
@@ -348,6 +349,8 @@ async def test_candidate_set_valid_external_refusals(
         candidates[0]["preprocessing"]["missing"]["drop_rows_above"] = 0.5
     elif violation == "column":
         candidates[0]["features"]["interactions"] = [["x", "y"]]
+    elif violation == "interaction_type":
+        candidates[0]["features"]["interactions"] = [["x", "excluded"]]
     elif violation == "explicit":
         h.runtime = replace(
             h.runtime,

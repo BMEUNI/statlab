@@ -1757,3 +1757,54 @@ question string the sentences
 `" Estimator params hold single fixed values (never grids or lists). Each new candidate's varies_from_baseline lists exactly the dimensions that differ from the run's baseline candidate (is_baseline=true), not from the candidate it was derived from; a different estimator always includes 'estimator'."`
 No test change (prompt text only). Checks: Ruff check/format and mypy on the file;
 `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_nodes_candidate_search.py'`.
+
+## Full live suite run 1 findings (2026-10-08, `integration/out/20261008T070208Z-live`, in progress)
+
+- S01: wave-2 search now accepted (F14 works); the cumulative `experiment_design` re-confirmation
+  reply was one valid JSON object followed by a stray `}` — twice (initial and repair) ->
+  `LlmOutputError` -> abort.
+- S02: the design put `interactions=[["district","has_garden"]]` in a candidate; roles say
+  `district` categorical, `has_garden` boolean but stored as yes/no strings; design validation
+  accepted it, `add_interaction_terms` refused at feature engineering -> node failed -> abort.
+- `models.json` empty is a consequence (no champion), not a defect.
+
+## Fix F15 — tolerate stray closing brackets; interactions only on numeric columns
+
+Owned files: `backend/statlab/llm/client.py`, `backend/statlab/domains/design_inference.py`,
+`tests/test_llm_client.py`, `tests/test_nodes_design_inference.py`.
+
+Recipe:
+1. `client.py`: module function
+   `def _without_trailing_closers(content: str) -> str` (docstring "Drop stray closing brackets a
+   provider appends after one complete JSON value."): `stripped = content.strip()`; try
+   `_, end = json.JSONDecoder().raw_decode(stripped)` except `ValueError`: return `content`;
+   `rest = stripped[end:]`; if `rest` is nonempty and every character of it is one of
+   `}`, `]`, space, `\n`, `\r`, `\t`: log
+   `_TRANSCRIPT.info("LLM response had stray trailing brackets %r; ignored", rest.strip())` and
+   return `stripped[:end]`; otherwise return `content`. In `_complete`, validate
+   `output.model_validate_json(_without_trailing_closers(prior_content))` instead of
+   `prior_content`.
+2. `design_inference.py`:
+   - New method `_roles(self, state: RunState) -> dict[str, JsonValue]` returning
+     `{**_object(_tool_summary(shared_result(state, "intake"), "infer_column_roles").get("roles"), "column roles"), **self.runtime.contract.features.roles}`;
+     `_validate_inference` uses it in place of its current inline `roles = {...}` computation
+     (same semantics).
+   - `validate_design`: compute `roles = self._roles(invocation.state)` once before the
+     candidate loop; inside the loop, directly after the `named - eligible` refusal:
+     `bad = sorted({column for pair in candidate.features.interactions for column in pair if roles.get(column) != "numeric"})`;
+     if `bad`: `raise _RefusalError(f"interaction columns {bad!r} are not numeric; interactions need numeric columns")`.
+   - `_design` question: append `" Interactions only between numeric-role columns."`
+3. Tests:
+   - `tests/test_llm_client.py`: `test_trailing_closing_brackets_are_tolerated` (schema tier as
+     in `test_semantic_check_rejection_gets_one_repair`; fake always returns
+     `'{"value":"ok"}}\n'`; result `"ok"`, exactly 1 call);
+     `test_other_trailing_text_still_repairs` (first `'{"value":"ok"} trailing'`, then
+     `'{"value":"ok"}'`; result `"ok"`, 2 calls); `test_undecodable_json_still_repairs` (first
+     `'{"value":'`, then `'{"value":"ok"}'`; 2 calls).
+   - `tests/test_nodes_design_inference.py::test_candidate_set_valid_external_refusals`: add
+     parametrize value `"interaction_type"`; branch:
+     `candidates[0]["features"]["interactions"] = [["x", "excluded"]]` (both eligible; `excluded`
+     has no numeric role). Existing assertions apply.
+Checks: `LOKY_MAX_CPU_COUNT=1 make test-fast TESTS='tests/test_llm_client.py tests/test_nodes_design_inference.py tests/test_nodes_candidate_search.py tests/test_nodes_candidate_pipeline.py'`;
+Ruff check/format and mypy on the four files.
+F15 note: in `_validate_inference`, the local `intake = shared_result(...)` exists only for the roles computation; remove it with the inline block.
