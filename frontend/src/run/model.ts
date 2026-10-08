@@ -409,6 +409,7 @@ export type FeedItem =
       candidateId: string | null;
       status: 'completed' | 'failed' | 'skipped';
       text: string;
+      title?: string;
     }
   | { kind: 'fork'; seq: number; ts: string; newRunId: string };
 export type RunFeed = { items: FeedItem[]; drafts: Record<string, string>; completedSeq: number | null };
@@ -442,12 +443,20 @@ function where(node: string, candidate: JsonValue | undefined): string {
   return typeof candidate === 'string' ? `${nodeLabel(node)} (${candidate})` : nodeLabel(node);
 }
 
+function candidateCount(summary: JsonObject): number | null {
+  const { candidate_set: set } = summary;
+  if (!isJsonObject(set) || !Array.isArray(set.candidates)) return null;
+  return set.candidates.length;
+}
+
 export function foldEvents(events: RunEvent[]): RunFeed {
   const items: FeedItem[] = [];
   const drafts: Record<string, string> = {};
   const answered = new Set<string>();
   const forks = new Set<string>();
   let completedSeq: number | null = null;
+  let designCount: number | null = null;
+  let wave = 1;
   for (const event of events) {
     const { seq, ts, payload: p } = event;
     const base = { seq, ts };
@@ -495,18 +504,32 @@ export function foldEvents(events: RunEvent[]): RunFeed {
               (event.type === 'node.completed' && p.node === 'model_evaluation')) {
               const status = event.type.slice(5) as 'completed' | 'failed' | 'skipped';
               const error = isJsonObject(result.error) ? result.error : {};
+              const summary = isJsonObject(result.summary) ? result.summary : {};
+              const narrated = narrate(
+                summary,
+                status,
+                typeof result.skip_reason === 'string' ? result.skip_reason : null,
+                typeof error.message === 'string' ? error.message : null,
+              );
+              let title: string | undefined;
+              let text = narrated;
+              if (event.type === 'node.completed' && p.node === 'experiment_design') {
+                const count = candidateCount(summary);
+                if (designCount !== null && count !== null && count > designCount) {
+                  wave += 1;
+                  title = `Search wave ${wave}`;
+                  text = `After comparing the ${designCount} models so far, I'm trying ${count - designCount} more. ${narrated}`;
+                }
+                if (count !== null) designCount = count;
+              }
               items.push({
                 ...base,
                 kind: 'step',
                 node: p.node,
                 candidateId: candidate,
                 status,
-                text: narrate(
-                  isJsonObject(result.summary) ? result.summary : {},
-                  status,
-                  typeof result.skip_reason === 'string' ? result.skip_reason : null,
-                  typeof error.message === 'string' ? error.message : null,
-                ),
+                text,
+                ...(title === undefined ? {} : { title }),
               });
             }
           }

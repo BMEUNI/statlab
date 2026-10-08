@@ -104,7 +104,7 @@ export default function RunChat({
         target.push({
           id,
           role: 'assistant',
-          title: branchTitle(item.node, item.candidateId),
+          title: item.title ?? branchTitle(item.node, item.candidateId),
           text: lead,
           ...(more === null ? {} : { more }),
           step: { node: item.node, candidateId: item.candidateId },

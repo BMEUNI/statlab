@@ -203,6 +203,40 @@ test('foldEvents builds the feed', () => {
   assert.deepEqual(drafting.drafts, { m1: 'Hello' });
 });
 
+test('foldEvents titles later experiment designs as search waves', () => {
+  nextSeq = 0;
+  const design = (executionId: string, userSummary: string, count: number): RunEvent => event('node.completed', {
+    node: 'experiment_design',
+    execution_id: executionId,
+    result: {
+      status: 'completed',
+      summary: {
+        decision: { user_summary: userSummary },
+        candidate_set: { candidates: Array.from({ length: count }, () => ({})) },
+      },
+    },
+  });
+  const feed = foldEvents([
+    design('e1', 'Picked four.', 4),
+    design('e2', 'Pushing boosting further.', 7),
+    design('e3', 'Same seven.', 7),
+  ]);
+  assert.deepEqual(feed.items.filter((item) => item.kind === 'step'), [
+    { seq: 1, ts: 't1', kind: 'step', node: 'experiment_design', candidateId: null, status: 'completed', text: 'Picked four.' },
+    {
+      seq: 2,
+      ts: 't2',
+      kind: 'step',
+      node: 'experiment_design',
+      candidateId: null,
+      status: 'completed',
+      title: 'Search wave 2',
+      text: "After comparing the 4 models so far, I'm trying 3 more. Pushing boosting further.",
+    },
+    { seq: 3, ts: 't3', kind: 'step', node: 'experiment_design', candidateId: null, status: 'completed', text: 'Same seven.' },
+  ]);
+});
+
 test('foldEvents records the completion seq', () => {
   nextSeq = 0;
   const folded = foldEvents([
