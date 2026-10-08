@@ -26,12 +26,11 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: chunk 43 (cheaper runs + UI polish), then paid run
+## Next: paid run to measure chunk 43 cost (needs fresh explicit user go-ahead)
 
-Chunk 42 accepted 2026-10-08 ([spec + receipt](./42_speed_chat_redesign.md)). Chunk 43 per user
-asks after the first paid run ($0.32): prompt digest + prefix caching, skip LLM on fixed steps,
-ordered stepper, lucide icons, size-safe layout, mode/fit-time labels. Guided-gate browser review
-from 42 runs at 43 acceptance.
+Chunks 42 and 43 accepted 2026-10-08 ([43 spec + receipt](./43_cost_and_ui_polish.md)). Prompt
+context shrank about 4x and preprocessing/feature steps skip the LLM on clean data; the real
+per-run cost is unmeasured. Restart `make dev` first (API gained `switched_runs`).
 
 ## Earlier: paid ONLINE runtime run (needs fresh explicit user go-ahead)
 

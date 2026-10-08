@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from statlab.errors import EngineError
 from statlab.graph.candidates import ToolBoundary
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.recovery import recover_call
+from statlab.graph.state import BoundaryResult
 from statlab.llm.client import LlmClient
 from statlab.llm.prompts import PromptContext
 from statlab.llm.routing import ModelRouter, Role
@@ -28,6 +30,51 @@ from statlab.persistence.repository import get_champion_model
 _LOGGER = logging.getLogger(__name__)
 Approval = Callable[[NodeInvocation, BaseModel, tuple[JsonValue, ...]], Awaitable[BaseModel | None]]
 DecisionOverride = Callable[[NodeInvocation, type[BaseModel]], Awaitable[BaseModel | None]]
+_DIGEST_DROP: frozenset[str] = frozenset({"registry", "candidate_set", "sections"})
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _brief(text: str) -> str:
+    short = " ".join(_SENTENCE.split(text.strip())[:2])
+    return short if len(short) <= 400 else short[:399] + "…"
+
+
+def _prune(value: JsonValue, drop: frozenset[str]) -> JsonValue:
+    if isinstance(value, dict):
+        return {
+            key: _brief(item)
+            if key == "rationale" and isinstance(item, str)
+            else _prune(item, drop)
+            for key, item in value.items()
+            if key not in drop
+        }
+    if isinstance(value, list):
+        return [_prune(item, drop) for item in value]
+    return value
+
+
+def boundary_digest(boundaries: Sequence[BoundaryResult], *, keep_tools: bool) -> list[JsonValue]:
+    """Compact shared results for prompt context only; code never reads it back."""
+    drop = _DIGEST_DROP if keep_tools else _DIGEST_DROP | {"tools"}
+    latest: dict[str, BoundaryResult] = {}
+    for boundary in boundaries:
+        latest[boundary.node_name] = boundary
+    digest: list[JsonValue] = []
+    for boundary in latest.values():
+        result = boundary.result
+        entry: dict[str, JsonValue] = {
+            "node": boundary.node_name,
+            "status": result.status,
+            "summary": _prune(result.summary, drop),
+        }
+        if result.warnings:
+            entry["warnings"] = list(result.warnings)
+        if result.skip_reason is not None:
+            entry["skip_reason"] = result.skip_reason
+        if result.error is not None:
+            entry["error"] = result.error.model_dump(mode="json")
+        digest.append(entry)
+    return digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +142,15 @@ class DomainRuntime:
             if approved is not None:
                 return output.model_validate(approved.model_dump(mode="json"))
         skill = self.skill.node(context.node)
-        prompt = PromptContext(self.skill.preamble, skill, self.contract, self.memory)
+        shared: JsonValue = {
+            "boundaries": boundary_digest(
+                invocation.state.shared_results, keep_tools=not invocation.state.branches
+            ),
+            "checkpointed_candidates": [
+                branch.spec.model_dump(mode="json") for branch in invocation.state.branches
+            ],
+        }
+        prompt = PromptContext(self.skill.preamble, skill, self.contract, self.memory, shared)
 
         async def recovery[U](call: Callable[[], Awaitable[U]]) -> U:
             async def request() -> U:
@@ -119,21 +174,16 @@ class DomainRuntime:
             messages=prompt.messages(
                 state_summary={
                     "node": context.node,
-                    "boundaries": [
-                        boundary.model_dump(mode="json")
-                        for boundary in invocation.state.shared_results
-                    ],
                     "candidate": invocation.candidate.model_dump(mode="json")
                     if invocation.candidate is not None
                     else None,
-                    "checkpointed_candidates": [
-                        branch.spec.model_dump(mode="json") for branch in invocation.state.branches
-                    ],
                     "sibling_validation": [
                         {
                             "candidate": branch.public_id,
                             "wave": branch.wave,
-                            "summary": boundary.result.summary,
+                            "metrics": boundary.result.summary.get("metrics"),
+                            "primary_metric": boundary.result.summary.get("primary_metric"),
+                            "threshold": boundary.result.summary.get("threshold"),
                         }
                         for branch in invocation.state.branches
                         if invocation.candidate is None

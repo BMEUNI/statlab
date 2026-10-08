@@ -16,12 +16,15 @@ import {
   latestOutcome,
   mergedMetrics,
   metricLabel,
+  modeLabel,
   narrate,
   nodeLabel,
   parseGateQuestion,
   parseRunView,
   runControls,
   statusTone,
+  stepShortLabel,
+  switchedToAutomatic,
 } from '../src/run/model.ts';
 import type { ExecutionRecord, GateQuestion, JsonObject, RunEvent, RunExecutions } from '../src/api/types.ts';
 
@@ -333,4 +336,24 @@ test('gateFieldSplit picks required or non-default editable fields', () => {
   const all = ['rationale', 'task', 'metric', 'folds', 'notes', 'user_summary'];
   assert.deepEqual(gateFieldSplit({ ...base, editable: all }), { main: ['task', 'folds'], rest: ['rationale', 'metric', 'notes'] });
   assert.deepEqual(gateFieldSplit({ ...base, editable: [] }), { main: [], rest: [] });
+});
+
+const gateWith = (answer: string | null) => ({
+  id: 'g', run_id: 'r', node_execution_id: 'e', status: 'answered', question_json: '{}', answer_json: answer, ts: 't',
+});
+
+test('switchedToAutomatic reads approve_all_remaining answers', () => {
+  assert.equal(switchedToAutomatic([]), false);
+  assert.equal(switchedToAutomatic([gateWith(null)]), false);
+  assert.equal(switchedToAutomatic([gateWith('{')]), false);
+  assert.equal(switchedToAutomatic([gateWith('{"action":"approve"}')]), false);
+  assert.equal(switchedToAutomatic([gateWith('{"action":"approve"}'), gateWith('{"action":"approve_all_remaining"}')]), true);
+});
+
+test('modeLabel and stepShortLabel', () => {
+  assert.equal(modeLabel('guided', false), 'Guided');
+  assert.equal(modeLabel('autonomous', false), 'Autonomous');
+  assert.equal(modeLabel('autonomous', true), 'Guided, then automatic');
+  assert.equal(stepShortLabel('model_training'), 'Train');
+  assert.equal(stepShortLabel('custom_step'), 'Custom step');
 });

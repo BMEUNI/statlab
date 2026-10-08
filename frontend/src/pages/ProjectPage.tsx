@@ -5,7 +5,7 @@ import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
 import RunComparison from '../project/RunComparison.tsx';
 import { lineage } from '../project/lineage.ts';
-import { nodeLabel } from '../run/model.ts';
+import { modeLabel, nodeLabel } from '../run/model.ts';
 import { formatRoute, type Route } from '../routes.ts';
 import { errorText, formatTime } from '../ui/format.ts';
 
@@ -66,7 +66,7 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
                       {depth > 0 && forkTarget !== null && <small className="help">Rewound at {nodeLabel(forkTarget)}</small>}
                     </td>
                     <td><span className={pillClass(run.status)}>{run.status}</span></td>
-                    <td>{run.mode}</td>
+                    <td>{modeLabel(run.mode, project.data.switched_runs.includes(run.id))}</td>
                     <td>{formatTime(run.started_at)}</td>
                     <td>{formatTime(run.ended_at)}</td>
                     <td>{run.champion_model_id !== null ? 'Yes' : 'No'}</td>

@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { Trophy } from 'lucide-react';
 import type { ExecutionRecord, GateQuestion } from '../api/types.ts';
 import {
   cellStatus,
@@ -11,10 +12,12 @@ import {
   mergedMetrics,
   metricLabel,
   nodeLabel,
+  stepShortLabel,
   TONES,
   type RunView,
   type SpineNode,
 } from './model.ts';
+import { NodeIcon, StatusIcon } from '../ui/icons.tsx';
 
 export type Selection = { node: string; candidateId: string | null };
 
@@ -44,7 +47,7 @@ export default function RunTimeline({ view, executions, pending, selected, champ
     const isSel = isSelected(node.name, null);
     return (
       <li className={`tl-item tl-${TONES[status]}`} key={node.name}>
-        <span className="tl-marker" aria-hidden="true" />
+        <span className="tl-marker" aria-hidden="true"><NodeIcon node={node.name} /></span>
         <div className="tl-body">
           <div className="tl-head">
             <h3>
@@ -52,7 +55,7 @@ export default function RunTimeline({ view, executions, pending, selected, champ
                 {nodeLabel(node.name)}
               </button>
             </h3>
-            <span className={`mark mark-${status}`}>{CELL_LABELS[status]}</span>
+            <span className={`mark mark-${status}`}><StatusIcon status={status} />{CELL_LABELS[status]}</span>
           </div>
           {node.name === view.overlap && <small className="help">Runs alongside the candidates.</small>}
           {note !== null && <p className="tl-note">{note}</p>}
@@ -72,6 +75,9 @@ export default function RunTimeline({ view, executions, pending, selected, champ
           <span className="tl-marker" aria-hidden="true" />
           <div className="tl-body">
             <div className="tl-head"><h3>Candidate models</h3></div>
+            {view.branches.length > 0 && (
+              <p className="tl-note">Each model goes through these steps in order: {layout.perCandidate.map((n) => stepShortLabel(n.name)).join(', then ')}.</p>
+            )}
             {view.branches.length === 0
               ? <p className="tl-note">Candidate models appear after the experiment design step.</p>
               : (
@@ -79,6 +85,11 @@ export default function RunTimeline({ view, executions, pending, selected, champ
                   {view.branches.map((branch) => {
                     const first = Object.entries(mergedMetrics(branch))[0];
                     const isChampion = branch.id === championId;
+                    const n = layout.perCandidate.length;
+                    const done = layout.perCandidate.filter((node) => {
+                      const s = statusOf(node.name, branch.id);
+                      return s === 'completed' || s === 'skipped';
+                    }).length;
                     const showDetail = selected !== null && selected.candidateId === branch.id;
                     return (
                       <li className={`lane${isChampion ? ' is-champion' : ''}`} key={branch.id}>
@@ -89,26 +100,28 @@ export default function RunTimeline({ view, executions, pending, selected, champ
                               {estimatorLabel(branch.estimator)}
                               {branch.retuneCount > 0 ? `, retuned ${branch.retuneCount} times` : ''}
                             </p>
+                            <p className="lane-progress">{done} of {n} steps done</p>
                           </div>
-                          {isChampion && <span className="pill signal">Champion</span>}
+                          {isChampion && <span className="pill signal"><Trophy className="icon" aria-hidden="true" />Champion</span>}
                           <p className="lane-metric">
                             {first === undefined ? 'Not scored yet' : `${metricLabel(first[0])} ${first[1].toFixed(4)}`}
                           </p>
                         </div>
-                        <ol className="lane-steps" aria-label={`Steps for ${humanize(branch.label)}`}>
+                        <ol className="stepper" style={{ '--steps': n } as CSSProperties} aria-label={`Steps for ${humanize(branch.label)}`}>
                           {layout.perCandidate.map((node) => {
                             const status = statusOf(node.name, branch.id);
                             return (
-                              <li key={node.name}>
+                              <li key={node.name} className={`step step-${status}`}>
                                 <button
                                   type="button"
-                                  className={`step-chip chip-${status}`}
+                                  className="step-button"
+                                  title={`${nodeLabel(node.name)}: ${CELL_LABELS[status]}`}
                                   aria-pressed={isSelected(node.name, branch.id)}
                                   onClick={() => toggle(node.name, branch.id)}
                                 >
-                                  <span className="chip-icon" aria-hidden="true" />
-                                  {nodeLabel(node.name)}
-                                  <span className="sr-only">: {CELL_LABELS[status]}</span>
+                                  <span className="step-dot"><StatusIcon status={status} /></span>
+                                  <span className="step-name">{stepShortLabel(node.name)}</span>
+                                  <span className="sr-only">{nodeLabel(node.name)}: {CELL_LABELS[status]}</span>
                                 </button>
                               </li>
                             );

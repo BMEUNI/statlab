@@ -173,6 +173,8 @@ not re-derive any of this from memory:
 
 ## B14 inspected framework boundaries (2026-10-05; runtime unverified)
 
+- lucide-react 1.53.0 (exact pin, chunk 43b): named icon imports only; peer React ^19. Its ESM
+  files carry `use client` directives, so Vite prints the same harmless bundler warnings.
 - Browser pins: React/react-dom19.3.0, TanStack Query5.104.1, Vite8.3.2, TypeScript5.9.3,
   @types/react and react-dom19.3.0, @types/node24.19.1. Local Node24.13.1/npm11.8.0.
   Native TS test files require Node24 minimum in this project; parameter properties need

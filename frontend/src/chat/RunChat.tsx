@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { FastForward, SlidersHorizontal, ThumbsUp } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { answerGate, sendMessage } from '../api/client.ts';
 import type { ControlReply, GateAction, GateQuestion, JsonValue, GateSummary, RunMode, RunStatus } from '../api/types.ts';
@@ -27,7 +28,7 @@ type Props = {
 
 const INTRO = `I'll post a short update here after each step, and a summary of the results at the end.
 
-You can write to me at any time:
+You can write to me at any time, also while I wait for your decision:
 - ask why I did something ("why did you drop LoanID?")
 - change a setting ("use 10 folds", "set the test size to 0.3")
 - redo part of the run ("go back to data profiling")
@@ -60,7 +61,7 @@ function gatePrompt(question: GateQuestion): string {
         .join('\n'),
     );
   }
-  parts.push('Reply with the buttons below, or tell me in your own words what to change.');
+  parts.push('Reply with the buttons below, or tell me in your own words what to change. You can also ask me a question first, for example "what does inferential analysis mean?".');
   return parts.join('\n\n');
 }
 
@@ -184,10 +185,11 @@ export default function RunChat({ runId, feed, view, status, mode, pending, navi
                 disabled={answer.isPending}
                 onClick={() => answer.mutate({ gateId: last.gate.id, revision: last.question.revision, action })}
               >
+                {action === 'approve' ? <ThumbsUp className="icon" aria-hidden="true" /> : <FastForward className="icon" aria-hidden="true" />}
                 {action === 'approve' ? 'Approve' : 'Approve and run the rest automatically'}
               </button>
             ))}
-            <button type="button" onClick={onShowGate}>Review the details</button>
+            <button type="button" onClick={onShowGate}><SlidersHorizontal className="icon" aria-hidden="true" />Review the details</button>
           </div>
         )}
         {status === 'completed' && view !== null && <RunSummary runId={runId} view={view} onTab={onTab} onStep={onStep} />}

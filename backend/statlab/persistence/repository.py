@@ -354,6 +354,18 @@ def list_runs(conn: sqlite3.Connection, project_id: str) -> tuple[RunRow, ...]:
     return tuple(RunRow.model_validate(dict(row)) for row in rows)
 
 
+def runs_switched_to_autonomous(conn: sqlite3.Connection, project_id: str) -> tuple[str, ...]:
+    """Runs where a gate answer chose approve_all_remaining (mode became autonomous)."""
+    rows = conn.execute(
+        "SELECT DISTINCT g.run_id FROM gates g JOIN runs r ON r.id = g.run_id "
+        "WHERE r.project_id = ? AND g.answer_json IS NOT NULL AND json_valid(g.answer_json) "
+        "AND json_extract(g.answer_json, '$.action') = 'approve_all_remaining' "
+        "ORDER BY g.run_id",
+        (project_id,),
+    ).fetchall()
+    return tuple(str(row["run_id"]) for row in rows)
+
+
 def run_ancestry(conn: sqlite3.Connection, run_id: str) -> tuple[RunRow, ...]:
     """Return current run through root, rejecting incomplete or cross-project chains."""
     lineage: list[RunRow] = []

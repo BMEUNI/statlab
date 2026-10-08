@@ -1,3 +1,4 @@
+import { FileText, FolderOpen, Hand, ListChecks, Table2, type LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getExecutions, getRun, listRunArtifacts } from '../api/client.ts';
@@ -9,7 +10,7 @@ import { candidateRows } from '../run/compare.ts';
 import RunChat from '../chat/RunChat.tsx';
 import GatePanel from '../run/GatePanel.tsx';
 import { champion } from '../report/champion.ts';
-import { foldEvents, humanize, parseGateQuestion, parseRunView } from '../run/model.ts';
+import { foldEvents, humanize, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
 import ReportView from '../report/ReportView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
@@ -54,10 +55,10 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
 
   const rows = view === null ? [] : candidateRows(view);
   const tabs = [
-    { id: 'progress' as const, label: 'Progress' },
-    { id: 'candidates' as const, label: `Candidates (${rows.length})` },
-    { id: 'files' as const, label: `Files (${artifacts.data?.length ?? 0})` },
-    { id: 'report' as const, label: 'Report' },
+    { id: 'progress' as const, label: 'Progress', Icon: ListChecks as LucideIcon },
+    { id: 'candidates' as const, label: `Candidates (${rows.length})`, Icon: Table2 as LucideIcon },
+    { id: 'files' as const, label: `Files (${artifacts.data?.length ?? 0})`, Icon: FolderOpen as LucideIcon },
+    { id: 'report' as const, label: 'Report', Icon: FileText as LucideIcon },
   ];
 
   return (
@@ -88,13 +89,14 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
           streamStatus={stream.status}
           navigate={navigate}
           championLabel={championLabel}
+          switched={switchedToAutomatic(data.gates)}
         />
         {data.execution_failed && (
           <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
         )}
         {pending.length > 0 && (
           <section aria-labelledby="gates-heading">
-            <h2 id="gates-heading">Waiting for you</h2>
+            <h2 id="gates-heading"><Hand className="icon" aria-hidden="true" /> Waiting for you</h2>
             {pending.map(({ gate, question }) =>
               question === null
                 ? (
@@ -126,7 +128,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                     key={item.id} type="button" role="tab" id={`run-tab-${item.id}`} aria-selected={tab === item.id}
                     aria-controls="run-panel" onClick={() => setTab(item.id)}
                   >
-                    {item.label}
+                    <item.Icon className="icon" aria-hidden="true" /> {item.label}
                   </button>
                 ))}
               </div>

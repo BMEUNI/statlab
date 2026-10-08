@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -11,7 +12,14 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, JsonValue, ValidationError
 from statlab.domains.base import NodeResult
-from statlab.domains.candidate_pipeline import CandidatePipelineExecutor, pipeline_from_state
+from statlab.domains.candidate_pipeline import (
+    _CLEAN_PREPROCESSING_RATIONALE,
+    _CLEAN_PREPROCESSING_SUMMARY,
+    _FEATURE_RATIONALE,
+    _FEATURE_SUMMARY,
+    CandidatePipelineExecutor,
+    pipeline_from_state,
+)
 from statlab.domains.decisions import (
     DesignDecision,
     EvaluationActions,
@@ -693,13 +701,91 @@ async def test_preprocessing_contract_conflict_threshold_drops_and_outliers(
     save_result(h, invocation, output)
 
 
+def _set_null_counts(h: Harness, counts: dict[str, int]) -> None:
+    dump = h.state.model_dump(mode="json")
+    for boundary in dump["shared_results"]:
+        if boundary["node_name"] != "intake":
+            continue
+        for entry in boundary["result"]["summary"]["tools"]:
+            if entry["tool"] == "load_csv":
+                entry["result"]["summary"]["null_counts"] = counts
+    h.state = RunState.model_validate(dump)
+
+
 @pytest.mark.asyncio
-async def test_feature_stage_waits_and_refuses_skip(
+async def test_decide_prompt_carries_digest_in_system_prefix(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    output = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
+    assert output.status == "completed"
+    call = next(c for c in h.llm.calls if c[0] is PreprocessingDecision)
+    system, user = call[2][0]["content"], call[2][1]["content"]
+    assert system.endswith("\n\nsection")
+    assert '"node":"intake"' in system
+    assert '"checkpointed_candidates"' in system
+    assert '"tool":"load_csv"' not in system
+    summary = json.loads(user.split("\n\n")[0])
+    assert set(summary) == {"node", "candidate", "sibling_validation"}
+    assert summary["node"] == "preprocessing"
+    assert summary["sibling_validation"] == []
+
+
+@pytest.mark.asyncio
+async def test_preprocessing_skips_llm_without_missing_values(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
 ) -> None:
     h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    _set_null_counts(h, {"x": 0, "id": 0, "excluded": 0, "y": 0})
+    h.llm.responses[PreprocessingDecision] = PreprocessingDecision(
+        rationale="Unused", high_missing_threshold=0.5
+    )
+    before = len(h.llm.calls)
+    output = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
+    assert output.status == "completed"
+    assert len(h.llm.calls) == before
+    names = [name for _, name, _ in tools.calls]
+    assert "drop_constant_columns" in names
+    assert "drop_high_missing_columns" not in names
+    assert output.summary["decision"] == PreprocessingDecision(
+        rationale=_CLEAN_PREPROCESSING_RATIONALE,
+        user_summary=_CLEAN_PREPROCESSING_SUMMARY,
+        drop_constant=True,
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_preprocessing_asks_llm_when_values_are_missing(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    _set_null_counts(h, {"x": 3, "id": 0, "excluded": 0, "y": 0})
+    h.llm.responses[PreprocessingDecision] = PreprocessingDecision(
+        rationale="Unused", high_missing_threshold=0.5
+    )
+    before = len(h.llm.calls)
+    output = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 6))
+    assert output.status == "completed"
+    assert len(h.llm.calls) == before + 1
+    assert h.llm.calls[-1][0] is PreprocessingDecision
+    assert '{"null_counts":{"excluded":0,"id":0,"x":3,"y":0}}' in h.llm.calls[-1][2][1]["content"]
+    sparse = [params for _, name, params in tools.calls if name == "drop_high_missing_columns"]
+    assert len(sparse) == 1 and sparse[0]["threshold"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_feature_stage_is_deterministic_and_refuses_skip(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
     invocation = candidate_invocation(h, 6)
     output = await CandidatePipelineExecutor(h.runtime)(invocation)
     assert output.status == "completed"
@@ -708,13 +794,13 @@ async def test_feature_stage_waits_and_refuses_skip(
     h.llm.responses[FeatureDecision] = FeatureDecision(
         rationale="Exception needs review", material_exceptions=("Rare level collapse",)
     )
-    offset = len(tools.calls)
-    waiting = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))
-    assert waiting.status == "awaiting_user"
-    decision = waiting.summary["decision"]
-    assert isinstance(decision, dict)
-    assert decision["material_exceptions"] == ["Rare level collapse"]
-    assert len(tools.calls) == offset
+    before = len(h.llm.calls)
+    done = await CandidatePipelineExecutor(h.runtime)(candidate_invocation(h, 7))
+    assert done.status == "completed"
+    assert len(h.llm.calls) == before
+    assert done.summary["decision"] == FeatureDecision(
+        rationale=_FEATURE_RATIONALE, user_summary=_FEATURE_SUMMARY
+    ).model_dump(mode="json")
     with pytest.raises(ValidationError):
         FeatureDecision.model_validate(
             {"rationale": "Skip requested", "skip_reason": "No engineered features needed"}

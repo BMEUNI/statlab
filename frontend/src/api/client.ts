@@ -223,6 +223,7 @@ export function parseProjectDetail(value: unknown): ProjectDetail {
   return {
     project: parseProject(project),
     runs: objectArray(value.runs).map(parseRun),
+    switched_runs: stringArray(value.switched_runs),
     memory: objectArray(value.memory).map(parseMemory),
   };
 }

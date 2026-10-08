@@ -61,7 +61,8 @@ async def test_qa_current_role_and_skill_precedence(
     assert result.text == "Evidence answer"
     assert client.calls[0][:2] == (expected, reasoning)
     messages = client.calls[0][2]
-    assert messages[0]["content"].startswith("Captured policy\n\n## alpha")
+    assert messages[0]["content"].startswith("Captured policy\n\n")
+    assert "## alpha" in messages[0]["content"]
     assert "Never recommend test-based selection" in messages[1]["content"]
 
 

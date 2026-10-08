@@ -67,7 +67,7 @@ def test_prefix_tail_order_and_start_snapshot(
     assert messages[0] == {
         "role": "system",
         "content": "\n\n".join(
-            ("Shared policy", "## node\nOwn section", canonical_contract, canonical_memory)
+            ("Shared policy", canonical_contract, canonical_memory, "null", "## node\nOwn section")
         ),
     }
     assert messages[0] == later[0]
@@ -77,6 +77,12 @@ def test_prefix_tail_order_and_start_snapshot(
     }
     assert "later_fact" not in messages[0]["content"]
     assert context.memory == (row,)
+
+
+def test_shared_digest_precedes_skill_section(minimal_contract: DataContract) -> None:
+    context = PromptContext("P", _skill(), minimal_contract, (), {"b": 1})
+    messages = context.messages(state_summary={}, recent_tool_results=(), question="Q")
+    assert messages[0]["content"].endswith('\n\n{"b":1}\n\n## node\nOwn section')
 
 
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])

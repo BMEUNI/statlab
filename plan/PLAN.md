@@ -1224,6 +1224,17 @@ whereas Anthropic requires explicit `cache_control` breakpoints. The invariant-f
 what makes both possible — the prefix boundary is already in the right place, so enabling
 explicit caching later is a flag, not a restructure.
 
+**Addendum (2026-10-08, chunk 43a).** Node decisions now use
+`[ preamble ] [ contract ] [ memory ] [ shared digest ] [ node's skill section ]` as the system
+prefix, so every node of a run shares the longest possible cached prefix (the skill section
+differs per node and therefore goes last). The shared digest (`domains.runtime.boundary_digest`)
+holds the last result per shared node with tool logs (after candidates exist), registry,
+candidate sets and report sections dropped and rationales cut to two sentences, plus the
+checkpointed candidate specs. The tail keeps node, candidate and compact sibling validation
+metrics. Preprocessing on data with no missing values and feature engineering (always fully
+specified) record code-built decisions instead of calling the LLM. Reason: first paid run cost
+$0.32 with 1.12 M prompt tokens and a 26 % cache rate.
+
 ### 7.3 Model routing — one place to change it (D16, D18)
 
 Nodes map to **roles**, roles map to **model strings**. That indirection is the whole point: a

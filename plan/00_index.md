@@ -69,6 +69,7 @@ document checks, not product gates. Batch scope and behavior requirements remain
 | B16 | 39 comparison + 40 report | M13 |
 | B17 | 41 chat-first app (user direction 2026-10-08) | completed 2026-10-08 (make check 3091 passed, 100%; npm test 71/71; browser acceptance) |
 | B18 | 42 speed, talkative chat, gate forms, blue redesign (user feedback 2026-10-08) | completed 2026-10-08 (make check 3104 passed, 100%; npm test 77/77) |
+| B19 | 43 cheaper runs + UI polish (user feedback 2026-10-08) | completed 2026-10-08 (make check 3117 passed, 100%; npm test 79/79; browser acceptance) |
 
 ## Phase A — Foundation (01–06)
 
@@ -140,7 +141,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 34 | `34_api_runs.md` — run creation, state snapshot, messages, gate answers, control actions (incl. rewind → new run id) | implemented; static-only B13, runtime/coverage outstanding | 22, 32, 33 |
 | 35 | [`35_sse_stream.md`](./35_sse_stream.md) — SSE endpoint, `?since=` replay from `events.jsonl`, 15 s heartbeat, token-delta streaming for prose only | implemented (static only; tests stopped) | 22, 34 |
 
-## Phase G — Frontend (36–42)
+## Phase G — Frontend (36–43)
 
 | # | Chunk | Status | Depends on |
 |---|---|---|---|
@@ -151,6 +152,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 39 | [`39_frontend_comparison.md`](./39_frontend_comparison.md) — candidate comparison table sortable by metric with `varies_from_baseline`, file browser with preview/download/D32 lock, fork-aware artifact listing | implemented 2026-10-08 (make check 3076 passed, 100%; browser acceptance) | 38 |
 | 40 | [`40_frontend_report.md`](./40_frontend_report.md) — report viewer (in-repo safe markdown subset, no raw HTML), champion card, downloads, run lineage tree and multi-run comparison | implemented 2026-10-08 (npm test 63/63; report browser-checked) | 39 |
 | 41 | [`41_chat_first_ui.md`](./41_chat_first_ui.md) — chat-first home: LLM setup assistant with inline widgets, run workspace as chat + progress timeline with candidate lanes, calm light redesign; projects browser at `#/projects` | completed 2026-10-08 (make check 3091 passed, 100%; npm test 71/71; browser acceptance) | 40 |
+| 43 | [`43_cost_and_ui_polish.md`](./43_cost_and_ui_polish.md) — prompt digest + cache-friendly prefix, code-built decisions for fixed steps, ordered stepper, lucide icons, size-safe layout, mode and fit-time labels | completed 2026-10-08 (make check 3117 passed, 100%; npm test 79/79) | 42 |
 | 42 | [`42_speed_chat_redesign.md`](./42_speed_chat_redesign.md) — threaded CV/permutation, numpy bootstrap scoring, navy/blue redesign, chat narration + run summary, short gate forms | completed 2026-10-08 (make check 3104 passed, 100%; npm test 77/77) | 41 |
 
 ## Dependency graph (phase level)
@@ -167,7 +169,7 @@ C: 21 → 22 → {23, 24}    25 → 26
 D: 27a → 27b → 28 → 29
 E: 30 → 31 → 32
 F: 33 → 34 → 35
-G: 36 → 37 → 38 → 39 → 40 → 41 → 42
+G: 36 → 37 → 38 → 39 → 40 → 41 → 42 → 43
 ```
 
 ## Two checkpoints worth pausing at

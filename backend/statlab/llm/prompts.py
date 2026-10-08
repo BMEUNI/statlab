@@ -28,6 +28,7 @@ class PromptContext:
     skill: NodeSkill
     contract: DataContract
     memory: tuple[MemoryRow, ...] = ()
+    shared: JsonValue = None
     _prefix: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -39,7 +40,15 @@ class PromptContext:
         object.__setattr__(
             self,
             "_prefix",
-            "\n\n".join((self.preamble, self.skill.section, contract, _canonical(facts))),
+            "\n\n".join(
+                (
+                    self.preamble,
+                    contract,
+                    _canonical(facts),
+                    _canonical(self.shared),
+                    self.skill.section,
+                )
+            ),
         )
 
     def messages(

@@ -309,6 +309,7 @@ async def test_create_list_detail_and_csv_upload(
         detail = await client.get(f"/api/projects/{project['id']}")
         assert detail.status_code == 200
         assert detail.json()["project"] == project
+        assert detail.json()["switched_runs"] == []
         content = b"a,b,c\n1,2.5,x\n3,4.5,y\n4,6.5,z\n"
         upload = await client.post(
             f"/api/projects/{project['id']}/datasets",

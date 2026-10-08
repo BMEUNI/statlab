@@ -29,6 +29,28 @@ from statlab.errors import EngineError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import CandidateProgress, RunState
 
+_CLEAN_PREPROCESSING_RATIONALE = (
+    "No column has missing values (load_csv null counts are all zero), so the planned "
+    "preprocessing runs without an LLM decision: constant-column handling follows the contract "
+    "and no high-missing drop applies."
+)
+_CLEAN_PREPROCESSING_SUMMARY = (
+    "No missing values were found, so preprocessing used the planned settings without changes."
+)
+_FEATURE_RATIONALE = (
+    "Feature engineering applies the approved candidate specification exactly; it has no free "
+    "choices."
+)
+_FEATURE_SUMMARY = "Built the planned features, encoding and scaling for this model."
+
+
+def _no_missing_values(null_counts: JsonValue) -> bool:
+    return (
+        isinstance(null_counts, dict)
+        and bool(null_counts)
+        and all(type(value) is int and value == 0 for value in null_counts.values())
+    )
+
 
 def candidate_result(branch: CandidateProgress, node: str) -> NodeResult:
     """Read only committed successful attempts, newest retune first."""
@@ -237,14 +259,24 @@ class CandidatePipelineExecutor:
     ) -> NodeResult:
         pipeline = pipeline_from_state(invocation.state, branch)
         problem = problem_from_state(invocation.state)
-        decision = await self.runtime.decide(
-            invocation,
-            PreprocessingDecision,
-            evidence=(pipeline.model_dump(mode="json"),),
-            question="Execute approved preprocessing. Decide train-only constant/high-missing "
-            "column drops. Imputation/outliers are fixed by candidate; never drop rows or cast. "
-            "Declare material exceptions. Explicit contract drop_constant is authoritative.",
-        )
+        intake = shared_result(invocation.state, "intake")
+        null_counts = _tool_summary(intake, "load_csv").get("null_counts")
+        if _no_missing_values(null_counts):
+            decision = PreprocessingDecision(
+                rationale=_CLEAN_PREPROCESSING_RATIONALE,
+                user_summary=_CLEAN_PREPROCESSING_SUMMARY,
+                drop_constant=self.runtime.contract.preprocessing.drop_constant,
+            )
+        else:
+            decision = await self.runtime.decide(
+                invocation,
+                PreprocessingDecision,
+                evidence=(pipeline.model_dump(mode="json"), {"null_counts": null_counts}),
+                question="Execute approved preprocessing. Decide train-only constant/high-missing "
+                "column drops. Imputation/outliers are fixed by candidate; never drop rows or "
+                "cast. "
+                "Declare material exceptions. Explicit contract drop_constant is authoritative.",
+            )
         approved = await exception_approval(self.runtime, invocation, decision, evidence)
         if approved is None:
             return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
@@ -255,7 +287,6 @@ class CandidatePipelineExecutor:
             and decision.drop_constant != rules.drop_constant
         ):
             raise _RefusalError("constant drop conflicts with explicit contract")
-        intake = shared_result(invocation.state, "intake")
         columns = _strings(_tool_summary(intake, "load_csv").get("columns"), "source columns")
         features = self.runtime.contract.features
         # Node 4 already drops exclusions except structurally protected columns.
@@ -355,17 +386,7 @@ class CandidatePipelineExecutor:
     ) -> NodeResult:
         pipeline = pipeline_from_state(invocation.state, branch, require="preprocessing")
         feature = branch.spec.features
-        decision = await self.runtime.decide(
-            invocation,
-            FeatureDecision,
-            evidence=(pipeline.model_dump(mode="json"),),
-            question="Execute fixed approved features, encoding, scaling and selection. Explain "
-            "exceptions, never invent ratios/indicators. Approved actions must execute.",
-        )
-        approved = await exception_approval(self.runtime, invocation, decision, evidence)
-        if approved is None:
-            return evidence.result("awaiting_user", {"decision": decision.model_dump(mode="json")})
-        decision = approved
+        decision = FeatureDecision(rationale=_FEATURE_RATIONALE, user_summary=_FEATURE_SUMMARY)
         if feature.encoding == "frequency":
             raise _RefusalError("frequency encoding has no supported tool")
         for column, parts in feature.datetime_parts.items():

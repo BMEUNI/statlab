@@ -269,9 +269,12 @@ test('setup parsers validate and transform backend payloads', () => {
   const detail = {
     project,
     runs: [],
+    switched_runs: ['r_1'],
     memory: [{ id: 'm1', key: 'k', value_json: '{"a":1}', source_run_id: null, ts: 'now' }],
   };
   assert.deepEqual(parseProjectDetail(detail).memory[0]?.value, { a: 1 });
+  assert.deepEqual(parseProjectDetail(detail).switched_runs, ['r_1']);
+  isInvalidResponse(() => parseProjectDetail({ ...detail, switched_runs: [1] }));
   isInvalidResponse(() => parseProjectDetail({ ...detail, memory: [{ ...detail.memory[0], value_json: '{' }] }));
 });
 

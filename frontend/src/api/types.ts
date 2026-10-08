@@ -127,7 +127,7 @@ export type DatasetRecord = {
 };
 export type ContractRecord = { id: string; project_id: string; version: number; created_at: string; contract: JsonObject };
 export type MemoryEntry = { id: string; key: string; value: JsonValue; source_run_id: string | null; ts: string };
-export type ProjectDetail = { project: ProjectSummary; runs: RunSummary[]; memory: MemoryEntry[] };
+export type ProjectDetail = { project: ProjectSummary; runs: RunSummary[]; switched_runs: string[]; memory: MemoryEntry[] };
 export type DatasetProfile = {
   rows: number;
   cols: number;

@@ -1,3 +1,4 @@
+import { FolderOpen, Plus } from 'lucide-react';
 import ChatHome from './chat/ChatHome.tsx';
 import { CURRENT_KEY, browserStore, clearSession } from './chat/session.ts';
 import ProjectPage from './pages/ProjectPage.tsx';
@@ -24,8 +25,8 @@ export default function App() {
               setChatKey((key) => key + 1);
               navigate({ name: 'home' });
             }}
-          >New chat</button>
-          <a className="button" href="#/projects" aria-current={inProjects ? 'page' : undefined}>Projects &amp; runs</a>
+          ><Plus className="icon" aria-hidden="true" />New chat</button>
+          <a className="button" href="#/projects" aria-current={inProjects ? 'page' : undefined}><FolderOpen className="icon" aria-hidden="true" />Projects &amp; runs</a>
         </nav>
       </header>
       <main className={route.name === 'home' || route.name === 'run' ? 'app-main' : 'app-main scroll'}>

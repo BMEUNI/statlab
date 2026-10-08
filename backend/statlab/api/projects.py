@@ -50,6 +50,7 @@ from statlab.persistence.repository import (
     list_datasets,
     list_projects,
     list_runs,
+    runs_switched_to_autonomous,
 )
 
 PROJECT_SLUG_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
@@ -92,6 +93,7 @@ class ProjectDetail(BaseModel):
 
     project: ProjectRow
     runs: tuple[RunRow, ...]
+    switched_runs: tuple[str, ...]
     memory: tuple[MemoryRow, ...]
 
 
@@ -449,6 +451,7 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         return ProjectDetail(
             project=project,
             runs=list_runs(resource.conn, project.id),
+            switched_runs=runs_switched_to_autonomous(resource.conn, project.id),
             memory=read_memory(resource.conn, project.id),
         )
 

@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { Clock, Coins, Pause, Play, RotateCcw, Square, Timer } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { controlRun, rewindRun } from '../api/client.ts';
 import type { StreamStatus } from '../api/events.ts';
 import type { ControlReply, RunSummary } from '../api/types.ts';
 import { formatRoute, type Route } from '../routes.ts';
 import { errorText, formatTime } from '../ui/format.ts';
-import { formatUsd, nodeLabel, runControls, statusTone, STATUS_LABELS, type RunView } from './model.ts';
+import { formatUsd, modeLabel, nodeLabel, runControls, statusTone, STATUS_LABELS, type RunView } from './model.ts';
 
 type Props = {
   run: RunSummary;
@@ -13,6 +14,7 @@ type Props = {
   costUsd: number | null;
   streamStatus: StreamStatus;
   championLabel: string | null;
+  switched: boolean;
   navigate: (route: Route) => void;
 };
 type Action = { kind: 'control'; action: 'pause' | 'resume' | 'cancel' } | { kind: 'rewind'; target: string };
@@ -25,7 +27,7 @@ const STREAM_LABELS: Record<StreamStatus, string> = {
   error: 'Stopped. Reload the page to reconnect.',
 };
 
-export default function RunHeader({ run, view, costUsd, streamStatus, navigate, championLabel }: Props) {
+export default function RunHeader({ run, view, costUsd, streamStatus, navigate, championLabel, switched }: Props) {
   const queryClient = useQueryClient();
   const [target, setTarget] = useState(view?.spine[0]?.name ?? '');
   const controls = runControls(run.status);
@@ -54,16 +56,16 @@ export default function RunHeader({ run, view, costUsd, streamStatus, navigate, 
       <section className="run-band" aria-label="Run status">
         <div className="run-band-top">
           <div>
-            <p className="run-band-kicker">{run.mode === 'guided' ? 'Guided run' : 'Autonomous run'}</p>
+            <p className="run-band-kicker">{`${modeLabel(run.mode, switched)} run`}</p>
             <p className={`run-band-status tone-${tone}`}>{STATUS_LABELS[run.status]}</p>
             {sub !== '' && <p className="run-band-sub">{sub}</p>}
           </div>
           <div className="run-band-actions">
             {controls.pause && (
-              <button type="button" disabled={busy} onClick={() => mutation.mutate({ kind: 'control', action: 'pause' })}>Pause</button>
+              <button type="button" disabled={busy} onClick={() => mutation.mutate({ kind: 'control', action: 'pause' })}><Pause className="icon" aria-hidden="true" />Pause</button>
             )}
             {controls.resume && (
-              <button type="button" className="primary" disabled={busy} onClick={() => mutation.mutate({ kind: 'control', action: 'resume' })}>Resume</button>
+              <button type="button" className="primary" disabled={busy} onClick={() => mutation.mutate({ kind: 'control', action: 'resume' })}><Play className="icon" aria-hidden="true" />Resume</button>
             )}
             {controls.cancel && (
               <button
@@ -73,19 +75,19 @@ export default function RunHeader({ run, view, costUsd, streamStatus, navigate, 
                 onClick={() => {
                   if (window.confirm('Stop this run? It cannot be resumed.')) mutation.mutate({ kind: 'control', action: 'cancel' });
                 }}
-              >Stop the run</button>
+              ><Square className="icon" aria-hidden="true" />Stop the run</button>
             )}
           </div>
         </div>
         <dl className="run-stats">
-          <div><dt>Agent cost</dt><dd>{costUsd === null ? '…' : formatUsd(costUsd)}</dd></div>
+          <div><dt><Coins className="icon" aria-hidden="true" />Agent cost</dt><dd>{costUsd === null ? '…' : formatUsd(costUsd)}</dd></div>
           {view?.budget && (
             <div>
-              <dt>Fit time</dt>
-              <dd>{`${(view.budget.usedMs / 1000).toFixed(1)} s of ${(view.budget.limitMs / 1000).toFixed(0)} s`}</dd>
+              <dt><Timer className="icon" aria-hidden="true" />Model training time</dt>
+              <dd>{`${(view.budget.usedMs / 1000).toFixed(1)} s of ${(view.budget.limitMs / 1000).toFixed(0)} s allowed`}</dd>
             </div>
           )}
-          <div><dt>Started</dt><dd>{formatTime(run.started_at)}</dd></div>
+          <div><dt><Clock className="icon" aria-hidden="true" />Started</dt><dd>{formatTime(run.started_at)}</dd></div>
         </dl>
       </section>
       <details className="run-more">
@@ -94,6 +96,12 @@ export default function RunHeader({ run, view, costUsd, streamStatus, navigate, 
           <dt>Run ID</dt><dd><code>{run.id}</code></dd>
           <dt>Ended</dt><dd>{formatTime(run.ended_at)}</dd>
           <dt>Live updates</dt><dd>{STREAM_LABELS[streamStatus]}</dd>
+          {view?.budget && (
+            <>
+              <dt>Training time limit</dt>
+              <dd>The total time all candidate models may spend training. When it is used up, no further models start training.</dd>
+            </>
+          )}
           {parent !== null && (
             <>
               <dt>Rewound from</dt>
@@ -117,7 +125,7 @@ export default function RunHeader({ run, view, costUsd, streamStatus, navigate, 
                   mutation.mutate({ kind: 'rewind', target });
                 }
               }}
-            >Rewind</button>
+            ><RotateCcw className="icon" aria-hidden="true" />Rewind</button>
           </>
         )}
       </details>

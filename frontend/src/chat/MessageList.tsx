@@ -1,3 +1,4 @@
+import { Bot, ScanSearch } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
 import type { ChatMessage } from './session.ts';
 
@@ -33,14 +34,14 @@ export default function MessageList({ messages, pending, drafts = [], onStep, ch
           if (message.role === 'assistant') {
             return (
               <li className="msg agent" key={message.id}>
-                <span className="avatar" aria-hidden="true" />
+                <span className="avatar" aria-hidden="true"><Bot className="icon" aria-hidden="true" /></span>
                 <div className="msg-body">
                   {message.title !== undefined && <p className="msg-title">{message.title}</p>}
                   <Paragraphs text={message.text} />
                   <Link message={message} />
                   {message.step !== undefined && onStep !== undefined && (
                     <button type="button" className="link-button" onClick={() => onStep(message.step as Step)}>
-                      Show the details
+                      <ScanSearch className="icon" aria-hidden="true" /> Show the details
                     </button>
                   )}
                 </div>
@@ -60,13 +61,13 @@ export default function MessageList({ messages, pending, drafts = [], onStep, ch
         })}
         {drafts.map((draft, index) => (
           <li className="msg agent draft" key={`draft-${index}`}>
-            <span className="avatar" aria-hidden="true" />
+            <span className="avatar" aria-hidden="true"><Bot className="icon" aria-hidden="true" /></span>
             <div className="msg-body"><Paragraphs text={draft} /></div>
           </li>
         ))}
         {pending && (
           <li className="msg agent typing" aria-label="The assistant is thinking">
-            <span className="avatar" aria-hidden="true" />
+            <span className="avatar" aria-hidden="true"><Bot className="icon" aria-hidden="true" /></span>
             <span className="dots"><i /><i /><i /></span>
           </li>
         )}

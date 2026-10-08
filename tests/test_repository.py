@@ -46,6 +46,7 @@ from statlab.persistence.repository import (
     require_project,
     require_run,
     run_ancestry,
+    runs_switched_to_autonomous,
     save_champion_model,
     set_test_fingerprint,
     transition_gate,
@@ -1450,6 +1451,29 @@ def test_reuse_pending_execution_guards(
     )
     with pytest.raises(PersistenceError, match="duplicate pending execution anchors"):
         create_node_execution(conn, run_id=run.id, node_name="alpha", seq=1, reuse_pending=True)
+
+
+def test_runs_switched_to_autonomous(migrated_db: sqlite3.Connection, project: ProjectRow) -> None:
+    conn = migrated_db
+    first = champion_run(conn, project)
+    second = champion_run(conn, project)
+    exec_first = create_node_execution(conn, run_id=first.id, node_name="alpha", seq=1)
+    exec_second = create_node_execution(conn, run_id=second.id, node_name="alpha", seq=1)
+    gate = create_gate(conn, run_id=first.id, execution_id=exec_first.id, question={"phase": "a"})
+    transition_gate(
+        conn,
+        gate,
+        status="answered",
+        answer_json=json.dumps({"action": "approve_all_remaining"}),
+    )
+    answered = create_gate(
+        conn, run_id=second.id, execution_id=exec_second.id, question={"phase": "a"}
+    )
+    transition_gate(
+        conn, answered, status="answered", answer_json=json.dumps({"action": "approve"})
+    )
+    create_gate(conn, run_id=second.id, execution_id=exec_second.id, question={"phase": "b"})
+    assert runs_switched_to_autonomous(conn, project.id) == (first.id,)
 
 
 def test_gate_persistence_guards(migrated_db: sqlite3.Connection, project: ProjectRow) -> None:

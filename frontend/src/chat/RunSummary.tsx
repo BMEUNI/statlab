@@ -1,3 +1,4 @@
+import { Trophy } from 'lucide-react';
 import { artifactUrl } from '../api/client.ts';
 import { champion } from '../report/champion.ts';
 import { estimatorLabel, humanize, metricLabel, nodeLabel, type RunView } from '../run/model.ts';
@@ -25,7 +26,7 @@ export default function RunSummary({ view, onTab, onStep }: Props) {
   const max = features === null ? 0 : Math.max(...features.items.map((item) => item.value));
   return (
     <section className="run-summary" aria-label="Run summary">
-      <h3>The run is finished</h3>
+      <h3><Trophy className="icon" aria-hidden="true" /> The run is finished</h3>
       <p>
         The best model is <strong>{humanize(c.label)}</strong> ({estimatorLabel(c.estimator)}), chosen from{' '}
         {view.branches.length} candidate models.

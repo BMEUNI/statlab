@@ -5,11 +5,13 @@ import type {
   GateAction,
   GatePhase,
   GateQuestion,
+  GateSummary,
   JsonObject,
   JsonValue,
   LlmCallRecord,
   RunEvent,
   RunExecutions,
+  RunMode,
   RunStatus,
   ToolCallRecord,
   Vocabulary,
@@ -42,6 +44,35 @@ export function humanize(text: string): string {
 
 export function nodeLabel(name: string): string {
   return humanize(name);
+}
+
+export function switchedToAutomatic(gates: GateSummary[]): boolean {
+  return gates.some((gate) => {
+    if (gate.answer_json === null) return false;
+    try {
+      const answer: unknown = JSON.parse(gate.answer_json);
+      return isJsonObject(answer) && answer.action === 'approve_all_remaining';
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function modeLabel(mode: RunMode, switched: boolean): string {
+  if (switched) return 'Guided, then automatic';
+  return mode === 'guided' ? 'Guided' : 'Autonomous';
+}
+
+export const STEP_SHORT_LABELS: Record<string, string> = {
+  preprocessing: 'Clean',
+  feature_engineering: 'Features',
+  model_training: 'Train',
+  model_evaluation: 'Evaluate',
+  model_interpretation: 'Explain',
+};
+
+export function stepShortLabel(node: string): string {
+  return STEP_SHORT_LABELS[node] ?? nodeLabel(node);
 }
 
 export const ESTIMATOR_LABELS: Record<string, string> = {

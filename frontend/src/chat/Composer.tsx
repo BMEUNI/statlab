@@ -1,3 +1,4 @@
+import { Send } from 'lucide-react';
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
 
 type Props = { onSend: (text: string) => void; disabled: boolean; placeholder: string };
@@ -30,7 +31,7 @@ export default function Composer({ onSend, disabled, placeholder }: Props) {
         onChange={(event) => setText(event.target.value)}
         onKeyDown={onKeyDown}
       />
-      <button type="submit" className="primary" disabled={disabled || trimmed === ''}>Send</button>
+      <button type="submit" className="primary" disabled={disabled || trimmed === ''}><Send className="icon" aria-hidden="true" />Send</button>
     </form>
   );
 }
