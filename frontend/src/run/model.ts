@@ -741,8 +741,8 @@ export function jsonBlock(text: string): string | null {
   return Array.isArray(value) || isJsonObject(value) ? JSON.stringify(value, null, 2) : null;
 }
 
-export function splitLead(text: string): { lead: string; more: string | null } {
-  const lead = firstSentences(text, 1);
+export function splitLead(text: string, n = 1): { lead: string; more: string | null } {
+  const lead = firstSentences(text, n);
   const rest = text.trim().slice(lead.length).trim();
   return { lead, more: rest === '' ? null : rest };
 }

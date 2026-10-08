@@ -568,3 +568,21 @@ also uses `.side-pane`, whose padding and scrolling moved to `.side-scroll` in 4
 `RunPage` got the wrapper. Fix: in `SetupPane`'s returned JSX, wrap every child of the `<aside>`
 (the `h2`, the `secondary-line` paragraph, the `ol.timeline` and the `ready` block) in one
 `<div className="side-scroll">`. No CSS change. Checks: `npm run typecheck`, `npm run build`.
+
+## Addendum F — "Read the full reasoning" repeats the lead (post-commit user report)
+
+User, 2026-10-08: "Read the full reasoning always start repeating itself even though the first
+one describes it.. so the first X sentence is always duplicated". Cause:
+`frontend/src/run/GatePanel.tsx:100-110` shows `firstSentences(reasoning, 3)` and then the whole
+`reasoning` inside the details block.
+
+1. `model.ts` `splitLead(text: string, n = 1)`: `lead = firstSentences(text, n)`; rest unchanged.
+   Existing callers keep the default.
+2. `GatePanel.tsx`: `const reasoning = splitLead(question.reasoning, 3)` (import `splitLead`;
+   drop the `firstSentences` import if it becomes unused). When `question.reasoning.trim() !==
+   ''`: `<p>{reasoning.lead}</p>`, then, when `reasoning.more !== null`, `<details><summary>Read
+   more</summary><p className="reasoning">{reasoning.more}</p></details>`.
+3. Test (`tests/run-model.test.ts`, test `jsonBlock and splitLead`): add
+   `assert.deepEqual(splitLead('A. B. C. D.', 3), { lead: 'A. B. C.', more: 'D.' })`.
+
+Checks: `npm test`, `npm run typecheck`, `npm run build` (from `frontend/`).

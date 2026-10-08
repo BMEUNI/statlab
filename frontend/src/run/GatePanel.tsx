@@ -9,7 +9,7 @@ import DecisionView from './DecisionView.tsx';
 import {
   availableActions,
   EMPTY_VOCABULARY,
-  firstSentences,
+  splitLead,
   gateEdits,
   gateFieldSplit,
   nodeLabel,
@@ -42,6 +42,7 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
   const hasEdits = Object.keys(edits).length > 0;
   const editable = actions.includes('approve_with_edits');
   const { main, rest } = gateFieldSplit(question);
+  const reasoning = splitLead(question.reasoning, 3);
 
   const refresh = () =>
     Promise.all([
@@ -99,11 +100,11 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
       {question.failure !== null && <p role="alert">{question.failure.message}</p>}
       {question.reasoning.trim() !== '' && (
         <>
-          <p>{firstSentences(question.reasoning, 3)}</p>
-          {firstSentences(question.reasoning, 3) !== question.reasoning.trim() && (
+          <p>{reasoning.lead}</p>
+          {reasoning.more !== null && (
             <details>
-              <summary>Read the full reasoning</summary>
-              <p className="reasoning">{question.reasoning}</p>
+              <summary>Read more</summary>
+              <p className="reasoning">{reasoning.more}</p>
             </details>
           )}
         </>

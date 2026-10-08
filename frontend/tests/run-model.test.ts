@@ -477,4 +477,5 @@ test('jsonBlock and splitLead', () => {
   assert.equal(jsonBlock('"str"'), null);
   assert.deepEqual(splitLead('First one. Second one.'), { lead: 'First one.', more: 'Second one.' });
   assert.deepEqual(splitLead('Only.'), { lead: 'Only.', more: null });
+  assert.deepEqual(splitLead('A. B. C. D.', 3), { lead: 'A. B. C.', more: 'D.' });
 });
