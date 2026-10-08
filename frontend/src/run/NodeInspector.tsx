@@ -3,7 +3,7 @@ import { formatTime } from '../ui/format.ts';
 import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
-import { executionsFor, formatUsd, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
+import { executionsFor, failureText, formatUsd, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
 import { metricsOf, type MetricValue } from './compare.ts';
 import type { Selection } from './RunTimeline.tsx';
 
@@ -113,7 +113,7 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
               {execution.endedAt !== null && (
                 <p>{`${((Date.parse(execution.endedAt) - Date.parse(execution.startedAt)) / 1000).toFixed(1)} s`}</p>
               )}
-              {execution.error && <p role="alert">{execution.error}</p>}
+              {execution.error && <p role="alert">{failureText(execution.error)}</p>}
               {toolCalls.length > 0 && (
                 <div className="table-wrap">
                   <table>

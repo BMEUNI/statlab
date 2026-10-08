@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, cast
@@ -48,6 +48,7 @@ from statlab.graph.control import ControlContext, ControlResponse, ControlText, 
 from statlab.graph.engine import RunTracker
 from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.reconciliation import RecoveryBinding, RestartReconciler
+from statlab.graph.recovery import recover_call
 from statlab.graph.router import ControlRouter, InterruptClass
 from statlab.graph.state import RunState
 from statlab.llm.routing import check_provider_environment
@@ -167,6 +168,11 @@ class ControlRequest(BaseModel):
         if self.action != "rewind" and (self.target is not None or self.request_id is not None):
             raise ValueError("target and request_id are rewind only")
         return self
+
+
+async def _retrying[T](call: Callable[[], Awaitable[T]]) -> T:
+    """Chat answers retry transient provider failures the way node calls do."""
+    return await recover_call(call)
 
 
 class RunRegistry:
@@ -735,7 +741,7 @@ class RunRegistry:
                 conversation=turns,
                 artifact_summaries=(),
                 estimated_remaining_seconds=None,
-                recovery=None,
+                recovery=_retrying,
                 prose_sink=prose_sink,
             )
             try:
@@ -747,7 +753,7 @@ class RunRegistry:
                     "error",
                     {
                         "reply_to": user.id,
-                        "message": "Assistant response failed.",
+                        "message": "I could not get an answer from the model. Please ask again.",
                         "discard_draft": True,
                     },
                 )

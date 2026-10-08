@@ -488,7 +488,7 @@ async def test_unavailable_citation_discards_streamed_draft(
         error_event = next(event for event in events if event.type == "error")
         assert error_event.payload == {
             "reply_to": user_event.payload["message_id"],
-            "message": "Assistant response failed.",
+            "message": "I could not get an answer from the model. Please ask again.",
             "discard_draft": True,
         }
         assert not any(event.type == "message.assistant.complete" for event in events)

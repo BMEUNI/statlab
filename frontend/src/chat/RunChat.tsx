@@ -49,6 +49,7 @@ export default function RunChat({
   const mutation = useMutation<ControlReply, Error, string>({
     mutationFn: (text) => sendMessage(runId, text),
     onSuccess: async (reply) => {
+      setExtra([]);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['run', runId] }),
         queryClient.invalidateQueries({ queryKey: ['executions', runId] }),
@@ -56,6 +57,7 @@ export default function RunChat({
       if (reply.newRunId !== null) navigate({ name: 'run', runId: reply.newRunId });
     },
     onError: (error) => {
+      if (error instanceof ApiError && (error.status === 502 || error.status === 503)) return;
       const text =
         error instanceof ApiError && error.status === 409
           ? `I can't do that right now because the run is ${STATUS_LABELS[status].toLowerCase()}. A run that waits for your decision can't be paused; answer the decision first.`

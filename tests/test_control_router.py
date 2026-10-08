@@ -158,7 +158,9 @@ async def test_all_dispatch_categories_preserve_original_context(
     else:
         assert received == []
     if category == "noise":
-        assert response.text == "Acknowledged."
+        assert response.text == (
+            'I\'m here. Ask me anything about this run, for example "compare the models".'
+        )
 
 
 @pytest.mark.parametrize("category", ["decision", "change", "lifecycle"])

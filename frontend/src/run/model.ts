@@ -789,3 +789,15 @@ export function splitLead(text: string, n = 1): { lead: string; more: string | n
   const rest = text.trim().slice(lead.length).trim();
   return { lead, more: rest === '' ? null : rest };
 }
+
+export function failureText(raw: string): string {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (isJsonObject(parsed) && typeof parsed.message === 'string' && parsed.message !== '') {
+      return parsed.message;
+    }
+  } catch {
+    return raw;
+  }
+  return raw;
+}

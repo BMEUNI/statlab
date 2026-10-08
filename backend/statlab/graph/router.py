@@ -81,7 +81,13 @@ class ControlRouter:
             case "status":
                 return await explain_status(message, context, polish=self._polish_status)
             case "noise":
-                return ControlResponse(category="noise", text="Acknowledged.")
+                return ControlResponse(
+                    category="noise",
+                    text=(
+                        "I'm here. Ask me anything about this run, "
+                        'for example "compare the models".'
+                    ),
+                )
             case category:
                 handler = self._handlers[category]
                 if handler is None:

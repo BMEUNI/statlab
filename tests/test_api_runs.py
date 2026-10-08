@@ -10,12 +10,14 @@ from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, cast
 
 import httpx
 import litellm
 import pytest
+import statlab.api.runs as runs_api
 from fastapi import FastAPI, HTTPException
 from litellm.exceptions import APIConnectionError
 from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
@@ -31,6 +33,7 @@ from statlab.graph.control import ConversationTurn, QaAnswer
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.gates import GateQuestion
 from statlab.graph.lifecycle import RunLifecycle
+from statlab.graph.recovery import recover_call
 from statlab.graph.router import InterruptClass
 from statlab.graph.state import RunState
 from statlab.memory import read_memory, remember
@@ -275,6 +278,10 @@ async def _open_run_api(
 
 def _decision(text: str = "Fixture") -> str:
     return IntakeDecision(rationale=text).model_dump_json()
+
+
+async def _no_sleep(delay: float) -> None:
+    return None
 
 
 async def _create_run(
@@ -915,7 +922,9 @@ async def test_messages_status_noise_qa_and_provider_failure(
             assert response.status_code == 200
             responses.append(response.json())
         assert responses[0]["facts"]["run_id"] == run_id
-        assert responses[1]["text"] == "Acknowledged."
+        assert responses[1]["text"] == (
+            'I\'m here. Ask me anything about this run, for example "compare the models".'
+        )
         assert responses[2]["text"] == "Evidence unavailable."
         assert len(api.records.requests) == 5
         run_row = get_run(api.conn, run_id)
@@ -991,13 +1000,16 @@ async def test_messages_status_noise_qa_and_provider_failure(
             for call_run_id, execution_run_id in joined
         )
 
+    monkeypatch.setattr(runs_api, "recover_call", partial(recover_call, sleep=_no_sleep))
     provider_error = APIConnectionError(
         message="offline transient", llm_provider="fixture", model="x"
     )
     async with _open_run_api(
         tmp_path / "transient",
         monkeypatch,
-        records=FixtureRecords(replies=deque([_decision(), qa, provider_error])),
+        records=FixtureRecords(
+            replies=deque([_decision(), qa, provider_error, provider_error, provider_error])
+        ),
     ) as api:
         created = await _create_run(api)
         run_id = str(created.json()["run_id"])
@@ -1021,7 +1033,7 @@ async def test_messages_status_noise_qa_and_provider_failure(
         )
         assert events[1].payload == {
             "reply_to": events[0].payload["message_id"],
-            "message": "Assistant response failed.",
+            "message": "I could not get an answer from the model. Please ask again.",
             "discard_draft": True,
         }
         assert events[0].payload["message_id"] == rows[0].id
@@ -1034,14 +1046,37 @@ async def test_messages_status_noise_qa_and_provider_failure(
             "WHERE llm_calls.run_id = ?",
             (run_id,),
         ).fetchall()
-        assert len(api.records.requests) == 3
+        assert len(api.records.requests) == 5
         assert all(
             call_run_id == run_id and execution_run_id == run_id
             for call_run_id, execution_run_id, *_ in joined
         )
         qa_rows = tuple(row for row in joined if row[2] == "QaAnswer")
-        assert len(qa_rows) == 1
-        assert qa_rows[0][3] == qa_rows[0][4] == qa_rows[0][5] == 0
+        assert len(qa_rows) == 3
+        assert all(row[3] == row[4] == row[5] == 0 for row in qa_rows)
+
+    monkeypatch.setattr(runs_api, "recover_call", partial(recover_call, sleep=_no_sleep))
+    async with _open_run_api(
+        tmp_path / "recovered",
+        monkeypatch,
+        records=FixtureRecords(replies=deque([_decision(), qa, provider_error, answer])),
+    ) as api:
+        created = await _create_run(api)
+        run_id = str(created.json()["run_id"])
+        await _gate(api, run_id)
+        recovered = await api.client.post(f"/api/runs/{run_id}/messages", json={"text": "question"})
+        assert recovered.status_code == 200
+        assert recovered.json()["text"] == "Evidence unavailable."
+        assert len(api.records.requests) == 4
+        events = tuple(
+            event
+            for event in await api.registry.bindings[run_id].loop.events.replay()
+            if event.type in ("message.user", "message.assistant.complete", "error")
+        )
+        assert tuple(event.type for event in events) == (
+            "message.user",
+            "message.assistant.complete",
+        )
 
     async with _open_run_api(
         tmp_path / "failure",
@@ -1070,7 +1105,7 @@ async def test_messages_status_noise_qa_and_provider_failure(
         )
         assert events[1].payload == {
             "reply_to": events[0].payload["message_id"],
-            "message": "Assistant response failed.",
+            "message": "I could not get an answer from the model. Please ask again.",
             "discard_draft": True,
         }
         assert events[0].payload["message_id"] == rows[0].id

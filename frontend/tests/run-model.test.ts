@@ -5,6 +5,7 @@ import {
   cellStatus,
   estimatorLabel,
   executionsFor,
+  failureText,
   firstSentences,
   foldEvents,
   forkNote,
@@ -548,4 +549,14 @@ test('modelsFor lists registry models of one task', () => {
   assert.equal(modelsFor(estimators, 'regression'), 'Ridge regression, Gradient boosting');
   assert.equal(modelsFor(estimators, 'classification'), 'Logistic regression');
   assert.equal(modelsFor(estimators, 'survival'), '');
+});
+
+test('failureText reads the failure message', () => {
+  assert.equal(
+    failureText('{"error_class":"data","message":"Fit budget exhausted","field_errors":null}'),
+    'Fit budget exhausted',
+  );
+  assert.equal(failureText('plain text'), 'plain text');
+  assert.equal(failureText('{"message":""}'), '{"message":""}');
+  assert.equal(failureText('[1]'), '[1]');
 });
