@@ -559,3 +559,12 @@ jumps to the latest message; 390 px width has no horizontal overflow and correct
 inferential-analysis failure in that run is an offline stand-in limit (it answers from the
 scenario contract, not the edited one), not a product defect. Not exercised live: holding position
 while scrolled up during a running run (logic covered by review only).
+
+## Addendum E — setup pane lost its padding (post-commit user report)
+
+User, 2026-10-08: "the right panel now doesnt have a left margin ... this looks terrible". Cause:
+`SetupPane` (`frontend/src/chat/SetupPane.tsx`, default export, `<aside className="side-pane">`)
+also uses `.side-pane`, whose padding and scrolling moved to `.side-scroll` in 46b; only
+`RunPage` got the wrapper. Fix: in `SetupPane`'s returned JSX, wrap every child of the `<aside>`
+(the `h2`, the `secondary-line` paragraph, the `ol.timeline` and the `ready` block) in one
+`<div className="side-scroll">`. No CSS change. Checks: `npm run typecheck`, `npm run build`.

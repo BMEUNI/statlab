@@ -187,25 +187,27 @@ export default function SetupPane({ state, onState, onStart, starting }: Props) 
 
   return (
     <aside className="side-pane">
-      <h2>Your run</h2>
-      <p className="secondary-line">Everything the run needs. Fill it in by chatting, or use the choices in the chat.</p>
-      <ol className="timeline">
-        {items.map((item) => {
-          const status = item.done ? 'done' : step === item.key ? 'current' : 'upcoming';
-          return (
-            <li className={`tl-item tl-${status}`} key={item.key}>
-              <span className="tl-marker" aria-hidden="true" />
-              <div className="tl-body"><h3>{item.title}</h3>{item.value}</div>
-            </li>
-          );
-        })}
-      </ol>
-      {step === 'start' && (
-        <div className="ready">
-          <p>Ready to start.</p>
-          <button type="button" className="primary" disabled={starting} onClick={onStart}>Start the run</button>
-        </div>
-      )}
+      <div className="side-scroll">
+        <h2>Your run</h2>
+        <p className="secondary-line">Everything the run needs. Fill it in by chatting, or use the choices in the chat.</p>
+        <ol className="timeline">
+          {items.map((item) => {
+            const status = item.done ? 'done' : step === item.key ? 'current' : 'upcoming';
+            return (
+              <li className={`tl-item tl-${status}`} key={item.key}>
+                <span className="tl-marker" aria-hidden="true" />
+                <div className="tl-body"><h3>{item.title}</h3>{item.value}</div>
+              </li>
+            );
+          })}
+        </ol>
+        {step === 'start' && (
+          <div className="ready">
+            <p>Ready to start.</p>
+            <button type="button" className="primary" disabled={starting} onClick={onStart}>Start the run</button>
+          </div>
+        )}
+      </div>
     </aside>
   );
 }
