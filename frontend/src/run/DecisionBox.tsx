@@ -6,6 +6,7 @@ import type { Route } from '../routes.ts';
 import { errorText } from '../ui/format.ts';
 import GatePanel from './GatePanel.tsx';
 import {
+  datasetColumns,
   decisionLead,
   gateNotes,
   groupDecisions,
@@ -69,6 +70,7 @@ export default function DecisionBox({ runId, mode, pending, view, navigate, open
       question={item.question}
       skippable={view?.spine.find((node) => node.name === item.question.node)?.skippable ?? false}
       spine={view?.spine ?? []}
+      columns={datasetColumns(view)}
       navigate={navigate}
     />
   );
@@ -86,7 +88,6 @@ export default function DecisionBox({ runId, mode, pending, view, navigate, open
         {mode === 'guided' && broken.length === 0 && items.every(canApprove) && auto !== undefined && (
           <button
             type="button"
-            className="link-button"
             title="Approve every waiting decision, then run the rest without asking"
             disabled={busy}
             onClick={() => answer.mutate([

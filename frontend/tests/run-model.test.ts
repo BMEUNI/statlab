@@ -8,6 +8,7 @@ import {
   firstSentences,
   foldEvents,
   forkNote,
+  datasetColumns,
   decisionLead,
   formatUsd,
   gateEdits,
@@ -244,6 +245,24 @@ test('statusTone and formatUsd', () => {
   assert.equal(statusTone('failed'), 'fault');
   assert.equal(statusTone('pending'), 'neutral');
   assert.equal(formatUsd(0.12345), '$0.1235');
+});
+
+test('datasetColumns', () => {
+  const base = { spine: [], branches: [], overlap: null, wave: 1, budget: null };
+  const intake = (summary: JsonObject) => ({
+    node: 'intake', executionId: 'e1', status: 'completed', summary, artifacts: [], metrics: {}, warnings: [],
+    skipReason: null, error: null,
+  });
+  const view: RunView = {
+    ...base,
+    shared: [intake({ tools: [
+      { tool: 'other' },
+      { tool: 'load_csv', result: { summary: { columns: ['a', 3, 'b'] } } },
+    ] })],
+  };
+  assert.deepEqual(datasetColumns(view), ['a', 'b']);
+  assert.deepEqual(datasetColumns(null), []);
+  assert.deepEqual(datasetColumns({ ...base, shared: [intake({})] }), []);
 });
 
 test('latestOutcome', () => {

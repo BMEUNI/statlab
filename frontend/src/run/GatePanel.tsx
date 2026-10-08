@@ -23,13 +23,14 @@ type Props = {
   question: GateQuestion;
   skippable: boolean;
   spine: SpineNode[];
+  columns: string[];
   navigate: (route: Route) => void;
 };
 
 const STOP_CONFIRM = 'Stop this run? It cannot be resumed.';
 const REWIND_CONFIRM = 'Start a new run from this step? This run will be replaced.';
 
-export default function GatePanel({ runId, gate, question, skippable, spine, navigate }: Props) {
+export default function GatePanel({ runId, gate, question, skippable, spine, columns, navigate }: Props) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<JsonObject>(question.proposal);
   const [instruction, setInstruction] = useState('');
@@ -118,7 +119,7 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
                 ? (
                   <SchemaForm
                     schema={question.decisionSchema} defName={null} path={[]} draft={draft} onDraft={setDraft}
-                    columns={[]} vocabulary={EMPTY_VOCABULARY} only={main}
+                    columns={columns} vocabulary={EMPTY_VOCABULARY} only={main}
                   />
                 )
                 : <p className="help">The agent kept every setting at its default.</p>}
@@ -128,7 +129,7 @@ export default function GatePanel({ runId, gate, question, skippable, spine, nav
                 <summary>{`All settings (${rest.length} more)`}</summary>
                 <SchemaForm
                   schema={question.decisionSchema} defName={null} path={[]} draft={draft} onDraft={setDraft}
-                  columns={[]} vocabulary={EMPTY_VOCABULARY} only={rest}
+                  columns={columns} vocabulary={EMPTY_VOCABULARY} only={rest}
                 />
               </details>
             )}

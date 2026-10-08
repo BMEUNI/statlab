@@ -605,3 +605,33 @@ panel". Decision: put it on the decision box's own header line, right-aligned, a
    `.decision-top .link-button { font-size: 0.875rem; }`.
 
 Checks: `npm run typecheck`, `npm run build` (from `frontend/`).
+
+## Addendum H — gate form column pickers, list labels, finish button (user report)
+
+User, 2026-10-08, on the experiment-design gate form: per-column "Select a column" lists no
+columns; candidates are labelled "Goal 1"; and "Finish automatically" should be a button, not an
+underlined link. Causes: `GatePanel.tsx:121,131` pass `columns={[]}` to `SchemaForm`;
+`SchemaForm.tsx:221-231` hard-codes "Goal"/"Remove goal"/"Add goal" for every object list.
+
+1. `model.ts`: export `datasetColumns(view: RunView | null): string[]` — `[]` when `view` is null;
+   otherwise take `latestOutcome(view, 'intake', null)`; its `summary.tools` must be an array;
+   find the first entry that is a JSON object with `tool === 'load_csv'`; return the string
+   members of `entry.result.summary.columns` (each step guarded with `isJsonObject` /
+   `Array.isArray`; any missing piece → `[]`).
+2. `GatePanel.tsx`: new prop `columns: string[]`; pass it to both `SchemaForm` calls instead of
+   `[]`. `DecisionBox.tsx` passes `columns={datasetColumns(view)}` to `GatePanel`.
+3. `SchemaForm.tsx` object-list block: `const noun = ITEM_NOUNS[field.key] ?? 'entry'` with a
+   module constant `ITEM_NOUNS: Record<string, string> = { inference_goals: 'goal', candidates:
+   'candidate' }`; legend `` `${humanize(noun)} ${index + 1}` `` (`humanize` is already imported),
+   remove button `` `Remove ${noun}` ``, add button `` `Add ${noun}` ``.
+4. `DecisionBox.tsx`: the "Finish automatically" button drops `className="link-button"` (plain
+   button, everything else unchanged). `style.css`: `.decision-top .link-button { font-size:
+   0.875rem; }` becomes `.decision-top button { font-size: 0.875rem; }`.
+5. Test (`tests/run-model.test.ts`, new test `datasetColumns`): a `RunView` whose `shared` holds
+   one outcome `{ node: 'intake', executionId: 'e1', status: 'completed', summary: { tools: [
+   { tool: 'other' }, { tool: 'load_csv', result: { summary: { columns: ['a', 3, 'b'] } } } ] },
+   artifacts: [], metrics: {}, warnings: [], skipReason: null, error: null }` (other view fields
+   as in the `nowLine` test) → `['a', 'b']`; `datasetColumns(null)` → `[]`; a view whose intake
+   summary has no `tools` → `[]`.
+
+Checks: `npm test`, `npm run typecheck`, `npm run build` (from `frontend/`).

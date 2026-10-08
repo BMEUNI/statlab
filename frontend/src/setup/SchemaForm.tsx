@@ -20,6 +20,7 @@ type Parsed = { ok: true; value: JsonValue | undefined } | { ok: false; error: s
 type Option = { value: string; label: string };
 
 const FEATURE_SKIPS = ['include', 'exclude', 'id_columns', 'roles'];
+const ITEM_NOUNS: Record<string, string> = { inference_goals: 'goal', candidates: 'candidate' };
 
 function splitList(text: string): string[] {
   return text.split(',').map((item) => item.trim()).filter((item) => item !== '');
@@ -213,22 +214,23 @@ function Field(props: FormProps & { field: FieldSpec }) {
   if (field.kind === 'object-list') {
     if (field.ref === null) return null;
     const items = Array.isArray(value) ? value : [];
+    const noun = ITEM_NOUNS[field.key] ?? 'entry';
     return (
       <fieldset>
         <legend>{field.title}</legend>
         {items.map((_, index) => (
           <fieldset key={index}>
-            <legend>{`Goal ${index + 1}`}</legend>
+            <legend>{`${humanize(noun)} ${index + 1}`}</legend>
             <SchemaForm {...props} defName={field.ref} path={[...fieldPath, index]} />
             <button
               type="button"
               onClick={() => onDraft(unsetAt(draft, items.length === 1 ? fieldPath : [...fieldPath, index]))}
             >
-              Remove goal
+              {`Remove ${noun}`}
             </button>
           </fieldset>
         ))}
-        <button type="button" onClick={() => set([...items, {}])}>Add goal</button>
+        <button type="button" onClick={() => set([...items, {}])}>{`Add ${noun}`}</button>
       </fieldset>
     );
   }

@@ -598,6 +598,16 @@ export function runControls(
   };
 }
 
+export function datasetColumns(view: RunView | null): string[] {
+  if (view === null) return [];
+  const tools = latestOutcome(view, 'intake', null)?.summary.tools;
+  if (!Array.isArray(tools)) return [];
+  const load = tools.find((entry) => isJsonObject(entry) && entry.tool === 'load_csv');
+  if (!isJsonObject(load) || !isJsonObject(load.result) || !isJsonObject(load.result.summary)) return [];
+  const { columns } = load.result.summary;
+  return Array.isArray(columns) ? columns.filter((item): item is string => typeof item === 'string') : [];
+}
+
 export function latestOutcome(view: RunView, node: string, candidateId: string | null): NodeOutcome | null {
   const list = candidateId === null
     ? view.shared
