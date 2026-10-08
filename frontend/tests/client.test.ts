@@ -12,6 +12,8 @@ import {
   createRun,
   datasetQuery,
   getRun,
+  getRunFile,
+  runFileUrl,
   isJsonValue,
   listProjects,
   parseContractCheck,
@@ -401,4 +403,15 @@ test('artifactUrl encodes and previewArtifact requests the preview path', async 
     assert.equal(requests[0]?.input, '/api/artifacts/a1/preview');
     assert.equal(requests[0]?.init?.method, 'GET');
   });
+});
+
+test('runFileUrl encodes the run id only and getRunFile returns text', async () => {
+  assert.equal(runFileUrl('r 1', 'plots/a.png'), '/api/runs/r%201/files/plots/a.png');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('# Report', { status: 200 });
+  try {
+    assert.equal(await getRunFile('r1', 'report.md'), '# Report');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

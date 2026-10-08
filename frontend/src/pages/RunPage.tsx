@@ -10,6 +10,7 @@ import ChatPanel from '../run/ChatPanel.tsx';
 import GatePanel from '../run/GatePanel.tsx';
 import { foldEvents, parseGateQuestion, parseRunView } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
+import ReportView from '../report/ReportView.tsx';
 import RunGraph, { type Selection } from '../run/RunGraph.tsx';
 import RunHeader from '../run/RunHeader.tsx';
 import { errorText } from '../ui/format.ts';
@@ -19,7 +20,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const snapshot = useQuery({ queryKey: ['run', runId], queryFn: ({ signal }) => getRun(runId, signal) });
   const executions = useQuery({ queryKey: ['executions', runId], queryFn: ({ signal }) => getExecutions(runId, signal) });
   const artifacts = useQuery({ queryKey: ['artifacts', runId], queryFn: ({ signal }) => listRunArtifacts(runId, signal) });
-  const [tab, setTab] = useState<'steps' | 'candidates' | 'files'>('steps');
+  const [tab, setTab] = useState<'steps' | 'candidates' | 'files' | 'report'>('steps');
   const subscribedId = snapshot.data?.run.id === runId ? runId : null;
   const stream = useRunEvents(subscribedId);
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -51,6 +52,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
     { id: 'steps' as const, label: 'Steps' },
     { id: 'candidates' as const, label: `Candidates (${rows.length})` },
     { id: 'files' as const, label: `Files (${artifacts.data?.length ?? 0})` },
+    { id: 'report' as const, label: 'Report' },
   ];
 
   return (
@@ -126,6 +128,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                         ? <p role="alert">{errorText(artifacts.error)}</p>
                         : <ArtifactBrowser entries={artifacts.data} />
                   )}
+                  {tab === 'report' && <ReportView run={data.run} view={view} />}
                 </div>
               </>
             )}

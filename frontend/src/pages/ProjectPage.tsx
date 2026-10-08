@@ -1,7 +1,11 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getProject, listContracts, listDatasets } from '../api/client.ts';
 import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
+import RunComparison from '../project/RunComparison.tsx';
+import { lineage } from '../project/lineage.ts';
+import { nodeLabel } from '../run/model.ts';
 import { formatRoute, type Route } from '../routes.ts';
 import { errorText, formatTime } from '../ui/format.ts';
 
@@ -20,6 +24,9 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
   const datasets = useQuery({ queryKey: ['datasets', projectId], queryFn: ({ signal }) => listDatasets(projectId, signal) });
   const contracts = useQuery({ queryKey: ['contracts', projectId], queryFn: ({ signal }) => listContracts(projectId, signal) });
 
+  const [selected, setSelected] = useState<string[]>([]);
+  const [comparing, setComparing] = useState(false);
+
   return (
     <>
       {project.isSuccess && (
@@ -37,27 +44,43 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
       {project.isError && <p role="alert">{errorText(project.error)}</p>}
       {project.isSuccess && project.data.runs.length === 0 && <p>No runs yet. Start one with New run.</p>}
       {project.isSuccess && project.data.runs.length > 0 && (
-        <div className="table-wrap">
-          <table>
-            <caption className="sr-only">Runs</caption>
-            <thead>
-              <tr><th>Status</th><th>Mode</th><th>Started</th><th>Ended</th><th>Forked from</th><th>Champion</th><th>Run</th></tr>
-            </thead>
-            <tbody>
-              {project.data.runs.map((run) => (
-                <tr key={run.id}>
-                  <td><span className={pillClass(run.status)}>{run.status}</span></td>
-                  <td>{run.mode}</td>
-                  <td>{formatTime(run.started_at)}</td>
-                  <td>{formatTime(run.ended_at)}</td>
-                  <td>{runLink(run.forked_from_run_id)}</td>
-                  <td>{run.champion_model_id !== null ? 'Yes' : 'No'}</td>
-                  <td><a href={formatRoute({ name: 'run', runId: run.id })}>Open</a></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className="table-wrap">
+            <table>
+              <caption className="sr-only">Runs</caption>
+              <thead>
+                <tr><th>Compare</th><th>Run</th><th>Status</th><th>Mode</th><th>Started</th><th>Ended</th><th>Champion</th></tr>
+              </thead>
+              <tbody>
+                {lineage(project.data.runs).map(({ run, depth, forkTarget }) => (
+                  <tr key={run.id}>
+                    <td>
+                      <input
+                        type="checkbox" aria-label={`Compare run ${run.id}`} checked={selected.includes(run.id)}
+                        onChange={(event) =>
+                          setSelected(event.target.checked ? [...selected, run.id] : selected.filter((id) => id !== run.id))}
+                      />
+                    </td>
+                    <td style={{ paddingLeft: `${12 + depth * 24}px` }}>
+                      <a href={formatRoute({ name: 'run', runId: run.id })}><code>{run.id}</code></a>
+                      {depth > 0 && forkTarget !== null && <small className="help">Rewound at {nodeLabel(forkTarget)}</small>}
+                    </td>
+                    <td><span className={pillClass(run.status)}>{run.status}</span></td>
+                    <td>{run.mode}</td>
+                    <td>{formatTime(run.started_at)}</td>
+                    <td>{formatTime(run.ended_at)}</td>
+                    <td>{run.champion_model_id !== null ? 'Yes' : 'No'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="help">Select two or more runs. A rewound run differs from its parent by one decision.</p>
+          <button type="button" disabled={selected.length < 2} onClick={() => setComparing(!comparing)}>
+            Compare selected runs
+          </button>
+          {comparing && selected.length >= 2 && <RunComparison runIds={selected} />}
+        </>
       )}
 
       <h2>Datasets</h2>

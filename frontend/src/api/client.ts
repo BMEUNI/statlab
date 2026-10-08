@@ -401,10 +401,10 @@ function abortError(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError');
 }
 
-type RequestOptions = { method: 'GET' | 'POST'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined };
+type RequestOptions = { method: 'GET' | 'POST'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined; text?: boolean };
 
 async function request(path: string, options: RequestOptions): Promise<unknown> {
-  const { method, json, form, signal } = options;
+  const { method, json, form, signal, text } = options;
   const headers: Record<string, string> = { Accept: 'application/json' };
   let body: string | FormData | null = null;
   if (json !== undefined) {
@@ -432,6 +432,7 @@ async function request(path: string, options: RequestOptions): Promise<unknown> 
     throw new ApiError(message, response.status);
   }
   try {
+    if (text === true) return await response.text();
     return await response.json() as unknown;
   } catch (error) {
     if (abortError(error, signal)) throw error;
@@ -664,6 +665,16 @@ export function parseArtifactPreview(value: unknown): ArtifactPreview {
 
 export function artifactUrl(id: string): string {
   return `/api/artifacts/${encodeURIComponent(id)}`;
+}
+
+export function runFileUrl(runId: string, name: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/files/${name}`;
+}
+
+export async function getRunFile(runId: string, name: string, signal?: AbortSignal): Promise<string> {
+  const body = await request(runFileUrl(runId, name), { method: 'GET', signal, text: true });
+  if (typeof body !== 'string') throw invalidResponse();
+  return body;
 }
 
 export async function listRunArtifacts(runId: string, signal?: AbortSignal): Promise<ArtifactEntry[]> {
