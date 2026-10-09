@@ -8,7 +8,7 @@ from pydantic import JsonValue, ValidationError
 from statlab_contracts.candidate import EstimatorSpec
 from statlab_contracts.contract import Tuning
 from statlab_contracts.envelope import Failure, ToolSuccess
-from statlab_contracts.vocabulary import TUNABLE_PARAMS
+from statlab_contracts.vocabulary import MAX_GRID_POINTS, TUNABLE_PARAMS
 
 from statlab.domains.base import NodeResult
 from statlab.domains.candidate_pipeline import (
@@ -197,7 +197,8 @@ class CandidateModelExecutor:
             question += (
                 f" Tunable parameters for {branch.spec.estimator.name}: "
                 f"{', '.join(sorted(tunable))}. Only these keys may appear in params or "
-                "param_grid; class_weight, calibrate, random_state and n_jobs are fixed "
+                f"param_grid (a param_grid has at most {MAX_GRID_POINTS} combinations in total); "
+                "class_weight, calibrate, random_state and n_jobs are fixed "
                 "elsewhere and never appear there."
             )
         if "method" in tuning.model_fields_set and tuning.method != "random":

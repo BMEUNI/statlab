@@ -41,6 +41,7 @@ from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import (
+    MAX_GRID_POINTS,
     RESERVED_ESTIMATOR_PARAMS,
     ClassWeight,
     Metric,
@@ -74,10 +75,6 @@ _PREDICT_PHASES = ("model_evaluation", "model_interpretation", "champion_selecti
 _PARAMS_PHASES = ("model_training", "model_evaluation", "champion_selection")
 _DESIGN_PHASES = ("experiment_design", "model_training")
 
-MAX_GRID_POINTS = 50
-"""A tuning grid over more than this many points is `tool_param`: the budget is for stopping a
-slow fit, not for an unbounded search, and `results` is capped here so it needs no truncation flag.
-"""
 
 _FALLBACK_CV_FOLDS = 5
 """Fold count when no contract snapshot is present (tests that call tool bodies without writing

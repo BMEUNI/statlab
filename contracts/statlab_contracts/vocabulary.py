@@ -302,9 +302,20 @@ def tunable_param_errors(
     return errors
 
 
+MAX_GRID_POINTS = 50
+"""Largest tuning grid, in combinations of values (chunk 58; enforced in decisions and by
+`tune_estimator`)."""
+
+
 def tunable_grid_errors(grid: Mapping[str, tuple[ParamValue, ...]]) -> list[str]:
     errors: list[str] = []
     for key in sorted(grid):
         for value in grid[key]:
             errors.extend(tunable_param_errors({key: value}, None))
+    points = math.prod(len(values) for values in grid.values())
+    if grid and points > MAX_GRID_POINTS:
+        errors.append(
+            f"param_grid has {points} combinations; use at most {MAX_GRID_POINTS} "
+            "(fewer values per parameter)"
+        )
     return list(dict.fromkeys(errors))

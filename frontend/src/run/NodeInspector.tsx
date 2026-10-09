@@ -107,7 +107,7 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
       {attempts !== null && attempts.length > 0 && (
         <>
           <h3>Attempts</h3>
-          {attempts.map(({ execution, toolCalls, llmCalls }, index) => (
+          {attempts.map(({ execution, toolCalls }, index) => (
             <details key={execution.id} open={index === 0}>
               <summary>{`Attempt ${execution.attempt}: ${execution.status}, ${formatTime(execution.startedAt)}`}</summary>
               {execution.endedAt !== null && (
@@ -136,29 +136,6 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
                     </tbody>
                   </table>
                 </div>
-              )}
-              {llmCalls.length > 0 && (
-                <>
-                  <div className="table-wrap">
-                    <table>
-                      <caption>Agent calls</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col">Model</th><th scope="col">Prompt tokens</th><th scope="col">Completion tokens</th>
-                          <th scope="col">Cached tokens</th><th scope="col">Time (ms)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {llmCalls.map((call) => (
-                          <tr key={call.id}>
-                            <td>{call.model}</td><td>{call.promptTokens}</td><td>{call.completionTokens}</td>
-                            <td>{call.cachedTokens}</td><td>{call.durationMs}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
               )}
             </details>
           ))}

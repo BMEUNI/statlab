@@ -24,10 +24,12 @@ from statlab.graph import (
     RunTracker,
     TraversalPlan,
 )
+from statlab.graph.gates import GateService
+from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.state import BoundaryResult
 from statlab.persistence.db import transaction
 from statlab.persistence.models import ProjectRow
-from statlab.persistence.repository import get_run, list_node_executions
+from statlab.persistence.repository import get_run, list_gates, list_node_executions
 from statlab.storage import validate_checkpoint_ownership
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.contract import Constraints, DataContract
@@ -213,6 +215,31 @@ async def test_halted_sibling_isolated(world: World, failure: str) -> None:
     assert state.status == ("completed" if failure == "failed" else "awaiting_user")
     assert tail == (["compare"] if failure == "failed" else [])
     assert runner.checkpointer.load(spine_id="synthetic", spine=state.spine) == state
+
+
+@pytest.mark.asyncio
+async def test_candidate_failure_with_gates_ends_only_its_branch(world: World) -> None:
+    nodes = (node("prepare", candidate=True), node("fit", candidate=True), node("compare"))
+    tail: list[str] = []
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        if inv.candidate is not None and inv.candidate.public_id == "c_01":
+            return NodeResult(
+                status="failed", error=Failure(error_class="tool_param", message="grid too large")
+            )
+        if inv.candidate is None:
+            tail.append(inv.spec.name)
+        return NodeResult(status="completed")
+
+    runner = loop(world, nodes, execute)
+    start = initial(world, nodes)
+    GateService(RunLifecycle(runner, start))
+    state = await runner.run(start)
+    assert state.branches[0].status == "failed"
+    assert all(b.status == "completed" for b in state.branches[1:])
+    assert state.status == "completed"
+    assert tail == ["compare"]
+    assert list_gates(world.conn, start.run_id) == ()
 
 
 @pytest.mark.asyncio

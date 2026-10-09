@@ -48,8 +48,9 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const top = view === null ? null : champion(view);
   const championId = top === null ? null : top.candidateId;
   const championLabel = top === null ? null : humanize(top.label);
+  const finished = ['completed', 'failed', 'cancelled', 'superseded'].includes(data.run.status);
   const pending = data.gates
-    .filter((gate) => gate.status === 'pending')
+    .filter((gate) => gate.status === 'pending' && !finished)
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
   const pendingQuestions = pending.flatMap(({ question }) => (question === null ? [] : [question]));
   const now = nowLine(data.run.status, view, executions.data?.executions ?? [], pendingQuestions);

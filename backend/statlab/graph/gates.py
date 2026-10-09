@@ -228,6 +228,9 @@ class GateService:
     async def failure(self, invocation: NodeInvocation, result: NodeResult) -> NodeResult:
         if result.error is None:
             raise EngineError("failure escalation requires structured failure")
+        if invocation.candidate is not None:
+            # One model's failure ends only its branch; siblings continue (chunk 58).
+            return result
         question = GateQuestion(
             node=invocation.spec.name,
             candidate_id=invocation.execution.candidate_id,

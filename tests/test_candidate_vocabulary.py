@@ -217,3 +217,12 @@ def test_tunable_grid_errors() -> None:
     assert tunable_grid_errors({"C": (0.5, -1.0, -1.0)}) == [
         "C=-1.0 is not a valid positive number"
     ]
+    grid = {
+        "C": (0.1, 0.2, 0.3, 0.4),
+        "tol": (1e-4, 1e-3, 1e-2, 1e-1),
+        "max_iter": (100, 200, 300, 400),
+    }
+    assert tunable_grid_errors(grid) == [
+        "param_grid has 64 combinations; use at most 50 (fewer values per parameter)"
+    ]
+    assert tunable_grid_errors({"C": tuple(0.1 * i for i in range(1, 51))}) == []
