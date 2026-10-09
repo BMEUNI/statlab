@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from statlab.domains.base import NodeResult, NodeSpec
 from statlab.errors import EngineError, PersistenceError
+from statlab.events import EventBus
 from statlab.graph import (
     BoundaryResult,
     Checkpointer,
@@ -71,6 +72,12 @@ def service(
         )
 
     return RestartReconciler(conn=world.conn, resolver=resolve, tracker=tracker)
+
+
+def _events(reconciler: RestartReconciler, row: RunRow) -> EventBus:
+    binding = reconciler.resolver(row)
+    assert binding is not None
+    return binding.loop.events
 
 
 async def recover(reconciler: RestartReconciler, world: World) -> RecoveryBatch:
@@ -216,7 +223,7 @@ async def test_awaiting_republishes_actual_pending_gates_only(engine_world: Worl
     reconciler = service(engine_world, nodes)
     batch = await recover(reconciler, engine_world)
     assert not batch.tasks and batch.dormant[0].status == "awaiting_user"
-    events = await reconciler.resolver(get_run_row(engine_world)).loop.events.replay()
+    events = await _events(reconciler, get_run_row(engine_world)).replay()
     assert [(event.type, event.payload) for event in events] == [
         (
             "gate.opened",
@@ -409,7 +416,7 @@ async def test_cancelled_mid_candidate_recovery_preserves_prefix_and_crash_audit
         after_run.test_fingerprint == "locked-test"
         and after_run.forked_from_run_id == before_run.forked_from_run_id
     )
-    events = await reconciler.resolver(after_run).loop.events.replay()
+    events = await _events(reconciler, after_run).replay()
     assert (
         sum(
             event.type == "node.failed" and event.payload["execution_id"] == rows[2].id
@@ -462,15 +469,13 @@ async def test_checkpoint_ahead_repairs_outcome_status_and_missing_event(
     assert get_run_row(engine_world).status == state.status
     row = list_node_executions(engine_world.conn, state.run_id)[0]
     assert row.status == result.status and row.ended_at
-    events = await reconciler.resolver(get_run_row(engine_world)).loop.events.replay()
+    events = await _events(reconciler, get_run_row(engine_world)).replay()
     assert [event.type for event in events] == (
         [] if result.status == "awaiting_user" else [f"node.{result.status}"]
     ) + ["run.status"]
     second = await recover(service(engine_world, nodes), engine_world)
     assert not second.tasks
-    assert len(await reconciler.resolver(get_run_row(engine_world)).loop.events.replay()) == len(
-        events
-    )
+    assert len(await _events(reconciler, get_run_row(engine_world)).replay()) == len(events)
 
 
 @pytest.mark.asyncio
@@ -483,7 +488,7 @@ async def test_running_final_cursor_repairs_missing_event_without_dispatch(
     batch = await recover(reconciler, engine_world)
     assert (await batch.tasks[0]).status == "completed"
     assert len(list_node_executions(engine_world.conn, state.run_id)) == 1
-    events = await reconciler.resolver(get_run_row(engine_world)).loop.events.replay()
+    events = await _events(reconciler, get_run_row(engine_world)).replay()
     assert sum(event.type == "node.completed" for event in events) == 1
 
 
@@ -505,7 +510,7 @@ async def test_interruption_event_is_repaired_and_not_duplicated(engine_world: W
         await batch.tasks[0]
     batch = await recover(service(engine_world, nodes), engine_world)
     await batch.tasks[0]
-    events = await reconciler.resolver(get_run_row(engine_world)).loop.events.replay()
+    events = await _events(reconciler, get_run_row(engine_world)).replay()
     assert sum(event.type == "node.failed" for event in events) == 1
 
 

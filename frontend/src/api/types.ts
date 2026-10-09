@@ -114,6 +114,7 @@ export type RunSnapshot = {
   state: JsonObject;
   gates: GateSummary[];
   execution_failed: boolean;
+  view_only: boolean;
 };
 export type RunEvent = { seq: number; run_id: string; ts: string; type: string; payload: JsonObject };
 export type DatasetRecord = {

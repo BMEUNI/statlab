@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import sqlite3
 from collections import deque
@@ -22,7 +23,15 @@ from fastapi import FastAPI, HTTPException
 from litellm.exceptions import APIConnectionError
 from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
 from statlab.api.projects import APIResources
-from statlab.api.runs import ControlRequest, RunConfig, RunCreate, RunRegistry
+from statlab.api.runs import (
+    VIEW_ONLY,
+    ControlRequest,
+    RunConfig,
+    RunCreate,
+    RunRegistry,
+    ViewOnlyRunError,
+    run_nodes,
+)
 from statlab.config import Settings
 from statlab.domains.base import NodeResult
 from statlab.domains.decisions import IntakeDecision
@@ -1509,6 +1518,133 @@ async def test_autonomous_paused_restart(tmp_path: Path, monkeypatch: pytest.Mon
         assert restarted.registry.bindings[run_id].runtime.memory == captured_memory
         assert run_id not in restarted.registry.execution_tasks
         assert restarted.records.requests == []
+
+
+def _rewrite_spine(paths: RunPaths, node: str, replacement: str | None) -> None:
+    state = json.loads(paths.state_json.read_text(encoding="utf-8"))
+    if replacement is None:
+        state["spine"] = [entry for entry in state["spine"] if entry["name"] != node]
+    else:
+        for entry in state["spine"]:
+            if entry["name"] == node:
+                entry["name"] = replacement
+    paths.state_json.write_text(json.dumps(state), encoding="utf-8")
+    if replacement is None:
+        text = paths.skill_snapshot_md.read_text(encoding="utf-8")
+        start = text.index(f"\n## {node}\n")
+        end = text.find("\n## ", start + 1)
+        text = text[:start] + (text[end:] if end != -1 else "\n")
+        paths.skill_snapshot_md.write_text(text, encoding="utf-8")
+
+
+def test_run_nodes_follow_captured_spine() -> None:
+    assert run_nodes(None) == TABULAR_DOMAIN.nodes
+    captured = RunState.initial(
+        run_id="r_0000000000000001",
+        mode="guided",
+        spine_id=TABULAR_DOMAIN.name,
+        nodes=TABULAR_DOMAIN.nodes[:-1],
+    )
+    assert run_nodes(captured) == TABULAR_DOMAIN.nodes[:-1]
+    other = RunState.initial(
+        run_id="r_0000000000000001",
+        mode="guided",
+        spine_id="other",
+        nodes=TABULAR_DOMAIN.nodes[:-1],
+    )
+    with pytest.raises(ViewOnlyRunError):
+        run_nodes(other)
+    reordered = RunState.initial(
+        run_id="r_0000000000000001",
+        mode="guided",
+        spine_id=TABULAR_DOMAIN.name,
+        nodes=(TABULAR_DOMAIN.nodes[1], TABULAR_DOMAIN.nodes[0], *TABULAR_DOMAIN.nodes[2:]),
+    )
+    with pytest.raises(ViewOnlyRunError) as exc:
+        run_nodes(reordered)
+    assert exc.value.state is reordered
+
+
+@pytest.mark.asyncio
+async def test_old_run_keeps_its_captured_spine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_run_api(
+        tmp_path, monkeypatch, records=FixtureRecords(replies=deque([_decision()]))
+    ) as api:
+        created = await _create_run(api)
+        assert created.status_code == 201
+        run_id = str(created.json()["run_id"])
+        gate = await _gate(api, run_id)
+        paths = RunPaths(api.settings.data_dir, "demo", run_id)
+    _rewrite_spine(paths, "artifact_persistence", None)
+    expected = [node.name for node in TABULAR_DOMAIN.nodes[:-1]]
+    async with _open_run_api(
+        tmp_path,
+        monkeypatch,
+        records=FixtureRecords(replies=deque([_decision("Child")])),
+        setup=False,
+        existing_run_id=run_id,
+    ) as restarted:
+        snapshot = await restarted.client.get(f"/api/runs/{run_id}")
+        assert snapshot.status_code == 200
+        body = snapshot.json()
+        assert body["view_only"] is False
+        assert [entry["name"] for entry in body["state"]["spine"]] == expected
+        answered = await restarted.client.post(
+            f"/api/runs/{run_id}/gates/{gate.id}",
+            json={"action": "rewind", "target": TABULAR_DOMAIN.nodes[0].name},
+        )
+        assert answered.status_code == 200
+        child_id = str(answered.json()["new_run_id"])
+        await _gate(restarted, child_id)
+        child_state = await restarted.registry.bindings[child_id].lifecycle.state()
+        assert [entry.name for entry in child_state.spine] == expected
+
+
+@pytest.mark.asyncio
+async def test_view_only_run_opens_and_refuses_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with _open_run_api(
+        tmp_path, monkeypatch, records=FixtureRecords(replies=deque([_decision()]))
+    ) as api:
+        created = await _create_run(api)
+        assert created.status_code == 201
+        run_id = str(created.json()["run_id"])
+        gate = await _gate(api, run_id)
+        paths = RunPaths(api.settings.data_dir, "demo", run_id)
+    _rewrite_spine(paths, "artifact_persistence", "retired_step")
+    with caplog.at_level(logging.WARNING, logger="statlab.api.runs"):
+        async with _open_run_api(
+            tmp_path,
+            monkeypatch,
+            records=FixtureRecords(),
+            setup=False,
+            existing_run_id=run_id,
+        ) as restarted:
+            assert any(
+                run_id in record.getMessage() and "earlier workflow version" in record.getMessage()
+                for record in caplog.records
+            )
+            assert run_id not in restarted.registry.bindings
+            snapshot = await restarted.client.get(f"/api/runs/{run_id}")
+            assert snapshot.status_code == 200
+            body = snapshot.json()
+            assert body["view_only"] is True
+            assert "retired_step" in [entry["name"] for entry in body["state"]["spine"]]
+            assert len(body["gates"]) == 1
+            for path, payload in (
+                (f"/api/runs/{run_id}/messages", {"text": "hello"}),
+                (f"/api/runs/{run_id}/control", {"action": "pause"}),
+                (f"/api/runs/{run_id}/gates/{gate.id}", {"action": "approve"}),
+            ):
+                response = await restarted.client.post(path, json=payload)
+                assert response.status_code == 409
+                assert response.json()["detail"] == VIEW_ONLY
+            bus = restarted.registry.events(run_id)
+            assert bus.paths.run_id == run_id
+            assert await bus.replay()
 
 
 @pytest.mark.parametrize("failure", ("old_model", "missing_skill", "changed_contract"))

@@ -49,8 +49,9 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const championId = top === null ? null : top.candidateId;
   const championLabel = top === null ? null : humanize(top.label);
   const finished = ['completed', 'failed', 'cancelled', 'superseded'].includes(data.run.status);
+  const viewOnly = data.view_only;
   const pending = data.gates
-    .filter((gate) => gate.status === 'pending' && !finished)
+    .filter((gate) => gate.status === 'pending' && !finished && !viewOnly)
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
   const pendingQuestions = pending.flatMap(({ question }) => (question === null ? [] : [question]));
   const searching = feed.searching && data.run.status === 'running';
@@ -86,6 +87,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
         now={now}
         onStep={(step) => { setSelected(step); setTab('progress'); setPane('side'); }}
         onTab={(next) => { setTab(next); setPane('side'); }}
+        viewOnly={viewOnly}
       />
       <aside className="side-pane" aria-label="Run progress">
         <div className="side-scroll">
@@ -97,9 +99,15 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
             navigate={navigate}
             championLabel={championLabel}
             switched={switchedToAutomatic(data.gates)}
+            viewOnly={viewOnly}
           />
           {data.execution_failed && (
             <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
+          )}
+          {viewOnly && (
+            <p className="help">
+              This run was made with an earlier version of the workflow. You can view it, but not continue, change or rewind it.
+            </p>
           )}
           {view === null
             ? <p role="alert">This run's state cannot be displayed.</p>

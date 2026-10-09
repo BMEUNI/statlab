@@ -25,6 +25,7 @@ type Props = {
   now: string;
   onStep: (step: Step) => void;
   onTab: (tab: 'candidates' | 'report') => void;
+  viewOnly?: boolean;
 };
 
 const INTRO = `I'll post a short update here after each step, and a summary of the results at the end.
@@ -38,7 +39,7 @@ const GUIDED =
   '\n\nIn guided mode I stop and ask you before each key decision. Answer in the box below the chat, or in your own words.';
 
 export default function RunChat({
-  runId, feed, view, status, mode, forkNote, pending, navigate, now, onStep, onTab,
+  runId, feed, view, status, mode, forkNote, pending, navigate, now, onStep, onTab, viewOnly = false,
 }: Props) {
   const queryClient = useQueryClient();
   const [setup] = useState(() => loadSession(browserStore(), runChatKey(runId)));
@@ -164,14 +165,18 @@ export default function RunChat({
           />
         </div>
       )}
-      <Composer
-        onSend={(text) => {
-          setSent((count) => count + 1);
-          mutation.mutate(text);
-        }}
-        disabled={mutation.isPending}
-        placeholder="Ask a question, change the plan, or say pause"
-      />
+      {viewOnly ? (
+        <p className="help">This run can only be viewed.</p>
+      ) : (
+        <Composer
+          onSend={(text) => {
+            setSent((count) => count + 1);
+            mutation.mutate(text);
+          }}
+          disabled={mutation.isPending}
+          placeholder="Ask a question, change the plan, or say pause"
+        />
+      )}
     </section>
   );
 }

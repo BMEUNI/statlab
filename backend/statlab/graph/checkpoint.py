@@ -37,21 +37,28 @@ class Checkpointer:
                     temporary.unlink(missing_ok=True)
             raise PersistenceError("cannot save run checkpoint", cause=exc) from exc
 
-    def load(
-        self, *, spine_id: str, spine: tuple[SpineEntry, ...], allow_missing: bool = False
-    ) -> RunState | None:
+    def read(self) -> RunState | None:
+        """The stored checkpoint without identity checks, or None before the first save
+        (chunk 63)."""
         try:
             text = self.paths.state_json.read_text(encoding="utf-8")
-        except FileNotFoundError as exc:
-            if allow_missing:
-                return None
-            raise PersistenceError("run checkpoint is missing", cause=exc) from exc
+        except FileNotFoundError:
+            return None
         except (OSError, UnicodeError) as exc:
             raise PersistenceError("cannot read run checkpoint", cause=exc) from exc
         try:
-            state = RunState.model_validate_json(text, strict=True)
+            return RunState.model_validate_json(text, strict=True)
         except ValidationError as exc:
             raise PersistenceError("invalid run checkpoint", cause=exc) from exc
+
+    def load(
+        self, *, spine_id: str, spine: tuple[SpineEntry, ...], allow_missing: bool = False
+    ) -> RunState | None:
+        state = self.read()
+        if state is None:
+            if allow_missing:
+                return None
+            raise PersistenceError("run checkpoint is missing")
         if state.run_id != self.paths.run_id or state.spine_id != spine_id or state.spine != spine:
             raise PersistenceError("checkpoint run/spine identity mismatch")
         return state

@@ -46,6 +46,7 @@ const snapshot = {
   state: {},
   gates: [{ id: 'g1', run_id: 'r1', node_execution_id: 'n1', status: 'pending', question_json: '{}', answer_json: null, ts: 'now' }],
   execution_failed: false,
+  view_only: false,
 };
 
 function isInvalidResponse(action: () => unknown): void {
@@ -74,7 +75,9 @@ test('run snapshot parser validates identity, unions, nullable fields, state, an
     { ...snapshot, gates: [{ ...snapshot.gates[0], question_json: 1 }] },
     { ...snapshot, state: [] },
     { ...snapshot, execution_failed: 0 },
+    { ...snapshot, view_only: 'no' },
   ]) isInvalidResponse(() => parseRunSnapshot(value, 'r1'));
+  assert.equal(parseRunSnapshot({ ...snapshot, view_only: true }, 'r1').view_only, true);
 });
 
 test('JSON values require finite numbers and recursive JSON types', () => {

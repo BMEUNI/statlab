@@ -179,7 +179,7 @@ export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
   const run = value.run;
   const state = value.state;
   const gates = value.gates;
-  if (!isJsonObject(run) || !isJsonObject(state) || !Array.isArray(gates) || typeof value.execution_failed !== 'boolean') {
+  if (!isJsonObject(run) || !isJsonObject(state) || !Array.isArray(gates) || typeof value.execution_failed !== 'boolean' || typeof value.view_only !== 'boolean') {
     throw invalidResponse();
   }
   const id = requiredString(run, 'id');
@@ -203,6 +203,7 @@ export function parseRunSnapshot(value: unknown, runId: string): RunSnapshot {
     state,
     gates: parsedGates,
     execution_failed: value.execution_failed,
+    view_only: value.view_only,
   };
 }
 

@@ -94,9 +94,8 @@ def stream_router(registry: Callable[[], RunRegistry]) -> APIRouter:
     ) -> StreamingResponse:
         owner = registry()
         cursor = parse_cursor(since, last_event_id)
-        binding = owner.run(run_id)
         return SseResponse(
-            stream_events(binding.loop.events, since=cursor, closing=owner.streams_closing)
+            stream_events(owner.events(run_id), since=cursor, closing=owner.streams_closing)
         )
 
     return router

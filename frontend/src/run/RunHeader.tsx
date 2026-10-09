@@ -16,6 +16,7 @@ type Props = {
   championLabel: string | null;
   switched: boolean;
   navigate: (route: Route) => void;
+  viewOnly?: boolean;
 };
 type Action = { kind: 'control'; action: 'pause' | 'resume' | 'cancel' } | { kind: 'rewind'; target: string };
 
@@ -27,10 +28,14 @@ const STREAM_LABELS: Record<StreamStatus, string> = {
   error: 'Stopped. Reload the page to reconnect.',
 };
 
-export default function RunHeader({ run, view, costUsd, streamStatus, navigate, championLabel, switched }: Props) {
+export default function RunHeader({
+  run, view, costUsd, streamStatus, navigate, championLabel, switched, viewOnly = false,
+}: Props) {
   const queryClient = useQueryClient();
   const [target, setTarget] = useState(view?.spine[0]?.name ?? '');
-  const controls = runControls(run.status);
+  const controls = viewOnly
+    ? { pause: false, resume: false, cancel: false, rewind: false }
+    : runControls(run.status);
   const tone = statusTone(run.status);
   const mutation = useMutation<ControlReply | string, Error, Action>({
     mutationFn: (action) =>

@@ -11,7 +11,7 @@ from statlab_contracts.contract import DataContract
 from statlab_contracts.layout import RunPaths
 
 from statlab.config import Settings
-from statlab.domains.base import NodeResult
+from statlab.domains.base import NodeResult, NodeSpec
 from statlab.domains.candidate_models import candidate_retune_decider
 from statlab.domains.candidate_search import CandidateSearchPlanner
 from statlab.domains.executor import TabularExecutor
@@ -57,6 +57,7 @@ def bind_tabular(
     llm: LlmClient,
     mcp: McpClient,
     memory: tuple[MemoryRow, ...],
+    nodes: tuple[NodeSpec, ...],
     tracker: RunTracker,
     initial: RunState,
     resolver: ForkResolver,
@@ -70,7 +71,7 @@ def bind_tabular(
     control = RunControl()
     loop = RunLoop(
         conn=conn,
-        nodes=TABULAR_DOMAIN.nodes,
+        nodes=nodes,
         spine_id=TABULAR_DOMAIN.name,
         executor=execute,
         checkpointer=Checkpointer(paths),

@@ -39,7 +39,7 @@ class RecoveryBinding:
     lifecycle: RunLifecycle | None = None
 
 
-type BindingResolver = Callable[[RunRow], RecoveryBinding]
+type BindingResolver = Callable[[RunRow], RecoveryBinding | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +87,9 @@ class RestartReconciler:
                         ):
                             continue
                         binding = self.resolver(row)
+                        if binding is None:
+                            # A view-only run is left as stored (chunk 63).
+                            continue
                         loop = binding.loop
                         if loop.tracker is not self.tracker:
                             raise EngineError("recovery requires shared run tracker")

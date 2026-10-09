@@ -33,6 +33,7 @@ from statlab.api.projects import (
     require_complete,
     validation_issues,
 )
+from statlab.domains.base import NodeSpec
 from statlab.domains.binding import RunBinding, bind_tabular
 from statlab.domains.tabular import SETTING_OWNERS, TABULAR_DOMAIN
 from statlab.errors import (
@@ -41,8 +42,10 @@ from statlab.errors import (
     LlmCallError,
     LlmOutputError,
     PersistenceError,
+    StatlabError,
     traceback_frames,
 )
+from statlab.events import EventBus
 from statlab.graph.checkpoint import Checkpointer
 from statlab.graph.control import ControlContext, ControlResponse, ControlText, ConversationTurn
 from statlab.graph.engine import RunTracker
@@ -50,7 +53,7 @@ from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.reconciliation import RecoveryBinding, RestartReconciler
 from statlab.graph.recovery import recover_call
 from statlab.graph.router import ControlRouter, InterruptClass
-from statlab.graph.state import RunState
+from statlab.graph.state import RunState, SpineEntry
 from statlab.llm.routing import check_provider_environment
 from statlab.llm.skills import load_run_skill, snapshot_skill
 from statlab.memory import read_memory
@@ -76,6 +79,31 @@ from statlab.storage import ensure_run_layout
 _LOGGER = logging.getLogger(__name__)
 _RUN_ID = re.compile(r"^r_[0-9a-f]{16}$")
 _CHUNK_SIZE = 64 * 1024
+VIEW_ONLY = "this run was made with an earlier version of the workflow and can only be viewed"
+
+
+class ViewOnlyRunError(StatlabError):
+    """A stored run whose captured spine the current domain cannot rebuild (chunk 63)."""
+
+    def __init__(self, state: RunState) -> None:
+        super().__init__(VIEW_ONLY)
+        self.state = state
+
+
+def run_nodes(state: RunState | None) -> tuple[NodeSpec, ...]:
+    """The nodes a run executes on: its captured spine, or the current one before
+    its first checkpoint (chunk 63)."""
+    if state is None:
+        return TABULAR_DOMAIN.nodes
+    current = {spec.name: spec for spec in TABULAR_DOMAIN.nodes}
+    nodes = tuple(current[entry.name] for entry in state.spine if entry.name in current)
+    if (
+        state.spine_id != TABULAR_DOMAIN.name
+        or tuple(SpineEntry.from_spec(spec) for spec in nodes) != state.spine
+        or nodes != tuple(spec for spec in TABULAR_DOMAIN.nodes if spec in nodes)
+    ):
+        raise ViewOnlyRunError(state)
+    return nodes
 
 
 class RunCreate(BaseModel):
@@ -115,6 +143,7 @@ class RunSnapshot(BaseModel):
     state: RunState
     gates: tuple[GateRow, ...]
     execution_failed: bool = False
+    view_only: bool = False
 
 
 class RunConfig(BaseModel):
@@ -263,6 +292,7 @@ class RunRegistry:
         ):
             if not child.resolve().is_relative_to(root):
                 raise PersistenceError("run child path escapes run root")
+        nodes = run_nodes(initial if initial is not None else Checkpointer(paths).read())
         contract_path = Path(contract_row.path).resolve()
         if (
             not contract_path.is_relative_to(paths_project.contracts.resolve())
@@ -302,7 +332,7 @@ class RunRegistry:
             skill = load_run_skill(
                 paths.root,
                 TABULAR_DOMAIN.skill_file,
-                spine=TABULAR_DOMAIN.nodes,
+                spine=nodes,
                 tools=self.resources.mcp.tools,
             )
         except ConfigError as exc:
@@ -318,7 +348,7 @@ class RunRegistry:
             check_provider_environment(unvalidated, environment=self.resources.environment)
             self.validated_models.update(unvalidated)
         actual_initial = initial or RunState.initial(
-            run_id=row.id, mode=row.mode, spine_id=TABULAR_DOMAIN.name, nodes=TABULAR_DOMAIN.nodes
+            run_id=row.id, mode=row.mode, spine_id=TABULAR_DOMAIN.name, nodes=nodes
         )
         lockfile = paths.root / "uv.lock"
 
@@ -337,6 +367,7 @@ class RunRegistry:
             llm=self.resources.llm,
             mcp=self.resources.mcp,
             memory=config.memory,
+            nodes=nodes,
             tracker=self.tracker,
             initial=actual_initial,
             resolver=resolver,
@@ -349,13 +380,34 @@ class RunRegistry:
         row = get_run(self.resources.conn, run_id)
         if row is None:
             raise HTTPException(404, "run not found")
-        return self.binding(row)
+        try:
+            return self.binding(row)
+        except ViewOnlyRunError:
+            raise HTTPException(409, VIEW_ONLY) from None
+
+    def events(self, run_id: str) -> EventBus:
+        """The run's event log; a view-only run's log is read without binding it (chunk 63)."""
+        row = get_run(self.resources.conn, run_id)
+        if row is None:
+            raise HTTPException(404, "run not found")
+        try:
+            return self.binding(row).loop.events
+        except ViewOnlyRunError:
+            project = require_project(self.resources.conn, row.project_id)
+            return EventBus(RunPaths(self.resources.settings.data_dir, project.slug, row.id))
 
     async def boot(self) -> None:
         project_ids = tuple(project.id for project in list_projects(self.resources.conn))
 
-        def resolver(row: RunRow) -> RecoveryBinding:
-            binding = self.binding(row)
+        def resolver(row: RunRow) -> RecoveryBinding | None:
+            try:
+                binding = self.binding(row)
+            except ViewOnlyRunError:
+                _LOGGER.warning(
+                    "Run %s was made with an earlier workflow version; it can only be viewed",
+                    row.id,
+                )
+                return None
             return RecoveryBinding(binding.loop, binding.lifecycle.initial, binding.lifecycle)
 
         batch = await RestartReconciler(
@@ -538,7 +590,19 @@ class RunRegistry:
             return RunAccepted(run_id=row.id)
 
     async def snapshot(self, run_id: str) -> RunSnapshot:
-        binding = self.run(run_id)
+        row = get_run(self.resources.conn, run_id)
+        if row is None:
+            raise HTTPException(404, "run not found")
+        try:
+            binding = self.binding(row)
+        except ViewOnlyRunError as exc:
+            return RunSnapshot(
+                run=row,
+                state=exc.state,
+                gates=list_gates(self.resources.conn, run_id),
+                execution_failed=run_id in self.failed_tasks,
+                view_only=True,
+            )
         state = await binding.lifecycle.state()
         row = require_run(self.resources.conn, run_id)
         return RunSnapshot(
