@@ -205,6 +205,7 @@ class SetupAssistant:
             raise HTTPException(422, "target is not a dataset column")
         contract: JsonValue = json.loads(contract_json) if contract_json is not None else None
         project_ids = [p.id for p in list_projects(conn)]
+        current_name = next((p.name for p in list_projects(conn) if p.id == state.project_id), None)
         dataset_ids = (
             [d.id for d in list_datasets(conn, state.project_id)] if state.project_id else []
         )
@@ -238,6 +239,14 @@ class SetupAssistant:
             elif kind == "create_project":
                 if action.project_name is None or not action.project_name.strip():
                     raise DecisionRejectedError("create_project needs project_name")
+                if (
+                    current_name is not None
+                    and action.project_name.strip().casefold() == current_name.strip().casefold()
+                ):
+                    raise DecisionRejectedError(
+                        f"project {current_name!r} is already selected; continue with the next"
+                        " step instead of creating it again"
+                    )
             elif kind == "select_dataset":
                 if state.project_id is None:
                     raise DecisionRejectedError("select or create a project first")

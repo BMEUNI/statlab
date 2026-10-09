@@ -140,6 +140,42 @@ async def test_create_project_slugs(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_create_project_not_repeated_for_selected_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replies: list[Json | str] = []
+    async with _open_assistant_api(tmp_path, monkeypatch, replies) as (
+        client,
+        _,
+        _,
+        _,
+        _,
+    ):
+        replies.append(
+            {"reply": "Created.", "action": "create_project", "project_name": "Churn Study"}
+        )
+        response = await turn(client, "make it")
+        assert response.status_code == 200
+        state = cast(Json, response.json()["state"])
+        replies.extend(
+            [
+                {
+                    "reply": "Created again.",
+                    "action": "create_project",
+                    "project_name": " churn study ",
+                },
+                {"reply": "Upload a CSV next.", "action": "none"},
+            ]
+        )
+        response = await turn(client, "I uploaded data.csv.", state=state)
+        assert response.status_code == 200
+        assert response.json()["reply"] == "Upload a CSV next."
+        assert response.json()["state"]["project_id"] == state["project_id"]
+        slugs = [p["slug"] for p in (await client.get("/api/projects")).json()]
+        assert len([s for s in slugs if s.startswith("churn-study")]) == 1
+
+
+@pytest.mark.asyncio
 async def test_facts_and_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     replies: list[Json | str] = [{"reply": "hi", "action": "none"}]
     async with _open_assistant_api(tmp_path, monkeypatch, replies) as (client, _, _, _, calls):
