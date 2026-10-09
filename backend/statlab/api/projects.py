@@ -31,7 +31,7 @@ from statlab_contracts.contract import DataContract, DatasetOptions, TargetSpec
 from statlab_contracts.layout import ProjectPaths
 
 from statlab.config import Settings
-from statlab.errors import EngineError
+from statlab.errors import EngineError, PersistenceError
 from statlab.llm.client import DecisionRejectedError, LlmClient
 from statlab.llm.routing import ModelRouter
 from statlab.llm.skills import SkillPolicy
@@ -53,6 +53,7 @@ from statlab.persistence.repository import (
     get_dataset,
     get_project,
     get_project_by_slug,
+    has_open_runs,
     list_contracts,
     list_datasets,
     list_projects,
@@ -447,6 +448,28 @@ def _project_paths(settings: Settings, slug: str) -> ProjectPaths:
     return paths
 
 
+def slug_base(name: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60].rstrip("-")
+    return base or "project"
+
+
+def unique_slug(resources: APIResources, name: str, *, own: str | None = None) -> str:
+    base = slug_base(name)
+
+    def taken(slug: str) -> bool:
+        return slug != own and (
+            get_project_by_slug(resources.conn, slug) is not None
+            or os.path.lexists(ProjectPaths(resources.settings.data_dir, slug).root)
+        )
+
+    if not taken(base):
+        return base
+    n = 2
+    while taken(f"{base}-{n}"):
+        n += 1
+    return f"{base}-{n}"
+
+
 def create_project_record(resources: APIResources, slug: str, name: str) -> ProjectRow:
     if get_project_by_slug(resources.conn, slug) is not None:
         raise HTTPException(409, "project slug already exists")
@@ -502,13 +525,37 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         service = ProjectsService(resource)
         project = service.project(project_id)
         paths = service.paths(project)
-        row = rename_project(resource.conn, project.id, body.name)
+        slug = unique_slug(resource, body.name, own=project.slug)
+        new_paths = _project_paths(resource.settings, slug)
+        moved = slug != project.slug
+        if moved:
+            if has_open_runs(resource.conn, project.id):
+                raise HTTPException(
+                    409, "stop or finish this project's open runs before renaming it"
+                )
+            try:
+                paths.root.rename(new_paths.root)
+            except OSError:
+                raise HTTPException(500, "cannot move the project folder") from None
         try:
-            fd, tmp_name = tempfile.mkstemp(dir=paths.root)
+            row = rename_project(
+                resource.conn,
+                project.id,
+                name=body.name,
+                slug=slug,
+                old_root=f"{paths.root}{os.sep}",
+                new_root=f"{new_paths.root}{os.sep}",
+            )
+        except PersistenceError, sqlite3.Error:
+            if moved:
+                new_paths.root.rename(paths.root)
+            raise HTTPException(500, "project rename failed") from None
+        try:
+            fd, tmp_name = tempfile.mkstemp(dir=new_paths.root)
             try:
                 with os.fdopen(fd, "wb") as handle:
                     handle.write(row.model_dump_json().encode("utf-8"))
-                Path(tmp_name).replace(paths.project_json)
+                Path(tmp_name).replace(new_paths.project_json)
             finally:
                 Path(tmp_name).unlink(missing_ok=True)
         except OSError:

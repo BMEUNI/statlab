@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
-from typing import Literal, cast
+from typing import Literal, NoReturn, cast
 
 import httpx
 import litellm
@@ -24,10 +24,11 @@ from mcp.types import CallToolResult
 from pydantic import JsonValue, SecretStr
 from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message
+from statlab.api import projects as projects_module
 from statlab.api.projects import bounded_file
 from statlab.config import Settings
 from statlab.domains.base import NodeSpec
-from statlab.errors import ConfigError
+from statlab.errors import ConfigError, PersistenceError
 from statlab.llm.client import LlmClient
 from statlab.llm.skills import SkillPolicy
 from statlab.main import create_app
@@ -1019,6 +1020,38 @@ def _write(db_path: Path, sql: str, params: tuple[str, ...]) -> None:
         connection.close()
 
 
+def _seed_run(db_path: Path, project_id: str, root: Path, status: str) -> None:
+    _write(
+        db_path,
+        "INSERT INTO contracts (id, project_id, path, json, version, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (
+            "ct_seed",
+            project_id,
+            str(root / "contracts" / "ct_seed.json"),
+            "{}",
+            "2026-01-01T00:00:00Z",
+        ),
+    )
+    _write(
+        db_path,
+        "INSERT INTO runs (id, project_id, contract_id, mode, status, started_at, config_json) "
+        "VALUES (?, ?, ?, 'autonomous', ?, ?, ?)",
+        ("r_seed", project_id, "ct_seed", status, "2026-01-01T00:00:00Z", "{}"),
+    )
+    _write(
+        db_path,
+        "INSERT INTO artifacts (id, run_id, kind, path, meta_json, produced_by, ts) "
+        "VALUES (?, ?, 'table', ?, '{}', 'seed', ?)",
+        (
+            "a_seed",
+            "r_seed",
+            str(root / "runs" / "r_seed" / "artifacts" / "a_seed.json"),
+            "2026-01-01T00:00:00Z",
+        ),
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("value", "status"), [("abc", 422), ("-1", 422), (str(1024 + 65537), 413)])
 async def test_bounded_file_rejects_bad_content_length(value: str, status: int) -> None:
@@ -1063,24 +1096,131 @@ async def test_project_creation_conflicts_and_metadata_write_failure(
 
 
 @pytest.mark.asyncio
-async def test_rename_project_updates_row_list_and_metadata(
+async def test_rename_project_moves_folder_and_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
-        root = ProjectPaths(settings.data_dir, "demo").root
-        names_before = {item.name for item in root.iterdir()}
-        renamed = await client.patch(f"/api/projects/{project['id']}", json={"name": "Churn study"})
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        assert uploaded.status_code == 201
+        old = ProjectPaths(settings.data_dir, "demo").root
+        _seed_run(settings.db_path, str(project["id"]), old, "completed")
+        renamed = await client.patch(f"/api/projects/{project['id']}", json={"name": "Churn Study"})
         assert renamed.status_code == 200
         body = renamed.json()
-        assert body["name"] == "Churn study"
-        assert body["slug"] == "demo"
+        assert body["slug"] == "churn-study"
+        assert body["name"] == "Churn Study"
         assert body["id"] == project["id"]
         assert body["created_at"] == project["created_at"]
+        new = ProjectPaths(settings.data_dir, "churn-study").root
+        assert not old.exists()
+        assert new.is_dir()
+        metadata = json.loads((new / "project.json").read_text())
+        assert metadata["slug"] == "churn-study"
+        connection = sqlite3.connect(settings.db_path)
+        try:
+            stored = [
+                row[0]
+                for query in (
+                    "SELECT path FROM datasets",
+                    "SELECT path FROM contracts",
+                    "SELECT path FROM artifacts",
+                )
+                for row in connection.execute(query).fetchall()
+            ]
+        finally:
+            connection.close()
+        assert all(path.startswith(f"{new}{os.sep}") for path in stored)
+        datasets = await client.get(f"/api/projects/{project['id']}/datasets")
+        assert Path(datasets.json()[0]["path"]).is_file()
         listed = await client.get("/api/projects")
-        assert [item["name"] for item in listed.json()] == ["Churn study"]
-        metadata = json.loads(ProjectPaths(settings.data_dir, "demo").project_json.read_text())
-        assert metadata["name"] == "Churn study"
-        assert {item.name for item in root.iterdir()} == names_before
+        assert [item["name"] for item in listed.json()] == ["Churn Study"]
+
+
+@pytest.mark.asyncio
+async def test_rename_project_keeps_slug_when_base_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        renamed = await client.patch(f"/api/projects/{project['id']}", json={"name": "DEMO"})
+        assert renamed.status_code == 200
+        assert renamed.json()["slug"] == "demo"
+        assert ProjectPaths(settings.data_dir, "demo").root.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_rename_project_slug_skips_taken_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        created = await client.post("/api/projects", json={"slug": "churn-study", "name": "Other"})
+        assert created.status_code == 201
+        (settings.data_dir / "churn-study-2").mkdir()
+        renamed = await client.patch(f"/api/projects/{project['id']}", json={"name": "Churn Study"})
+        assert renamed.status_code == 200
+        assert renamed.json()["slug"] == "churn-study-3"
+
+
+@pytest.mark.asyncio
+async def test_rename_project_refused_with_open_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        _seed_run(
+            settings.db_path,
+            str(project["id"]),
+            ProjectPaths(settings.data_dir, "demo").root,
+            "awaiting_user",
+        )
+        refused = await client.patch(f"/api/projects/{project['id']}", json={"name": "Churn Study"})
+        assert refused.status_code == 409
+        assert (
+            refused.json()["detail"] == "stop or finish this project's open runs before renaming it"
+        )
+        assert ProjectPaths(settings.data_dir, "demo").root.is_dir()
+        detail = await client.get(f"/api/projects/{project['id']}")
+        assert detail.json()["project"]["name"] == "Demo"
+
+
+@pytest.mark.asyncio
+async def test_rename_project_folder_move_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        settings.data_dir.chmod(0o500)
+        try:
+            failed = await client.patch(
+                f"/api/projects/{project['id']}", json={"name": "Churn Study"}
+            )
+        finally:
+            settings.data_dir.chmod(0o700)
+        assert failed.status_code == 500
+        assert failed.json()["detail"] == "cannot move the project folder"
+        detail = await client.get(f"/api/projects/{project['id']}")
+        assert detail.json()["project"]["name"] == "Demo"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "case"), [("Churn Study", "moved"), ("DEMO", "same")], ids=["moved", "same"]
+)
+async def test_rename_project_db_failure_moves_folder_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, case: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+
+        def failing(*_args: object, **_kwargs: object) -> NoReturn:
+            raise PersistenceError("boom")
+
+        monkeypatch.setattr(projects_module, "rename_project", failing)
+        failed = await client.patch(f"/api/projects/{project['id']}", json={"name": name})
+        assert failed.status_code == 500
+        assert failed.json()["detail"] == "project rename failed"
+        assert ProjectPaths(settings.data_dir, "demo").root.is_dir()
+        if case == "moved":
+            assert not ProjectPaths(settings.data_dir, "churn-study").root.exists()
 
 
 @pytest.mark.asyncio
@@ -1113,9 +1253,7 @@ async def test_rename_project_metadata_write_failure(
         root = ProjectPaths(settings.data_dir, "demo").root
         root.chmod(0o500)
         try:
-            failed = await client.patch(
-                f"/api/projects/{project['id']}", json={"name": "Churn study"}
-            )
+            failed = await client.patch(f"/api/projects/{project['id']}", json={"name": "DEMO"})
         finally:
             root.chmod(0o700)
         assert failed.status_code == 500

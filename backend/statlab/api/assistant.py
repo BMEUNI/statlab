@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-import sqlite3
 from collections.abc import Callable
 from typing import Literal
 
@@ -24,6 +22,7 @@ from statlab.api.projects import (
     ContractProposalRequest,
     ProjectsService,
     create_project_record,
+    unique_slug,
     validation_issues,
 )
 from statlab.errors import LlmOutputError
@@ -31,7 +30,6 @@ from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.models import RunMode
 from statlab.persistence.repository import (
     get_contract,
-    get_project_by_slug,
     list_datasets,
     list_projects,
     list_runs,
@@ -127,21 +125,6 @@ class SetupAction(BaseModel):
     target: str | None = None
     contract_changes: dict[str, JsonValue] = Field(default_factory=dict)
     mode: RunMode | None = None
-
-
-def _slug_base(name: str) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60].rstrip("-")
-    return base or "project"
-
-
-def _unique_slug(conn: sqlite3.Connection, name: str) -> str:
-    base = _slug_base(name)
-    if get_project_by_slug(conn, base) is None:
-        return base
-    n = 2
-    while get_project_by_slug(conn, f"{base}-{n}") is not None:
-        n += 1
-    return f"{base}-{n}"
 
 
 def _merge(base: JsonValue, changes: JsonValue) -> JsonValue:
@@ -301,7 +284,7 @@ class SetupAssistant:
                 state = SetupState(project_id=action.project_id, mode=state.mode)
         elif kind == "create_project":
             name = (action.project_name or "").strip()
-            created = create_project_record(self.resources, _unique_slug(conn, name), name)
+            created = create_project_record(self.resources, unique_slug(self.resources, name), name)
             state = SetupState(project_id=created.id, mode=state.mode)
         elif kind == "select_dataset":
             if action.dataset_id != state.dataset_id:

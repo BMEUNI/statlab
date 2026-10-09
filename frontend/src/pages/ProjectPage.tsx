@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil } from 'lucide-react';
-import { getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
+import { ApiError, getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
 import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
 import RunComparison from '../project/RunComparison.tsx';
@@ -75,7 +75,14 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
                   </button>
                   <button type="button" onClick={() => setRenaming(false)}>Cancel</button>
                 </form>
-                {rename.isError && <p role="alert">{errorText(rename.error)}</p>}
+                <p className="help">The short name follows the new name.</p>
+                {rename.isError && (
+                  <p role="alert">
+                    {rename.error instanceof ApiError && rename.error.status === 409
+                      ? 'Stop or finish this project’s open runs before renaming it.'
+                      : errorText(rename.error)}
+                  </p>
+                )}
               </>
             ) : (
               <div className="title-row">

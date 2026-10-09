@@ -196,10 +196,47 @@ def list_projects(conn: sqlite3.Connection) -> tuple[ProjectRow, ...]:
     return tuple(ProjectRow.model_validate(dict(row)) for row in rows)
 
 
-def rename_project(conn: sqlite3.Connection, project_id: str, name: str) -> ProjectRow:
+def rename_project(
+    conn: sqlite3.Connection,
+    project_id: str,
+    *,
+    name: str,
+    slug: str,
+    old_root: str,
+    new_root: str,
+) -> ProjectRow:
+    """Rename a project; `old_root`/`new_root` are folder prefixes ending in a separator, and
+    stored paths under `old_root` move to `new_root` (chunk 57)."""
     with transaction(conn):
-        conn.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+        conn.execute(
+            "UPDATE projects SET name = ?, slug = ? WHERE id = ?", (name, slug, project_id)
+        )
+        conn.execute(
+            "UPDATE datasets SET path = ? || substr(path, ?) "
+            "WHERE project_id = ? AND substr(path, 1, ?) = ?",
+            (new_root, len(old_root) + 1, project_id, len(old_root), old_root),
+        )
+        conn.execute(
+            "UPDATE contracts SET path = ? || substr(path, ?) "
+            "WHERE project_id = ? AND substr(path, 1, ?) = ?",
+            (new_root, len(old_root) + 1, project_id, len(old_root), old_root),
+        )
+        conn.execute(
+            "UPDATE artifacts SET path = ? || substr(path, ?) "
+            "WHERE run_id IN (SELECT id FROM runs WHERE project_id = ?) "
+            "AND substr(path, 1, ?) = ?",
+            (new_root, len(old_root) + 1, project_id, len(old_root), old_root),
+        )
     return require_project(conn, project_id)
+
+
+def has_open_runs(conn: sqlite3.Connection, project_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM runs WHERE project_id = ? AND status IN ('pending', 'running', "
+        "'awaiting_user', 'paused') LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    return row is not None
 
 
 # --- datasets ------------------------------------------------------------------------------
