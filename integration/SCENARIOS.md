@@ -93,7 +93,7 @@ The harness only proves the backend runs, so it buys no answer quality:
 | --- | --- | --- | --- | --- |
 | D1 `churn` | 500 | binary `churned` (0/1) | `subscriber_id`, `plan` (basic/standard/premium), `region` (north/south/east/west), `tenure_months`, `monthly_charges`, `support_calls` | churn rises for `basic` plan, falls with tenure, rises with support calls; `region` has NO effect |
 | D2 `houses` | 400 | continuous `price` | `area_m2` (5% missing), `rooms`, `district` (a/b/c), `age_years` (3% missing), `has_garden` | price = area, rooms, district driven; `has_garden` has NO effect |
-| D3 `churn_dirty` | 420 | binary `churned` | D1 + 20 exact duplicate rows, constant `country`, unique `customer_code`, 85%-empty `notes`, 60-level `city`, mixed `NA`/`N/A`/blank tokens | same as D1; the dirt must be detected and handled, not crash the run |
+| D3 `churn_dirty` | 420 | binary `churned` | D1 + 20 exact duplicate rows, constant `country`, unique `customer_code`, 85%-empty `notes`, 60-level `city`, mixed `NA`/`N/A`/blank tokens, `?` as `plan` in every 25th row, upper-case `region` in every 20th row | same as D1; the dirt must be detected and handled, not crash the run |
 | D4 `species` | 450 | multiclass `species` (3 classes) | `x1`..`x4` | class means differ on `x1`, `x3`; `x4` is pure noise |
 | D5 `sales` | 365 | continuous `units` | `date` (daily 2025), `promo`, `temperature` | promo adds +20 units; weekly pattern; upward trend |
 | D6 `visits` | 480 | binary `responded` | `patient_id` (80 patients × 6 visits), `age`, `dose`, `biomarker` | response driven by `dose` and `biomarker`; rows of one patient must never span splits |
@@ -133,13 +133,15 @@ families, inference questions, notes), the run mode, gate answers and chat messa
 - **Input:** D3; contract as S01 (no inference goals), `drop_duplicates` and `drop_constant` on,
   `max_cardinality` 30. Autonomous.
 - **Expect:** `completed`; no node failed; `drop_duplicates`/`drop_constant` honoured (the
-  cleaning tools appear in `tool_calls`).
+  cleaning tools appear in `tool_calls`); `data_quality` completed with `check_data_quality`
+  (offline the stand-in applies every reported fix, so `fix_data_quality` runs; live the fix
+  choice is the model's); the report has a `Data quality` section.
 - **Soft:** intake or profiling summaries mention the duplicates or the constant column.
 
 ### S04 — Guided mode, approve everything
 - **Input:** D1, S01 contract; mode **guided**; harness answers every gate `approve`.
 - **Expect:** `completed`; a `before` gate opened for every shared "always" node (intake,
-  problem_definition, data_profiling, data_splitting, experiment_design, inferential_analysis,
+  problem_definition, data_profiling, data_quality, data_splitting, experiment_design, inferential_analysis,
   champion_selection, artifact_persistence); every opened gate ends `applied`; events contain
   `gate.opened` and `gate.answered` pairs.
 
@@ -149,7 +151,8 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   (reason "profiling not needed for this test"); `experiment_design` → `instruct` "Use exactly
   two candidates: one logistic_regression and one random_forest_classifier." then `approve` the revised proposal;
   first per-candidate gate (if any) → `approve_all_remaining`.
-- **Expect:** `completed`; `data_profiling` execution `skipped`; experiment_design gate has
+- **Expect:** `completed`; `data_profiling` execution `skipped`; `data_quality` completed on
+  the raw frame; experiment_design gate has
   revision ≥ 1; candidate set has exactly 2 families; `pr_auc` appears in the validation table;
   no further gates after `approve_all_remaining`.
 

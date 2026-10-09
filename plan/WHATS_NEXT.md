@@ -35,6 +35,8 @@ checks. Runs keep their captured spine: old runs open and work; a run the curren
 cannot rebuild is view-only. Next: chunk 64 `label_quality` (cleanlab, train only; starts
 with a warnings-as-errors spike). Open: offline-rich S01 fails at experiment_design wave 2
 since `c0cc6de` (approved shortlist vs candidate specs); separate chunk.
+Chunk [65](./65_quality_scenarios.md): scenarios require the step; offline 19/19 and live S03
+PASS (USD 0.0365, the model applied both fixes).
 
 ## Earlier: user's online test of chunks 46-51
 

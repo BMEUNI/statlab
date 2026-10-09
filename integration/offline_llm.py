@@ -67,7 +67,6 @@ _RATIONALE_ONLY = frozenset(
         "ProblemDecision",
         "ProfileDecision",
         "ProfileFindings",
-        "QualityDecision",
         "SplitDecision",
         "PreprocessingDecision",
         "FeatureDecision",
@@ -287,6 +286,21 @@ def _rich_profile(
         "outliers": list(num[:1]),
         "plots": plots,
     }
+
+
+def _quality(evidence: list[JsonValue]) -> dict[str, JsonValue]:
+    for entry in evidence:
+        item = _obj(entry, "evidence")
+        if item.get("tool") == "check_data_quality":
+            result = _obj(item["result"], "result")
+            summary = _obj(result["summary"], "summary")
+            fixable = _obj(summary["fixable"], "fixable")
+            return {
+                "rationale": RATIONALE,
+                "mark_missing": fixable["mark_missing"],
+                "merge_variants": fixable["merge_variants"],
+            }
+    raise RuntimeError("offline provider: no check_data_quality evidence")
 
 
 def _spec_facts(state: dict[str, JsonValue]) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
@@ -570,6 +584,9 @@ class OfflineProvider:
                     }
                 ],
             }
+        if title == "QualityDecision":
+            _, evidence = _parts(first_user)
+            return _quality(evidence)
         if title in _RATIONALE_ONLY:
             return {"rationale": RATIONALE}
         if title == "DesignDecision":

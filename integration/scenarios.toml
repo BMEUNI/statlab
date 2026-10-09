@@ -37,7 +37,7 @@ inferential_model = "logit"
 
 [scenario.expect]
 status = "completed"
-nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 min_candidates_completed = 2
 no_gates = true
 champion = true
@@ -88,7 +88,7 @@ inferential_model = "ols"
 
 [scenario.expect]
 status = "completed"
-nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 min_candidates_completed = 2
 no_gates = true
 champion = true
@@ -139,7 +139,9 @@ candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classi
 [scenario.expect]
 status = "completed"
 champion = true
-tools_used = ["drop_duplicate_rows"]
+nodes_completed = ["data_quality"]
+tools_used = ["drop_duplicate_rows", "check_data_quality"]
+report_contains = ["Data quality"]
 
 [scenario.soft]
 summary_mentions = ["duplicate"]
@@ -181,7 +183,7 @@ inferential_model = "logit"
 
 [scenario.expect]
 status = "completed"
-gates_opened_for = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+gates_opened_for = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 events_include = ["gate.opened", "gate.answered"]
 champion = true
 
@@ -245,6 +247,7 @@ inferential_model = "logit"
 
 [scenario.expect]
 status = "completed"
+nodes_completed = ["data_quality"]
 nodes_skipped = ["data_profiling"]
 candidate_count = 2
 metrics_in_report = ["pr_auc"]
@@ -509,7 +512,7 @@ inferential_model = "mnlogit"
 
 [scenario.expect]
 status = "completed"
-nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 min_candidates_completed = 2
 no_gates = true
 champion = true
@@ -635,7 +638,7 @@ inferential_model = "logit"
 
 [scenario.expect]
 status = "completed"
-nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 min_candidates_completed = 2
 no_gates = true
 champion = true
@@ -688,7 +691,7 @@ inferential_model = "ols"
 
 [scenario.expect]
 status = "completed"
-nodes_completed = ["intake", "problem_definition", "data_profiling", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
+nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]
 min_candidates_completed = 2
 no_gates = true
 champion = true
@@ -754,7 +757,7 @@ status = "completed"
 fork_idempotent = true
 child_status = "completed"
 child_report_contains = ["time(s) in prior runs"]
-child_not_rerun = ["intake", "problem_definition", "data_profiling", "data_splitting"]
+child_not_rerun = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting"]
 champion = true
 
 [scenario.offline]

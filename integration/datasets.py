@@ -81,6 +81,10 @@ def _churn_dirty() -> Table:
         na_token = rng.choice(["NA", "N/A", ""])
         notes = notes_pick if notes_draw >= 0.85 else ""
         charges_text = na_token if na_draw < 0.05 else str(charges)
+        if i % 25 == 0:
+            plan = "?"
+        if i % 20 == 0:
+            region = region.upper()
         rows.append(
             (
                 f"S{i:05d}",
