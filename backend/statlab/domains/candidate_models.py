@@ -95,6 +95,16 @@ def _validate_evaluation(problem: ProblemSpec, decision: EvaluationActions) -> N
         )
 
 
+def _validate_interpretation(decision: InterpretationDecision) -> None:
+    if decision.skip_reason is not None and (
+        decision.coefficients or decision.partial_dependence or decision.error_by
+    ):
+        raise _RefusalError(
+            "skip_reason skips the whole interpretation; leave it empty to run the requested "
+            "diagnostics (keep coefficients false to leave out coefficients only)"
+        )
+
+
 def evaluation_decision(branch: CandidateProgress) -> EvaluationDecision:
     summary = candidate_result(branch, "model_evaluation").summary
     try:
@@ -531,8 +541,12 @@ class CandidateModelExecutor:
             "Optional PDP uses declared model features; no inferential refits or test diagnostics. "
             "Skip only with an explicit reason; declare material exceptions."
             " Partial dependence columns and error segments must be entries of "
-            "model_summary.feature_names.",
+            "model_summary.feature_names."
+            " skip_reason skips the whole step; to leave out coefficients only, keep "
+            "coefficients false.",
+            check=_rejecting(_validate_interpretation),
         )
+        _validate_interpretation(decision)
         if decision.skip_reason is not None:
             return NodeResult(
                 status="skipped",

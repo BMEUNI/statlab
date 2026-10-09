@@ -330,6 +330,7 @@ Model interpretation and error analysis.
 ### Pitfalls
 - Correlated inputs can mask permutation importance; partial dependence can show implausible feature combinations.
 - Do not infer causality or certainty from tiny slices.
+- skip_reason skips the whole step (no importance, partial dependence or error analysis); to leave out coefficients for a non-linear model keep coefficients false.
 - Any validation-driven change is additional search; never inspect test to revise a candidate.
 
 ## champion_selection

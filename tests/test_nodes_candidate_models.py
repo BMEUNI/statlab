@@ -669,6 +669,26 @@ async def test_interpretation_guided_skip_coefficients_and_unscaled_pdp(
     assert isinstance(decision, dict)
     assert decision["skip_reason"] == skipped.skip_reason
     h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="Bad skip",
+        skip_reason="No coefficients",
+        partial_dependence=("x",),
+    )
+    _failed(
+        await _run(h, 10),
+        "skip_reason skips the whole interpretation; leave it empty to run the requested "
+        "diagnostics (keep coefficients false to leave out coefficients only)",
+    )
+    check = h.llm.checks[InterpretationDecision]
+    assert check(InterpretationDecision(rationale="r", skip_reason="Not needed")) is None
+    assert check(InterpretationDecision(rationale="r", partial_dependence=("x",))) is None
+    for rejected in (
+        InterpretationDecision(rationale="r", skip_reason="s", coefficients=True),
+        InterpretationDecision(rationale="r", skip_reason="s", partial_dependence=("x",)),
+        InterpretationDecision(rationale="r", skip_reason="s", error_by=("x",)),
+    ):
+        with pytest.raises(DecisionRejectedError, match="skips the whole interpretation"):
+            check(rejected)
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
         rationale="Coefficients", coefficients=True
     )
     _failed(

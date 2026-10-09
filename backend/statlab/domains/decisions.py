@@ -238,7 +238,16 @@ class EvaluationDecision(EvaluationActions, ValidationConclusion):
 
 
 class InterpretationDecision(CandidateDecision):
-    skip_reason: str | None = Field(default=None, min_length=1)
+    skip_reason: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Set only to skip this whole step: then no permutation importance, partial "
+            "dependence or error analysis is produced. Leave it null to run the diagnostics. "
+            "To leave out coefficients for a non-linear model, keep coefficients false"
+            " instead of skipping."
+        ),
+    )
     coefficients: bool = False
     partial_dependence: tuple[str, ...] = ()
     error_by: tuple[str, ...] = ()
