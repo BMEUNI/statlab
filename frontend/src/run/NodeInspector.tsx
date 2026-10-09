@@ -3,7 +3,7 @@ import { formatTime } from '../ui/format.ts';
 import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
-import { executionsFor, failureText, formatUsd, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
+import { executionsFor, failureText, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
 import { metricsOf, type MetricValue } from './compare.ts';
 import type { Selection } from './RunTimeline.tsx';
 
@@ -19,7 +19,7 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
   if (selected === null) {
     return (
       <section className="panel">
-        <p className="secondary-line">Select a step to see what the agent decided, which tools it ran and what it cost.</p>
+        <p className="secondary-line">Select a step to see what the agent decided and which tools it ran.</p>
       </section>
     );
   }
@@ -145,20 +145,19 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
                       <thead>
                         <tr>
                           <th scope="col">Model</th><th scope="col">Prompt tokens</th><th scope="col">Completion tokens</th>
-                          <th scope="col">Cached tokens</th><th scope="col">Cost</th><th scope="col">Time (ms)</th>
+                          <th scope="col">Cached tokens</th><th scope="col">Time (ms)</th>
                         </tr>
                       </thead>
                       <tbody>
                         {llmCalls.map((call) => (
                           <tr key={call.id}>
                             <td>{call.model}</td><td>{call.promptTokens}</td><td>{call.completionTokens}</td>
-                            <td>{call.cachedTokens}</td><td>{formatUsd(call.costUsd)}</td><td>{call.durationMs}</td>
+                            <td>{call.cachedTokens}</td><td>{call.durationMs}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                  <p>Agent cost for this attempt: {formatUsd(llmCalls.reduce((sum, call) => sum + call.costUsd, 0))}</p>
                 </>
               )}
             </details>
