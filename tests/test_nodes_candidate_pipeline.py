@@ -31,7 +31,7 @@ from statlab.domains.decisions import (
     ValidationConclusion,
 )
 from statlab.domains.runtime import Approval
-from statlab.domains.tabular import TABULAR_SPINE, TABULAR_TRAVERSAL
+from statlab.domains.tabular import TABULAR_TRAVERSAL
 from statlab.errors import EngineError, LlmCallError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
@@ -58,7 +58,7 @@ from statlab_contracts.envelope import Failure, ToolSuccess
 from statlab_contracts.vocabulary import TargetType
 
 from tests.test_nodes_design_inference import DesignTools, design, prepared
-from tests.test_nodes_foundation import TEST, VALID, Harness, OfflineLlm
+from tests.test_nodes_foundation import LEGACY_SPINE, TEST, VALID, Harness, OfflineLlm
 
 
 class CandidateTools(DesignTools):
@@ -254,7 +254,7 @@ async def candidate_harness(
             NodeSkill(
                 spec.name, "section", "purpose", "heuristics", "tools", "outputs", "pitfalls", names
             )
-            for spec in TABULAR_SPINE
+            for spec in LEGACY_SPINE
         ),
         b"immutable",
     )
@@ -282,7 +282,7 @@ async def candidate_harness(
 
 def candidate_invocation(h: Harness, index: int) -> NodeInvocation:
     branch = h.state.branches[0]
-    spec = TABULAR_SPINE[index]
+    spec = LEGACY_SPINE[index]
     execution = create_node_execution(
         h.runtime.conn,
         run_id=h.state.run_id,
@@ -616,7 +616,7 @@ async def test_executor_rejects_unbound_invocations(
     tmp_path: Path,
 ) -> None:
     h, _ = await candidate_harness(migrated_db, project, tmp_path)
-    shared = TABULAR_SPINE[0]
+    shared = LEGACY_SPINE[0]
     execution = create_node_execution(
         h.runtime.conn,
         run_id=h.state.run_id,
@@ -987,7 +987,7 @@ async def test_runtime_rejects_shared_identity_for_candidate_node(
         ),
     )
     with pytest.raises(EngineError, match="shared invocation identity mismatch"):
-        h.runtime.context(NodeInvocation(h.state, TABULAR_SPINE[6], execution, None))
+        h.runtime.context(NodeInvocation(h.state, LEGACY_SPINE[6], execution, None))
 
 
 @pytest.mark.asyncio

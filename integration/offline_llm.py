@@ -67,6 +67,7 @@ _RATIONALE_ONLY = frozenset(
         "ProblemDecision",
         "ProfileDecision",
         "ProfileFindings",
+        "QualityDecision",
         "SplitDecision",
         "PreprocessingDecision",
         "FeatureDecision",

@@ -139,6 +139,15 @@ class ProfileFindings(Decision):
     exploratory_hypotheses: tuple[str, ...] = ()
 
 
+class QualityDecision(Decision):
+    """Which reported quality fixes to apply (chunk 63); values come only from
+    `check_data_quality`'s `fixable` lists."""
+
+    findings: tuple[str, ...] = ()
+    mark_missing: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    merge_variants: tuple[str, ...] = ()
+
+
 class SplitDecision(Decision):
     strategy: SplitStrategy | None = None
     dependence: Literal["independent", "temporal", "grouped"] = "independent"

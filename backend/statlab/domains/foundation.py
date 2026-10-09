@@ -19,6 +19,7 @@ from statlab.domains.decisions import (
     ProblemSpec,
     ProfileDecision,
     ProfileFindings,
+    QualityDecision,
     SplitDecision,
 )
 from statlab.domains.runtime import DomainRuntime
@@ -48,6 +49,13 @@ def shared_result(state: RunState, node: str) -> NodeResult:
         if boundary.node_name == node and boundary.result.status == "completed":
             return boundary.result
     raise EngineError(f"missing successful shared boundary: {node}")
+
+
+def _completed(state: RunState, node: str) -> NodeResult | None:
+    for boundary in reversed(state.shared_results):
+        if boundary.node_name == node and boundary.result.status == "completed":
+            return boundary.result
+    return None
 
 
 def _object(value: JsonValue | None, label: str) -> dict[str, JsonValue]:
@@ -252,6 +260,28 @@ class _Evidence:
         )
 
 
+def _validate_quality(decision: QualityDecision, fixable: dict[str, JsonValue]) -> None:
+    reported = _object(fixable.get("mark_missing"), "quality fixable mark_missing")
+    for column, values in decision.mark_missing.items():
+        options = reported.get(column)
+        if not isinstance(options, list):
+            raise _RefusalError(
+                f"mark_missing column {column!r} has no reported values; "
+                f"allowed columns: {sorted(reported)!r}"
+            )
+        bad = sorted(set(values) - {item for item in options if isinstance(item, str)})
+        if bad:
+            raise _RefusalError(
+                f"mark_missing[{column!r}] values {bad!r} were not reported; allowed: {options!r}"
+            )
+    allowed_merge = _strings(fixable.get("merge_variants"), "quality fixable merge_variants")
+    bad = sorted(set(decision.merge_variants) - set(allowed_merge))
+    if bad:
+        raise _RefusalError(
+            f"merge_variants {bad!r} were not reported; allowed: {list(allowed_merge)!r}"
+        )
+
+
 def _frame(output: ToolSuccess) -> ArtifactRef:
     frames = tuple(artifact.ref for artifact in output.artifacts if artifact.kind == "dataframe")
     if len(frames) != 1:
@@ -268,6 +298,7 @@ class FoundationExecutor:
             "intake": self._intake,
             "problem_definition": self._problem,
             "data_profiling": self._profile,
+            "data_quality": self._quality,
             "data_splitting": self._split,
         }
         method = methods.get(invocation.spec.name)
@@ -540,6 +571,70 @@ class FoundationExecutor:
         evidence.refs.append(frame)
         return evidence.result("completed", summary)
 
+    async def _quality(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
+        problem = problem_from_state(invocation.state)
+        profiled = _completed(invocation.state, "data_profiling")
+        frame = (
+            _ref(profiled.summary, "frame")
+            if profiled is not None
+            else _ref(shared_result(invocation.state, "intake").summary, "raw")
+        )
+        features = self.runtime.contract.features
+        ignored: list[JsonValue] = [
+            c
+            for c in dict.fromkeys((*features.id_columns, *features.exclude))
+            if c != problem.target
+        ]
+        check = await self._call(
+            invocation,
+            evidence,
+            "check_data_quality",
+            {
+                "frame": str(frame),
+                "target": problem.target,
+                "id_columns": ignored,
+                "min_class_rows": self.runtime.contract.modelling.tuning.cv_folds,
+            },
+        )
+        fixable = _object(check.summary.get("fixable"), "quality fixable")
+        decision = await self.runtime.decide(
+            invocation,
+            QualityDecision,
+            evidence=tuple(evidence.tools),
+            question="Review the data quality checks (whole input, before the split). "
+            "Choose fixes only from the reported fixable lists: mark_missing maps a column to "
+            "cell texts that stand for a missing value; merge_variants lists text columns whose "
+            "spelling variants name the same category. Leave both empty to change nothing. "
+            "Name every failing check in findings.",
+            check=_rejecting(lambda d: _validate_quality(d, fixable)),
+        )
+        _validate_quality(decision, fixable)
+        summary: dict[str, JsonValue] = {
+            "frame": str(frame),
+            "decision": decision.model_dump(mode="json"),
+            "passed": check.summary.get("passed"),
+            "checks": check.summary.get("checks"),
+        }
+        approved = await self._approve(invocation, evidence, decision)
+        if approved is None:
+            return evidence.result("awaiting_user", summary)
+        _validate_quality(approved, fixable)
+        summary["decision"] = approved.model_dump(mode="json")
+        if approved.mark_missing or approved.merge_variants:
+            fixed = await self._call(
+                invocation,
+                evidence,
+                "fix_data_quality",
+                {
+                    "frame": str(frame),
+                    "target": problem.target,
+                    "mark_missing": {c: list(v) for c, v in approved.mark_missing.items()},
+                    "merge_variants": list(approved.merge_variants),
+                },
+            )
+            summary["frame"] = str(_frame(fixed))
+        return evidence.result("completed", summary)
+
     def _split_rules(self, decision: SplitDecision, problem: ProblemSpec) -> SplitRules:
         contract = self.runtime.contract
         strategy = (
@@ -588,15 +683,13 @@ class FoundationExecutor:
         )
         intake = shared_result(invocation.state, "intake")
         raw = _ref(intake.summary, "raw")
-        profiled = next(
-            (
-                boundary.result
-                for boundary in reversed(invocation.state.shared_results)
-                if boundary.node_name == "data_profiling" and boundary.result.status == "completed"
-            ),
-            None,
+        profiled = _completed(invocation.state, "data_profiling")
+        quality = _completed(invocation.state, "data_quality")
+        frame = (
+            _ref(quality.summary, "frame")
+            if quality is not None
+            else (_ref(profiled.summary, "frame") if profiled is not None else raw)
         )
-        frame = _ref(profiled.summary, "frame") if profiled is not None else raw
         contract = self.runtime.contract
         columns = _strings(_tool_summary(intake, "load_csv").get("columns"), "intake columns")
         if profiled is None and contract.features.roles:

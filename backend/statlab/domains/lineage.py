@@ -10,6 +10,7 @@ SPINE_TOOLS_NODES: tuple[str, ...] = (
     "intake",
     "problem_definition",
     "data_profiling",
+    "data_quality",
     "data_splitting",
     "experiment_design",
     "inferential_analysis",

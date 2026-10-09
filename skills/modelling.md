@@ -77,6 +77,28 @@ Profile summaries and diagnostic plots.
 - Correlations and outlier flags do not establish errors or causal relationships.
 - Treat target-driven inference after profiling as exploratory.
 
+## data_quality
+
+### Purpose
+Check data integrity before the split and apply only safe, reported fixes.
+
+### Heuristics
+- Read every check's status and name failing checks in the findings.
+- Mark reported placeholder texts (such as "?" or "unknown") as missing when they clearly stand for a missing value; keep numeric sentinels unless the column cannot take that value.
+- Merge spelling variants only when they clearly name the same category.
+- Report duplicates, conflicting labels and rare levels; the split and preprocessing handle them.
+
+### Tools
+check_data_quality
+fix_data_quality
+
+### Outputs
+Quality report and, when fixes are chosen, the fixed frame the split uses.
+
+### Pitfalls
+- Never change the target or apply values the check did not report.
+- The checks read the whole input before the split; describe them as such.
+
 ## data_splitting
 
 ### Purpose

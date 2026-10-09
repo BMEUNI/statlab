@@ -12,7 +12,7 @@ from typing import Literal
 
 import pytest
 from pydantic import BaseModel, JsonValue, ValidationError
-from statlab.domains.base import NodeResult
+from statlab.domains.base import NodeResult, NodeSpec
 from statlab.domains.decisions import (
     ChampionChoice,
     DesignDecision,
@@ -28,6 +28,7 @@ from statlab.domains.decisions import (
     ProfileDecision,
     ProfileFindings,
     ProfilePlot,
+    QualityDecision,
     SplitDecision,
     TrainingDecision,
     ValidationConclusion,
@@ -82,6 +83,9 @@ VALID = ArtifactRef("a_0000000000000004")
 TEST = ArtifactRef("a_0000000000000005")
 PLOT = ArtifactRef("a_0000000000000006")
 FINGERPRINT = "f" * 64
+FIXED = ArtifactRef("a_0000000000000007")
+# Runs made before chunk 63 have no data_quality step.
+LEGACY_SPINE = tuple(spec for spec in TABULAR_SPINE if spec.name != "data_quality")
 
 
 class OfflineTools(ToolBoundary):
@@ -104,6 +108,10 @@ class OfflineTools(ToolBoundary):
         self.leak_suspects: list[JsonValue] = [{"column": "x"}]
         self.split_count = 3
         self.omit_fingerprint = False
+        self.fixable: dict[str, JsonValue] = {
+            "mark_missing": {"city": ["?"]},
+            "merge_variants": ["city"],
+        }
 
     async def call(
         self,
@@ -179,6 +187,15 @@ class OfflineTools(ToolBoundary):
             return ToolSuccess(summary=report, artifacts=artifacts[: self.split_count])
         if tool == "verify_split":
             return ToolSuccess(summary={"passed": self.verify_passed, "checks": {}})
+        if tool == "check_data_quality":
+            return ToolSuccess(
+                summary={"rows": 240, "passed": True, "checks": {}, "fixable": self.fixable}
+            )
+        if tool == "fix_data_quality":
+            return ToolSuccess(
+                summary={"rows": 240},
+                artifacts=(ArtifactMeta(ref=FIXED, kind="dataframe", label="quality_fixed"),),
+            )
         if tool.startswith("plot_"):
             return ToolSuccess(artifacts=(ArtifactMeta(ref=PLOT, kind="plot"),))
         return ToolSuccess(summary={"fixture": tool})
@@ -226,6 +243,7 @@ class OfflineLlm(LlmClient):
                 exploratory_hypotheses=("Post-EDA question",),
             ),
             SplitDecision: SplitDecision(rationale="independent rows"),
+            QualityDecision: QualityDecision(rationale="checks reviewed"),
         }
         response = self.responses.get(output, defaults.get(output))
         assert response is not None
@@ -256,6 +274,8 @@ def policy() -> SkillPolicy:
             "split_random",
             "split_stratified",
             "verify_split",
+            "check_data_quality",
+            "fix_data_quality",
         }
     )
     return SkillPolicy(
@@ -284,10 +304,11 @@ class Harness:
     tools: OfflineTools
     llm: OfflineLlm
     state: RunState
+    spine: tuple[NodeSpec, ...]
 
     def invocation(self, index: int | None = None) -> NodeInvocation:
         position = self.state.cursor if index is None else index
-        spec = TABULAR_SPINE[position]
+        spec = self.spine[position]
         execution = NodeExecutionRow(
             id=f"execution-{position}",
             run_id=self.state.run_id,
@@ -338,6 +359,7 @@ def harness(
     contract: DataContract | None = None,
     mode: RunMode = "autonomous",
     approval: Approval | None = None,
+    spine: tuple[NodeSpec, ...] = LEGACY_SPINE,
 ) -> Harness:
     selected = contract or DataContract(target=TargetSpec(column="y", type="binary"))
     world = new_world(conn, project, selected, root)
@@ -361,9 +383,10 @@ def harness(
         RunState.initial(
             run_id=world.paths.run_id,
             spine_id=TABULAR_DOMAIN.name,
-            nodes=TABULAR_SPINE,
+            nodes=spine,
             mode=mode,
         ),
+        spine,
     )
 
 
@@ -378,27 +401,29 @@ def foundation(
 
 def test_declared_spine_and_deferred_schema() -> None:
     assert TABULAR_DOMAIN.nodes == TABULAR_SPINE
-    assert len(TABULAR_SPINE) == 13
-    assert tuple(spec.name for spec in TABULAR_SPINE[:4]) == (
+    assert len(TABULAR_SPINE) == 14
+    assert tuple(spec.name for spec in TABULAR_SPINE[:5]) == (
         "intake",
         "problem_definition",
         "data_profiling",
+        "data_quality",
         "data_splitting",
     )
+    assert TABULAR_SPINE[3].decision_schema is QualityDecision and TABULAR_SPINE[3].skippable
     assert all(spec.gate_policy == "always" for spec in TABULAR_SPINE if spec.kind == "SHARED")
     assert all(
         spec.gate_policy == "exception" for spec in TABULAR_SPINE if spec.kind == "PER_CANDIDATE"
     )
-    assert TABULAR_SPINE[4].decision_schema is DesignDecision
-    assert TABULAR_SPINE[5].decision_schema is InferenceDecision
-    assert tuple(spec.decision_schema for spec in TABULAR_SPINE[6:11]) == (
+    assert TABULAR_SPINE[5].decision_schema is DesignDecision
+    assert TABULAR_SPINE[6].decision_schema is InferenceDecision
+    assert tuple(spec.decision_schema for spec in TABULAR_SPINE[7:12]) == (
         PreprocessingDecision,
         FeatureDecision,
         TrainingDecision,
         EvaluationDecision,
         InterpretationDecision,
     )
-    assert tuple(spec.decision_schema for spec in TABULAR_SPINE[11:]) == (
+    assert tuple(spec.decision_schema for spec in TABULAR_SPINE[12:]) == (
         ChampionChoice,
         PersistenceDecision,
     )
@@ -1361,3 +1386,185 @@ def test_problem_and_conclusion_validators(payload: dict[str, JsonValue], messag
 def test_conclusion_retune_requires_reason() -> None:
     with pytest.raises(ValidationError, match="retune requires a nonblank reason"):
         ValidationConclusion.model_validate({"rationale": "r", "retune": True})
+
+
+def _full(conn: sqlite3.Connection, project: ProjectRow, root: Path) -> Harness:
+    return harness(
+        conn,
+        project,
+        root,
+        contract=DataContract(
+            target=TargetSpec(column="y", type="binary"),
+            features=FeatureRules(id_columns=("id",), exclude=("excluded",)),
+        ),
+        spine=TABULAR_SPINE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_quality_without_fixes_hands_profiled_frame_to_split(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h = _full(migrated_db, project, tmp_path)
+    await h.advance(5)
+    quality = shared_result(h.state, "data_quality")
+    assert quality.summary["frame"] == str(RAW)
+    assert quality.summary["passed"] is True
+    checks = [(ctx, tool, params) for ctx, tool, params in h.tools.calls]
+    assert [params for _, tool, params in checks if tool == "check_data_quality"] == [
+        {
+            "frame": str(RAW),
+            "target": "y",
+            "id_columns": ["id", "excluded"],
+            "min_class_rows": 5,
+        }
+    ]
+    assert not any(tool == "fix_data_quality" for _, tool, _ in checks)
+    split_frame = next(
+        params["frame"]
+        for ctx, _, params in checks
+        if ctx.node == "data_splitting" and "frame" in params
+    )
+    assert split_frame == str(RAW)
+
+
+@pytest.mark.asyncio
+async def test_quality_fixes_feed_split(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h = _full(migrated_db, project, tmp_path)
+    h.llm.responses[QualityDecision] = QualityDecision(
+        rationale="fix", mark_missing={"city": ("?",)}, merge_variants=("city",)
+    )
+    await h.advance(5)
+    quality = shared_result(h.state, "data_quality")
+    assert quality.summary["frame"] == str(FIXED)
+    assert FIXED in quality.artifacts
+    fix_params = [params for _, tool, params in h.tools.calls if tool == "fix_data_quality"]
+    assert fix_params == [
+        {
+            "frame": str(RAW),
+            "target": "y",
+            "mark_missing": {"city": ["?"]},
+            "merge_variants": ["city"],
+        }
+    ]
+    split_frame = next(
+        params["frame"]
+        for ctx, _, params in h.tools.calls
+        if ctx.node == "data_splitting" and "frame" in params
+    )
+    assert split_frame == str(FIXED)
+
+
+@pytest.mark.asyncio
+async def test_quality_check_rejects_unreported_fixes(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h = _full(migrated_db, project, tmp_path)
+    await h.advance(3)
+    await h.step()
+    check = h.llm.checks[QualityDecision]
+    assert check(QualityDecision(rationale="ok", mark_missing={"city": ("?",)})) is None
+    with pytest.raises(DecisionRejectedError, match="were not reported"):
+        check(QualityDecision(rationale="bad", mark_missing={"city": ("n/a",)}))
+    with pytest.raises(DecisionRejectedError, match="no reported values"):
+        check(QualityDecision(rationale="bad", mark_missing={"other": ("?",)}))
+    with pytest.raises(DecisionRejectedError, match="merge_variants"):
+        check(QualityDecision(rationale="bad", merge_variants=("other",)))
+
+
+@pytest.mark.asyncio
+async def test_quality_refuses_unreported_fix_after_decision(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h = _full(migrated_db, project, tmp_path)
+    h.llm.responses[QualityDecision] = QualityDecision(rationale="bad", merge_variants=("other",))
+    await h.advance(3)
+    result = await h.step()
+    assert result.status == "failed"
+    assert result.error is not None and "merge_variants" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_quality_after_skipped_profile_checks_raw_and_split_casts(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = harness(
+        migrated_db,
+        project,
+        tmp_path,
+        contract=DataContract(
+            target=TargetSpec(column="y", type="binary"),
+            objective=Objective(primary_metric="roc_auc"),
+            features=FeatureRules(roles={"x": "numeric"}),
+            preprocessing=PreprocessingRules(drop_duplicates=False),
+        ),
+        spine=TABULAR_SPINE,
+    )
+    await h.advance(2)
+    h.state = RunState.model_validate(
+        {
+            **h.state.model_dump(mode="json"),
+            "cursor": 3,
+            "shared_results": [
+                *(b.model_dump(mode="json") for b in h.state.shared_results),
+                BoundaryResult(
+                    node_name="data_profiling",
+                    execution_id="skipped-profile",
+                    result=NodeResult(status="skipped", skip_reason="Profiling skipped"),
+                ).model_dump(mode="json"),
+            ],
+        }
+    )
+    h.llm.responses[QualityDecision] = QualityDecision(
+        rationale="fix", mark_missing={"city": ("?",)}
+    )
+    assert (await h.step()).status == "completed"
+    quality_calls = [
+        params
+        for _, tool, params in h.tools.calls
+        if tool in ("check_data_quality", "fix_data_quality")
+    ]
+    assert quality_calls and all(params["frame"] == str(RAW) for params in quality_calls)
+    offset = len(h.tools.calls)
+    assert (await h.step()).status == "completed"
+    new_calls = h.tools.calls[offset:]
+    assert new_calls[0][1:] == (
+        "cast_dtypes",
+        {"frame": str(FIXED), "target": "y", "roles": {"x": "numeric"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_quality_guided_hold_before_fixes(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h = _full(migrated_db, project, tmp_path)
+    await h.advance(3)
+    h.state = RunState(
+        run_id=h.state.run_id,
+        spine_id=h.state.spine_id,
+        spine=h.state.spine,
+        mode="guided",
+        cursor=h.state.cursor,
+        shared_results=h.state.shared_results,
+    )
+    h.llm.responses[QualityDecision] = QualityDecision(
+        rationale="fix", mark_missing={"city": ("?",)}
+    )
+    before = len(h.tools.calls)
+    result = await h.step()
+    assert result.status == "awaiting_user"
+    assert "decision" in result.summary
+    assert result.summary["frame"] == str(RAW)
+    assert len(h.tools.calls) == before + 1
+    assert h.tools.calls[-1][1] == "check_data_quality"

@@ -16,7 +16,6 @@ from statlab.domains.champion import ChampionExecutor
 from statlab.domains.decisions import PersistenceDecision
 from statlab.domains.persistence import PersistenceExecutor, _atomic_manifest
 from statlab.domains.rewind import champion_provenance, publish_retained_report
-from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError, PersistenceError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
@@ -34,7 +33,7 @@ from statlab_contracts.artifacts import ArtifactMeta, new_artifact_ref
 from statlab_contracts.layout import RunPaths
 
 from tests.test_nodes_champion import ChampionTools, champion_harness, tail_invocation, with_mode
-from tests.test_nodes_foundation import Harness
+from tests.test_nodes_foundation import LEGACY_SPINE, Harness
 
 
 async def persistence_harness(
@@ -82,7 +81,7 @@ async def persistence_harness(
     assert {item.execution_id for item in first.results}.isdisjoint(
         {item.execution_id for item in second.results}
     )
-    names = tuple(node.name for node in TABULAR_SPINE)
+    names = tuple(node.name for node in LEGACY_SPINE)
     for shared in h.state.shared_results:
         row = rows[shared.execution_id]
         assert row.node_name == shared.node_name

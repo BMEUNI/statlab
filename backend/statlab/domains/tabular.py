@@ -17,6 +17,7 @@ from statlab.domains.decisions import (
     PreprocessingDecision,
     ProblemDecision,
     ProfileDecision,
+    QualityDecision,
     SplitDecision,
     TrainingDecision,
 )
@@ -28,6 +29,7 @@ TABULAR_SPINE = (
     NodeSpec(
         "data_profiling", "SHARED", True, ProfileDecision, ("profiling", "cleaning"), "always"
     ),
+    NodeSpec("data_quality", "SHARED", True, QualityDecision, ("quality",), "always"),
     NodeSpec("data_splitting", "SHARED", False, SplitDecision, ("cleaning", "splitting"), "always"),
     NodeSpec("experiment_design", "SHARED", False, DesignDecision, ("training",), "always"),
     NodeSpec(

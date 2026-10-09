@@ -17,7 +17,6 @@ from statlab.domains.candidate_models import CandidateModelExecutor
 from statlab.domains.candidate_pipeline import candidate_result, pipeline_from_state
 from statlab.domains.champion import ChampionExecutor, champion_audits, eligible_candidates
 from statlab.domains.decisions import ChampionChoice, PipelineState
-from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
@@ -46,7 +45,7 @@ from tests.test_nodes_candidate_pipeline import (
     prepare_candidate,
     save_result,
 )
-from tests.test_nodes_foundation import Harness
+from tests.test_nodes_foundation import LEGACY_SPINE, Harness
 
 
 class ChampionTools(CandidateTools):
@@ -164,7 +163,7 @@ class ChampionTools(CandidateTools):
 
 
 def tail_invocation(h: Harness, index: int = 11) -> NodeInvocation:
-    spec = TABULAR_SPINE[index]
+    spec = LEGACY_SPINE[index]
     execution = create_node_execution(
         h.runtime.conn,
         run_id=h.state.run_id,
@@ -224,7 +223,7 @@ async def champion_harness(
     mapped: dict[str, str] = {}
     audited: list[tuple[str, ToolSuccess]] = []
     for index, boundary in enumerate(h.state.shared_results):
-        assert boundary.node_name == TABULAR_SPINE[index].name
+        assert boundary.node_name == LEGACY_SPINE[index].name
         execution = create_node_execution(
             conn,
             run_id=h.state.run_id,
@@ -305,7 +304,7 @@ async def champion_harness(
             conn,
             run_id=h.state.run_id,
             node_name=boundary.node_name,
-            seq=1 + [node.name for node in TABULAR_SPINE].index(boundary.node_name),
+            seq=1 + [node.name for node in LEGACY_SPINE].index(boundary.node_name),
             candidate_id=second_id,
             attempt=next_node_attempt(
                 conn, run_id=h.state.run_id, node_name=boundary.node_name, candidate_id=second_id
@@ -352,7 +351,7 @@ async def champion_harness(
             NodeSkill(
                 node.name, "section", "purpose", "heuristics", "tools", "outputs", "pitfalls", names
             )
-            for node in TABULAR_SPINE
+            for node in LEGACY_SPINE
         ),
         b"fixed",
     )

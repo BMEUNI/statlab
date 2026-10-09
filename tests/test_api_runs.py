@@ -364,7 +364,7 @@ async def test_creation_snapshot_and_rejected_requests(
         gate = await _gate(api, run_id)
         snapshot = await api.client.get(f"/api/runs/{run_id}")
         assert snapshot.status_code == 200
-        assert len(snapshot.json()["state"]["spine"]) == 13
+        assert len(snapshot.json()["state"]["spine"]) == 14
         assert snapshot.json()["state"]["status"] == "awaiting_user"
         assert snapshot.json()["gates"][0]["id"] == gate.id
         assert len(list_runs(api.conn, api.project_id)) == before + 1

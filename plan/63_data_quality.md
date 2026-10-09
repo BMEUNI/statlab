@@ -2,7 +2,7 @@
 status: in_progress
 dependencies: [62]
 completion_date: null
-implementation_notes: "63-0 and 63a accepted (captured spine; quality tools check_data_quality, fix_data_quality); 63b next"
+implementation_notes: "63-0, 63a, 63b accepted (captured spine; quality tools; data_quality step before the split); 63c (UI, report) next"
 ---
 
 # Chunk 63 — data quality check node (proposal)
@@ -543,3 +543,288 @@ reachable gaps in `quality.py`) -> addendum C. Final `make check` (`check63a2.lo
 coverage 100 % (TOTAL 12486 stmts, 0 missed; `quality.py` 227 stmts, 78 branches), mypy 200
 files, Ruff clean. Logs temporary. Tool names: `check_data_quality`, `fix_data_quality`
 (phase `quality`, `allow_in` `data_quality`, not transform-only).
+
+## Stage 63b — the `data_quality` step (detailed spec)
+
+Goal: the new SHARED step between `data_profiling` and `data_splitting`: run
+`check_data_quality` on the profiled frame, let the model choose fixes from the reported
+`fixable` lists, apply them with `fix_data_quality`, and hand the resulting frame to the split.
+Non-goals: UI, report section (63c); fixes outside the reported lists; label noise (64).
+
+Owned: `backend/statlab/domains/decisions.py`, `backend/statlab/domains/tabular.py`,
+`backend/statlab/domains/lineage.py`, `backend/statlab/domains/executor.py`,
+`backend/statlab/domains/foundation.py`, `skills/modelling.md`, `integration/offline_llm.py`,
+`integration/checks.py`, `tests/test_nodes_foundation.py`, `tests/test_skills.py`,
+`tests/test_api_runs.py`. Preserve other edits.
+
+1. `decisions.py`, after `ProfileFindings`:
+   `class QualityDecision(Decision):` docstring "Which reported quality fixes to apply (chunk
+   63); values come only from `check_data_quality`'s `fixable` lists." Fields: `findings:
+   tuple[str, ...] = ()`, `mark_missing: dict[str, tuple[str, ...]] =
+   Field(default_factory=dict)`, `merge_variants: tuple[str, ...] = ()`.
+2. `tabular.py`: import `QualityDecision`; insert right after the `data_profiling` NodeSpec:
+   `NodeSpec("data_quality", "SHARED", True, QualityDecision, ("quality",), "always")`.
+3. `lineage.py`: `"data_quality"` after `"data_profiling"` in `SPINE_TOOLS_NODES`.
+4. `executor.py`: `"data_quality": foundation,` after `"data_profiling"`.
+5. `foundation.py`:
+   - Import `QualityDecision`.
+   - Module function after `_ref`: `def _validate_quality(decision: QualityDecision, fixable:
+     dict[str, JsonValue]) -> None:` `reported = _object(fixable.get("mark_missing"),
+     "quality fixable mark_missing")`; for each `column, values` in
+     `decision.mark_missing.items()`: `options = reported.get(column)`; when not a list raise
+     `_RefusalError(f"mark_missing column {column!r} has no reported values; allowed columns:
+     {sorted(reported)!r}")`; `bad = sorted(set(values) - {item for item in options if
+     isinstance(item, str)})`; when `bad` raise `_RefusalError(f"mark_missing[{column!r}]
+     values {bad!r} were not reported; allowed: {options!r}")`. Then `allowed_merge =
+     _strings(fixable.get("merge_variants"), "quality fixable merge_variants")`; `bad =
+     sorted(set(decision.merge_variants) - set(allowed_merge))`; when `bad` raise
+     `_RefusalError(f"merge_variants {bad!r} were not reported; allowed:
+     {list(allowed_merge)!r}")`.
+   - `__call__` methods map: `"data_quality": self._quality,` after `"data_profiling"`.
+   - New method after `_profile`:
+     ```
+     async def _quality(self, invocation, evidence) -> NodeResult:
+         problem = problem_from_state(invocation.state)
+         frame = _ref(shared_result(invocation.state, "data_profiling").summary, "frame")
+         features = self.runtime.contract.features
+         ignored = [c for c in dict.fromkeys((*features.id_columns, *features.exclude))
+                    if c != problem.target]
+         check = await self._call(invocation, evidence, "check_data_quality", {
+             "frame": str(frame), "target": problem.target, "id_columns": ignored,
+             "min_class_rows": self.runtime.contract.modelling.tuning.cv_folds})
+         fixable = _object(check.summary.get("fixable"), "quality fixable")
+         decision = await self.runtime.decide(invocation, QualityDecision,
+             evidence=tuple(evidence.tools), question=<text below>,
+             check=_rejecting(lambda d: _validate_quality(d, fixable)))
+         _validate_quality(decision, fixable)
+         summary = {"frame": str(frame), "decision": decision.model_dump(mode="json"),
+                    "passed": check.summary.get("passed"), "checks": check.summary.get("checks")}
+         approved = await self._approve(invocation, evidence, decision)
+         if approved is None: return evidence.result("awaiting_user", summary)
+         _validate_quality(approved, fixable)
+         summary["decision"] = approved.model_dump(mode="json")
+         if approved.mark_missing or approved.merge_variants:
+             fixed = await self._call(invocation, evidence, "fix_data_quality", {
+                 "frame": str(frame), "target": problem.target,
+                 "mark_missing": {c: list(v) for c, v in approved.mark_missing.items()},
+                 "merge_variants": list(approved.merge_variants)})
+             summary["frame"] = str(_frame(fixed))
+         return evidence.result("completed", summary)
+     ```
+     (pseudocode; write it with the module's typing, `dict[str, JsonValue]` for `summary`,
+     and `JsonValue`-typed params as `_profile` does). Question text: "Review the data
+     quality checks (whole input, before the split). Choose fixes only from the reported
+     fixable lists: mark_missing maps a column to cell texts that stand for a missing value;
+     merge_variants lists text columns whose spelling variants name the same category. Leave
+     both empty to change nothing. Name every failing check in findings."
+   - `_split`: replace the `profiled = next(...)` lookup with `prepared = next((boundary.result
+     for boundary in reversed(invocation.state.shared_results) if boundary.node_name in
+     ("data_quality", "data_profiling") and boundary.result.status == "completed"), None)`;
+     `frame = _ref(prepared.summary, "frame") if prepared is not None else raw`; the later
+     `if profiled is None and ...` becomes `if prepared is None and ...`. Nothing else.
+6. `skills/modelling.md`: insert between the `data_profiling` and `data_splitting` sections:
+   ```
+   ## data_quality
+
+   ### Purpose
+   Check data integrity before the split and apply only safe, reported fixes.
+
+   ### Heuristics
+   - Read every check's status and name failing checks in the findings.
+   - Mark reported placeholder texts (such as "?" or "unknown") as missing when they clearly stand for a missing value; keep numeric sentinels unless the column cannot take that value.
+   - Merge spelling variants only when they clearly name the same category.
+   - Report duplicates, conflicting labels and rare levels; the split and preprocessing handle them.
+
+   ### Tools
+   check_data_quality
+   fix_data_quality
+
+   ### Outputs
+   Quality report and, when fixes are chosen, the fixed frame the split uses.
+
+   ### Pitfalls
+   - Never change the target or apply values the check did not report.
+   - The checks read the whole input before the split; describe them as such.
+   ```
+7. `integration/offline_llm.py`: add `"QualityDecision"` to `_RATIONALE_ONLY` (after
+   `"ProfileFindings"`). `integration/checks.py`: `"data_quality"` after `"data_profiling"`
+   in `_SHARED_NODES`.
+8. Tests:
+   - `tests/test_skills.py` `_NAMES`: `"data_quality"` after `"data_profiling"`.
+   - `tests/test_api_runs.py` ~367: `len(...["spine"]) == 14`.
+   - `tests/test_nodes_foundation.py`:
+     - `LEGACY_SPINE = tuple(spec for spec in TABULAR_SPINE if spec.name != "data_quality")`
+       (module level, comment `# Runs made before chunk 63 have no data_quality step.`).
+       `Harness` gains field `spine: tuple[NodeSpec, ...]` (last field); `invocation` uses
+       `self.spine[position]`; `harness(...)` gains keyword `spine: tuple[NodeSpec, ...] =
+       LEGACY_SPINE`, uses it for `RunState.initial(nodes=spine)` and passes it to `Harness`.
+       All existing tests keep their positions and now also prove the old-run path (split
+       reads the profiled frame).
+     - `policy()` allowed set adds `"check_data_quality"` and `"fix_data_quality"`.
+     - `FIXED = ArtifactRef("a_0000000000000007")`. `OfflineTools`: `self.fixable:
+       dict[str, JsonValue] = {"mark_missing": {"city": ["?"]}, "merge_variants": ["city"]}`;
+       `check_data_quality` returns `ToolSuccess(summary={"rows": 240, "passed": True,
+       "checks": {}, "fixable": self.fixable})`; `fix_data_quality` returns
+       `ToolSuccess(summary={"rows": 240}, artifacts=(ArtifactMeta(ref=FIXED,
+       kind="dataframe", label="quality_fixed"),))`.
+     - `OfflineLlm` defaults: `QualityDecision: QualityDecision(rationale="checks reviewed")`.
+     - `test_declared_spine_and_deferred_schema`: `len(TABULAR_SPINE) == 14`; first five
+       names `intake, problem_definition, data_profiling, data_quality, data_splitting`;
+       `TABULAR_SPINE[3].decision_schema is QualityDecision and TABULAR_SPINE[3].skippable`;
+       shift the later index assertions by one (`[5]` Design, `[6]` Inference, `[7:12]`,
+       `[12:]`).
+     - Helper `def _full(conn, project, root) -> Harness:` returns `harness(conn, project,
+       root, contract=DataContract(target=TargetSpec(column="y", type="binary"),
+       features=FeatureRules(id_columns=("id",), exclude=("excluded",))), spine=TABULAR_SPINE)`.
+       If this contract fails validation in intake with the fixture tools, stop and report.
+     - `test_quality_without_fixes_hands_profiled_frame_to_split(migrated_db, project,
+       tmp_path)`: `h = _full(...)`; `await h.advance(5)`; quality =
+       `shared_result(h.state, "data_quality")`: `summary["frame"] == str(FRAME)`,
+       `summary["passed"] is True`; the `check_data_quality` call params equal `{"frame":
+       str(FRAME), "target": "y", "id_columns": ["id", "excluded"], "min_class_rows": 5}`; no
+       `fix_data_quality` call; the first call with `ctx.node == "data_splitting"` and a
+       `"frame"` param has `params["frame"] == str(FRAME)`.
+     - `test_quality_fixes_feed_split`: as above with `h.llm.responses[QualityDecision] =
+       QualityDecision(rationale="fix", mark_missing={"city": ("?",)},
+       merge_variants=("city",))`; `fix_data_quality` params `{"frame": str(FRAME), "target":
+       "y", "mark_missing": {"city": ["?"]}, "merge_variants": ["city"]}`; quality
+       `summary["frame"] == str(FIXED)` and `FIXED in quality.artifacts`; the first
+       data_splitting frame param is `str(FIXED)`.
+     - `test_quality_check_rejects_unreported_fixes`: `h = _full(...)`; `await h.advance(3)`;
+       `await h.step()`; `check = h.llm.checks[QualityDecision]`: `check(QualityDecision(
+       rationale="ok", mark_missing={"city": ("?",)})) is None`; `pytest.raises(
+       DecisionRejectedError, match="were not reported")` for `mark_missing={"city":
+       ("n/a",)}`; `match="no reported values"` for `mark_missing={"other": ("?",)}`;
+       `match="merge_variants"` for `merge_variants=("other",)`.
+     - `test_quality_refuses_unreported_fix_after_decision`: `h = _full(...)`;
+       `h.llm.responses[QualityDecision] = QualityDecision(rationale="bad",
+       merge_variants=("other",))`; `await h.advance(3)`; `result = await h.step()`:
+       `result.status == "failed"`, `result.error` is not None and `"merge_variants" in
+       result.error.message`.
+     If other existing foundation tests fail after the `LEGACY_SPINE` switch, stop and report.
+
+Checks: `make test-fast TESTS="tests/test_nodes_foundation.py tests/test_skills.py tests/test_api_runs.py tests/test_graph_engine_tools.py tests/test_candidate_fanout_tools.py tests/test_mcp_client.py tests/test_layout.py tests/test_skeleton.py"`;
+Ruff check, Ruff format --check and mypy on every owned Python file; then
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S01 S07` and
+`.venv/bin/python -m integration.run_scenarios --llm offline-rich --only S01` (offline, no
+cost) with exit codes and PASS/FAIL lines. If a scenario fails, stop and report the failing
+check names.
+
+Main then: `make check`, the real-data check from Amendment A, commit.
+
+### Addendum 63b-A (profiled frame is RAW in the quality tests)
+
+Main's error: with the `_full` contract (no `features.roles`) profiling does not cast, so the
+profiled frame is `RAW`. In `test_quality_without_fixes_hands_profiled_frame_to_split` and
+`test_quality_fixes_feed_split` replace every expected `str(FRAME)` with `str(RAW)` (quality
+summary frame, `check_data_quality` and `fix_data_quality` `frame` params, and the first
+data_splitting frame in the no-fix test). `FIXED` expectations stay. Then rerun all 63b
+Checks, including both offline scenario commands.
+
+### Addendum 63b-B (skipped profiling)
+
+Review finding: `data_profiling` is skippable. Then `_quality`'s
+`shared_result(..., "data_profiling")` raises `EngineError` (a crash, not a refusal), and if
+quality did run on the raw frame, `_split` would skip `cast_dtypes` because a quality boundary
+exists, so contract roles would never be applied. Resolution in `foundation.py`:
+1. Module function after `shared_result`: `def _completed(state: RunState, node: str) ->
+   NodeResult | None:` returning the latest completed shared boundary result for `node`, or
+   None (the generator the old `profiled = next(...)` used, with the node as a parameter).
+2. `_quality`: `profiled = _completed(invocation.state, "data_profiling")`; `frame =
+   _ref(profiled.summary, "frame") if profiled is not None else
+   _ref(shared_result(invocation.state, "intake").summary, "raw")`.
+3. `_split`: `profiled = _completed(invocation.state, "data_profiling")`; `quality =
+   _completed(invocation.state, "data_quality")`; `frame = _ref(quality.summary, "frame") if
+   quality is not None else (_ref(profiled.summary, "frame") if profiled is not None else
+   raw)`; the cast condition is again `if profiled is None and contract.features.roles:`
+   (roles are applied by profiling; without it the split casts whatever frame it got). Remove
+   the `prepared` variable.
+4. Test `test_quality_after_skipped_profile_checks_raw_and_split_casts`, modelled on
+   `test_split_after_skipped_profile_casts_and_respects_no_duplicate_drop` but with
+   `spine=TABULAR_SPINE` and the same contract: after `advance(2)` replace the state with
+   `cursor: 3` and the skipped `data_profiling` boundary (same construction);
+   `h.llm.responses[QualityDecision] = QualityDecision(rationale="fix", mark_missing={"city":
+   ("?",)})`; `await h.step()` is `completed`; the `check_data_quality` and `fix_data_quality`
+   calls have `params["frame"] == str(RAW)`; then `offset = len(h.tools.calls)`, `await
+   h.step()` is `completed`, and the first new call is `("cast_dtypes", {"frame": str(FIXED),
+   "target": "y", "roles": {"x": "numeric"}})`.
+Checks: the 63b Checks again (both offline scenarios included).
+
+### Note 63b-C (offline-rich S01 is a pre-existing failure)
+
+Implementer's offline-rich S01: FAIL 13/24, run cancelled at a failure gate on
+`experiment_design` attempt 2 (search wave 2): "approved shortlist must match existing
+candidate specifications". Main ran the same command on committed `2363078` (no 63b) in a
+scratch worktree: identical failure (`wt/integration/out/20261009T132912Z-offline-rich`).
+Last pass `integration/out/20261008T084855Z-offline-rich`; first seen failing
+`20261009T111705Z-offline-rich`. Not caused by 63b; tracked separately. For 63b, the
+offline-rich command is dropped from the Checks; offline S01 and S07 remain.
+
+### Addendum 63b-D (positional spine use in later node tests)
+
+`make check` (`check63b.log`): 84 failures, all in tests that build on the foundation
+`Harness` (now on `LEGACY_SPINE`) but index `TABULAR_SPINE` by position (`[index]`,
+`position=6/8/10/11`, `cursor=6/11/12`, `.index(...)`): `tests/test_domain_executor.py` (2),
+`test_nodes_candidate_models.py` (16), `test_nodes_candidate_pipeline.py` (21),
+`test_nodes_candidate_search.py` (5), `test_nodes_champion.py` (24),
+`test_nodes_persistence.py` (16). Errors: "assert 'data_splitting' == 'data_quality'" and
+"candidate invocation identity mismatch". Resolution: these node-level tests keep proving
+behaviour on the pre-63 spine positions. Owned: those six test files only. In each, replace
+every `TABULAR_SPINE` reference with `LEGACY_SPINE` imported from `tests.test_nodes_foundation`
+(add it to the existing `from tests.test_nodes_foundation import ...` line, or add that import
+where the file has none, e.g. `test_domain_executor.py`); drop `TABULAR_SPINE` from the
+`statlab.domains.tabular` import where it becomes unused (keep `TABULAR_TRAVERSAL`). No other
+change. Checks: `make test-fast TESTS="tests/test_domain_executor.py tests/test_nodes_candidate_models.py tests/test_nodes_candidate_pipeline.py tests/test_nodes_candidate_search.py tests/test_nodes_champion.py tests/test_nodes_persistence.py tests/test_nodes_design_inference.py tests/test_nodes_foundation.py"`;
+Ruff check, Ruff format --check and mypy on the six files. If any failure remains, stop and
+report the test ids and first error lines.
+
+Bisect for Note 63b-C (main, scratch worktree, offline-rich S01): `651d2a2` PASS, `c0cc6de`
+("cheaper prompts, code-built fixed steps, stepper ...") FAIL; `a595775`, `d19d412`,
+`2363078` FAIL. The regression came with `c0cc6de` (2026-10-08); a separate chunk fixes it.
+
+### Addendum 63b-E (dispatch map covers the current spine)
+
+`tests/test_domain_executor.py::test_dispatches_all_thirteen_declared_nodes`: line ~43 compares
+the dispatcher map with the *current* spine, so it becomes `assert tuple(dispatcher.executors)
+== tuple(node.name for node in TABULAR_SPINE)` (re-import `TABULAR_SPINE` from
+`statlab.domains.tabular`), followed by `assert dispatcher.executors["data_quality"] is
+dispatcher.executors["data_profiling"]`. The dispatch loop stays on `LEGACY_SPINE` with the
+13-entry `expected` (the harness state is legacy). Nothing else. Checks: `make test-fast
+TESTS="tests/test_domain_executor.py"`; Ruff check, Ruff format --check, mypy on that file.
+
+### Addendum 63b-F (coverage: guided hold)
+
+`make check` (`check63b2.log`): all tests pass; `foundation.py` line ~620 (`_quality`'s
+`awaiting_user` return) uncovered. Add `test_quality_guided_hold_before_fixes(migrated_db,
+project, tmp_path)` modelled on `test_guided_hold_retains_evidence_before_actions`: `h =
+_full(...)`; `await h.advance(3)`; replace `h.state` with the same state in `mode="guided"`
+(same construction as that test); `h.llm.responses[QualityDecision] =
+QualityDecision(rationale="fix", mark_missing={"city": ("?",)})`; `before =
+len(h.tools.calls)`; `result = await h.step()`: `result.status == "awaiting_user"`,
+`"decision" in result.summary`, `result.summary["frame"] == str(RAW)`, and
+`len(h.tools.calls) == before + 1` (only `check_data_quality`, no fix). Checks: `make
+test-fast TESTS="tests/test_nodes_foundation.py"`; Ruff check, Ruff format --check, mypy on
+that file.
+
+### Stage 63b acceptance receipt (2026-10-09)
+
+Implementer (after addenda A, B, D, E, F): the 63b focused selectors exit 0; Ruff
+check/format and mypy on owned files exit 0; offline `run_scenarios --only S01 S07` exit 0,
+both PASS (`integration/out/20261009T133044Z-offline`). Offline-rich S01 fails identically on
+the pre-63b commit (Note 63b-C; regression from `c0cc6de`, separate chunk). Main reviewed the
+product diff (decision, spine, lineage, executor, `_quality`, `_completed`, split frame/cast
+logic, skill section). `make check`: `check63b.log` 84 failures (positional spine in six node
+test files) -> addendum D, E; `check63b2.log` 99.99 % (guided hold line) -> addendum F;
+final `check63b3.log` exit 0: coverage 100 % (TOTAL 12529 stmts, 0 missed), mypy 200 files,
+Ruff clean. Logs temporary.
+
+Real-data check (Amendment A): the user's `statlab.db` (sqlite backup) and `projects/`
+copied to the scratchpad, stored paths rewritten to the copy, MCP (port 8767) and API (port
+8766) started on the copy with a dummy provider key (no paid call possible). All 10 stored
+runs: snapshot 200, `view_only` false, 13 captured steps without `data_quality`; executions,
+artifact lists and SSE events 200; reports 200 where a report exists (404 for the cancelled,
+superseded and awaiting runs, which have none); every artifact preview 200, or the designed
+422 (non-dataframe kind) / 403 (locked test artifact); plot files identical to the user's
+live server for the two runs compared. Rewinding `r_ca4d7d9637afd45e` to `data_profiling`
+created `r_ef57d3f60dcf4a50` with the parent's 13-step spine; its intake LLM call failed on
+the dummy key (401) as intended. Servers stopped; copy left in the scratchpad.

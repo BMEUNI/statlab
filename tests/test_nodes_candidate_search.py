@@ -14,7 +14,6 @@ from statlab.domains.candidate_search import CandidateSearchPlanner
 from statlab.domains.decisions import DesignDecision, SearchDecision
 from statlab.domains.design_inference import DesignInferenceExecutor
 from statlab.domains.foundation import _RefusalError
-from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
@@ -35,7 +34,7 @@ from tests.test_nodes_candidate_pipeline import (
     prepare_candidate,
     save_result,
 )
-from tests.test_nodes_foundation import Harness
+from tests.test_nodes_foundation import LEGACY_SPINE, Harness
 
 
 def proposal(baseline: CandidateSpec) -> CandidateSpec:
@@ -140,7 +139,7 @@ async def test_initial_approval_later_audit_and_saved_wave_never_replans(
         attempt=2,
     )
     output = await DesignInferenceExecutor(h.runtime)(
-        NodeInvocation(h.state, TABULAR_SPINE[4], execution, None)
+        NodeInvocation(h.state, LEGACY_SPINE[4], execution, None)
     )
     assert output.status == "completed"
     assert h.state.branches[0].spec == original and h.state.branches[1].spec == new
@@ -149,7 +148,7 @@ async def test_initial_approval_later_audit_and_saved_wave_never_replans(
         candidate_set=CandidateSet(candidates=(original,)),
     )
     rejected = await DesignInferenceExecutor(h.runtime)(
-        NodeInvocation(h.state, TABULAR_SPINE[4], execution, None)
+        NodeInvocation(h.state, LEGACY_SPINE[4], execution, None)
     )
     assert rejected.status == "failed"
 

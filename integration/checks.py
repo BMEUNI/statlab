@@ -452,6 +452,7 @@ _SHARED_NODES = (
     "intake",
     "problem_definition",
     "data_profiling",
+    "data_quality",
     "data_splitting",
     "experiment_design",
     "inferential_analysis",

@@ -27,7 +27,6 @@ from statlab.domains.decisions import (
     ValidationConclusion,
 )
 from statlab.domains.foundation import problem_from_state
-from statlab.domains.tabular import TABULAR_SPINE
 from statlab.errors import EngineError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
@@ -44,7 +43,7 @@ from tests.test_nodes_candidate_pipeline import (
     prepare_candidate,
     save_result,
 )
-from tests.test_nodes_foundation import TEST, Harness
+from tests.test_nodes_foundation import LEGACY_SPINE, TEST, Harness
 
 
 @pytest.mark.asyncio
@@ -419,7 +418,7 @@ async def test_durable_decision_and_executor_binding_guards(
         evaluation_decision(bad)
     with pytest.raises(EngineError, match="retune branch is not checkpointed"):
         await candidate_retune_decider(h.state, bad)
-    shared = TABULAR_SPINE[0]
+    shared = LEGACY_SPINE[0]
     execution = create_node_execution(
         h.runtime.conn,
         run_id=h.state.run_id,

@@ -22,6 +22,7 @@ from statlab.persistence.models import ProjectRow
 from statlab.persistence.repository import create_node_execution, next_node_attempt
 
 from tests.test_nodes_champion import champion_harness, tail_invocation
+from tests.test_nodes_foundation import LEGACY_SPINE
 
 
 @pytest.mark.asyncio
@@ -41,6 +42,7 @@ async def test_dispatches_all_thirteen_declared_nodes(
         + (ChampionExecutor, PersistenceExecutor)
     )
     assert tuple(dispatcher.executors) == tuple(node.name for node in TABULAR_SPINE)
+    assert dispatcher.executors["data_quality"] is dispatcher.executors["data_profiling"]
     seen: list[tuple[type[object], str]] = []
 
     async def recording(self: object, invocation: NodeInvocation) -> NodeResult:
@@ -49,7 +51,7 @@ async def test_dispatches_all_thirteen_declared_nodes(
 
     for executor_type in set(expected):
         monkeypatch.setattr(executor_type, "__call__", recording)
-    for seq, (node, executor_type) in enumerate(zip(TABULAR_SPINE, expected, strict=True), 1):
+    for seq, (node, executor_type) in enumerate(zip(LEGACY_SPINE, expected, strict=True), 1):
         branch = h.state.branches[0] if node.kind == "PER_CANDIDATE" else None
         candidate_id = branch.database_id(h.state.run_id) if branch else None
         execution = create_node_execution(

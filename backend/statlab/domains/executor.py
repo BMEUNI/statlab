@@ -24,6 +24,7 @@ class TabularExecutor:
             "intake": foundation,
             "problem_definition": foundation,
             "data_profiling": foundation,
+            "data_quality": foundation,
             "data_splitting": foundation,
             "experiment_design": design,
             "inferential_analysis": design,
