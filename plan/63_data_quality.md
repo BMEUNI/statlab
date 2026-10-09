@@ -1,8 +1,8 @@
 ---
-status: in_progress
+status: completed
 dependencies: [62]
-completion_date: null
-implementation_notes: "63-0, 63a, 63b accepted (captured spine; quality tools; data_quality step before the split); 63c (UI, report) next"
+completion_date: 2026-10-09
+implementation_notes: "runs keep their captured spine (old runs open, unreproducible ones view-only); data_quality step with nine checks and two safe fixes before the split; step card and report section; make check 100%, npm 99/99"
 ---
 
 # Chunk 63 — data quality check node (proposal)
@@ -828,3 +828,226 @@ superseded and awaiting runs, which have none); every artifact preview 200, or t
 live server for the two runs compared. Rewinding `r_ca4d7d9637afd45e` to `data_profiling`
 created `r_ef57d3f60dcf4a50` with the parent's 13-step spine; its intake LLM call failed on
 the dummy key (401) as intended. Servers stopped; copy left in the scratchpad.
+
+## Stage 63c — UI card and report section (detailed spec)
+
+Goal: the run page shows the quality checks of a `data_quality` step; the final report gets a
+`## Data quality` section. Both appear only when the step ran (old runs: nothing changes).
+Non-goals: chat changes (the decision's `user_summary` already narrates the step), tool
+changes, new CSS, timeline changes (`nodeLabel` already gives "Data quality").
+Prerequisite: 63b accepted (`a35dbb7`). Data shapes: `check_data_quality` summary `checks`
+(`mcp_server/statlab_tools/tools/quality.py` ~150-345: each entry `{status, rows, columns,
+details}`, status `pass|warn|fail|skipped`), `_quality` boundary summary
+(`backend/statlab/domains/foundation.py` ~612-636: `passed`, `checks`, `decision`, optional
+`frame`). Not alone in the tree: preserve others' edits.
+
+Owned files: `backend/statlab/domains/champion.py`, `tests/test_nodes_champion.py`,
+`frontend/src/ui/icons.tsx`, `frontend/src/run/model.ts`, `frontend/src/run/NodeInspector.tsx`,
+`frontend/tests/run-model.test.ts`.
+
+### Backend: `champion.py`
+
+1. Imports: add `_completed` and `_strings` to the existing `from statlab.domains.foundation
+   import (...)` list (keep alphabetical order as Ruff sorts it). Add `from collections.abc
+   import Sequence` only if Ruff/mypy need it for `_names` (prefer extending the existing
+   `from collections.abc import Mapping` line).
+2. Module constants after `TIMING_CAVEAT`:
+   - `_QUALITY_LABELS: dict[str, str]` = `disguised_missing` "Placeholder values for missing
+     data", `mixed_types` "Numbers and text mixed in a column", `category_variants` "Same
+     category spelled differently", `duplicate_rows` "Duplicate rows", `conflicting_labels`
+     "Identical rows with different targets", `near_constant` "Almost constant columns",
+     `rare_categories` "Very rare categories", `target_health` "Target problems",
+     `duplicate_columns` "Duplicate columns".
+   - `_QUALITY_RESULTS: dict[str, str]` = `pass` "passed", `warn` "warning", `fail` "failed",
+     `skipped` "skipped".
+3. Private functions (module level, after the constants), each with a one-line docstring:
+   - `_short(text: str) -> str`: `text` if `len(text) <= 40`, else `text[:39] + "…"`.
+   - `_names(columns: Sequence[str]) -> str`: `", ".join(_short(c) for c in columns[:5])`,
+     plus `f" and {len(columns) - 5} more"` appended when `len(columns) > 5`.
+   - `_cell(text: str) -> str`: `" ".join(text.splitlines()).replace("|", "\\|")` (same rule
+     as `reporting.cell`; the backend cannot import the MCP package).
+   - `_quality_sections(state: RunState) -> tuple[ReportSection, ...]`:
+     1. `result = _completed(state, "data_quality")`; `None` -> return `()`.
+     2. `checks = _object(result.summary.get("checks"), "quality checks")`.
+     3. `lines = ["The checks ran on the whole dataset before the split.", "", "| Check |
+        Result | Rows affected | Columns |", "| --- | --- | --- | --- |"]` (the header is one
+        string `"| Check | Result | Rows affected | Columns |"`).
+     4. For `name, value in checks.items()`: `entry = _object(value, "quality check")`;
+        `columns = _strings(entry.get("columns"), "quality check columns")`;
+        `status = str(entry.get("status"))`; append
+        `f"| {_QUALITY_LABELS.get(name, name)} | {_QUALITY_RESULTS.get(status, status)} | "
+        f"{entry.get('rows')} | {_cell(_names(columns)) if columns else '—'} |"`.
+     5. `decision = _object(result.summary.get("decision"), "quality decision")`;
+        `marked = _object(decision.get("mark_missing"), "quality mark_missing")`;
+        `merged = _strings(decision.get("merge_variants"), "quality merge_variants")`.
+        `fixes: list[str] = []`; if `marked`: append
+        `f"Placeholder values were marked as missing in: {_names(list(marked))}."`; if `merged`:
+        append `f"Spelling variants were merged in: {_names(merged)}."`.
+     6. `lines += ["", " ".join(fixes) if fixes else "No fixes were applied."]`; return
+        `(ReportSection(heading="Data quality", body="\n".join(lines)),)`.
+     Body size: at most 9 rows of capped names plus two capped lines, far below the 8000
+     limit of `ReportSection.body`.
+4. In `ChampionExecutor`, the `assemble_report` arguments (~376): `"sections"` becomes
+   `[section.model_dump(mode="json") for section in (*choice.sections,
+   *_quality_sections(state), caveats)]`. Nothing else changes.
+
+### Backend tests: `tests/test_nodes_champion.py`
+
+1. `test_champion_selects_before_exact_replay_and_one_task_score`: after the `"not
+   comparable"` assertion add `assert "Data quality" not in str(report["sections"])` (old
+   spine, no quality step: no section).
+2. New `@pytest.mark.asyncio @pytest.mark.parametrize(("mark_missing", "merge_variants",
+   "line"), [({"c": ["?"]}, [], "Placeholder values were marked as missing in: c."), ({},
+   ["d"], "Spelling variants were merged in: d."), ({}, [], "No fixes were applied.")])`
+   `async def test_report_lists_data_quality_checks_and_fixes(migrated_db, project, tmp_path,
+   mark_missing: dict[str, list[str]], merge_variants: list[str], line: str) -> None`
+   (fixture types as in the neighbouring tests):
+   - `h, tools = await champion_harness(migrated_db, project, tmp_path)`.
+   - `long = "x" * 50`; `checks: dict[str, JsonValue] = {"disguised_missing": {"status":
+     "warn", "rows": 3, "columns": ["a|b", "c"], "details": []}, "duplicate_rows": {"status":
+     "pass", "rows": 0, "columns": [], "details": {}}, "near_constant": {"status": "warn",
+     "rows": 9, "columns": [long, "k2", "k3", "k4", "k5", "k6", "k7"], "details": []}}`.
+   - `quality = BoundaryResult(node_name="data_quality", execution_id="quality-execution",
+     result=NodeResult(status="completed", summary={"passed": True, "checks": checks,
+     "decision": {"rationale": "r", "findings": [], "mark_missing": mark_missing,
+     "merge_variants": merge_variants}}))`; `h.state = h.state.model_copy(update=
+     {"shared_results": (*h.state.shared_results, quality)})`.
+   - `output = await ChampionExecutor(h.runtime)(tail_invocation(h))`; assert
+     `output.status == "completed"`.
+   - `report = next(arguments for _, name, arguments in tools.calls if name ==
+     "assemble_report")`; `sections = report["sections"]`; assert it is a list; take
+     `section = sections[-2]` and `last = sections[-1]`, assert both are dicts,
+     `section["heading"] == "Data quality"`, `last["heading"] == "Selection and execution
+     caveats"`; `body = section["body"]`, assert it is a str and:
+     `"| Placeholder values for missing data | warning | 3 | a\\|b, c |" in body`,
+     `"| Duplicate rows | passed | 0 | — |" in body`,
+     `"x" * 39 + "…" in body`, `"and 2 more" in body`, `line in body`.
+   If the executor refuses the extra boundary, stop and report the error; do not change the
+   executor beyond the recipe.
+
+### Frontend
+
+1. `frontend/src/ui/icons.tsx`: import `ShieldCheck` from `lucide-react` (keep the import
+   list alphabetical); add `data_quality: ShieldCheck,` to `NODE_ICONS` directly after
+   `data_profiling`.
+2. `frontend/src/run/model.ts` (append after `stepShortLabel`; `JsonValue`, `JsonObject`,
+   `isJsonObject`, `isStrings`, `humanize` are already in the module):
+   - `export type QualityStatus = 'pass' | 'warn' | 'fail' | 'skipped';`
+   - `export type QualityRow = { name: string; label: string; status: QualityStatus; rows:
+     number; columns: string[]; note: string };`
+   - `export const QUALITY_LABELS: Record<string, string>`: the nine labels of backend
+     step 2, identical text.
+   - `export const QUALITY_STATUS_LABELS: Record<QualityStatus, string> = { pass: 'Passed',
+     warn: 'Warning', fail: 'Failed', skipped: 'Skipped' };`
+   - private `isQualityStatus(value: unknown): value is QualityStatus` (same style as
+     `isPhase`: four `===` comparisons).
+   - private `text(value: JsonValue | undefined): string`: a string as is; a number or
+     boolean via `String(value)`; anything else `''`.
+   - private `texts(value: JsonValue | undefined): string[]`: not an array -> `[]`; else
+     `value.map(text).filter((item) => item !== '').slice(0, 5)`.
+   - private `percent(value: JsonValue | undefined): string`: a number ->
+     `` `${(value * 100).toFixed(1)}%` ``; else `''`.
+   - `export function qualityNote(name: string, details: JsonValue | undefined): string`:
+     `items = Array.isArray(details) ? details.filter(isJsonObject) : []`;
+     `one = isJsonObject(details) ? details : {}`; `switch (name)`:
+     - `disguised_missing`: items mapped to `` `${text(i.column)}: ${texts(i.values).join(', ')}` ``, joined `'; '`.
+     - `mixed_types`: same with `i.examples`.
+     - `category_variants`: items mapped to `` `${text(i.column)}: ${groups}` `` where
+       `groups = (Array.isArray(i.groups) ? i.groups : []).map((g) => texts(g).join(' / ')).join(', ')`; joined `'; '`.
+     - `rare_categories`: `` `${text(i.column)}: ${text(i.levels)} rare levels (${texts(i.examples).join(', ')})` ``, joined `'; '`.
+     - `near_constant`: `` `${text(i.column)}: ${text(i.value)} in ${percent(i.share)} of rows` ``, joined `'; '`.
+     - `duplicate_rows`: `` `${percent(one.share)} of rows` ``.
+     - `conflicting_labels`: `one.reason !== undefined` -> `text(one.reason)`; else
+       `` `${text(one.groups)} groups of identical rows with different targets` ``.
+     - `target_health`: `parts: string[] = []`; if `typeof one.nulls === 'number' &&
+       one.nulls > 0` push `` `missing target values: ${one.nulls}` ``; `small =
+       isJsonObject(one.small_classes) ? Object.entries(one.small_classes) : []`; if
+       non-empty push `` `classes with too few rows: ${small.map(([k, v]) => `${k} (${text(v)})`).join(', ')}` ``; return `parts.join('; ')`.
+     - `duplicate_columns`: `(Array.isArray(one.pairs) ? one.pairs : []).map((p) => texts(p).join(' = ')).join(', ')`.
+     - default: `''`.
+   - `export function qualityRows(summary: JsonObject): QualityRow[]`: `const { checks } =
+     summary`; not `isJsonObject(checks)` -> `[]`; else `Object.entries(checks).flatMap(([name,
+     entry]) => ...)`: skip (`[]`) when `!isJsonObject(entry) || !isQualityStatus(entry.status)`;
+     otherwise one row `{ name, label: QUALITY_LABELS[name] ?? humanize(name), status,
+     rows: typeof entry.rows === 'number' ? entry.rows : 0, columns: isStrings(entry.columns)
+     ? entry.columns : [], note: status === 'pass' ? '' : qualityNote(name, entry.details) }`.
+3. `frontend/src/run/NodeInspector.tsx`:
+   - import `QUALITY_STATUS_LABELS`, `qualityRows`, `type QualityStatus` from `./model.ts`
+     (extend the existing import).
+   - module constant `const QUALITY_PILLS: Record<QualityStatus, string> = { pass: 'pill
+     signal', warn: 'pill gate', fail: 'pill fault', skipped: 'pill' };`
+   - in the component after `const attempts = ...`: `const quality = outcome === null || node
+     !== 'data_quality' ? [] : qualityRows(outcome.summary);`
+   - inside the outcome fragment, directly after the Metrics `table-wrap` block and before the
+     Files block: when `quality.length > 0`, a `<div className="table-wrap"><table>` with
+     `<caption>Data quality checks</caption>`, header cells (`scope="col"`) Check, Result,
+     Rows, Columns, Details, and one `<tr key={row.name}>` per row: `row.label`; `<span
+     className={QUALITY_PILLS[row.status]}>{QUALITY_STATUS_LABELS[row.status]}</span>`;
+     `row.rows`; `row.columns.length === 0 ? '—' : row.columns.join(', ')`; `row.note === ''
+     ? '—' : row.note`.
+
+### Frontend tests: `frontend/tests/run-model.test.ts`
+
+Add `qualityNote` and `qualityRows` to the import list (alphabetical position). New tests:
+1. `test('qualityRows reads the checks and skips malformed entries', ...)`: summary
+   `{ checks: { disguised_missing: { status: 'warn', rows: 3, columns: ['a'], details:
+   [{ column: 'a', count: 3, values: ['?', 'n/a'] }] }, duplicate_rows: { status: 'pass',
+   rows: 0, columns: [], details: { share: 0, example_rows: [] } }, conflicting_labels:
+   { status: 'skipped', rows: 0, columns: [], details: { reason: 'continuous target' } },
+   target_health: { status: 'fail', rows: 2, columns: ['y'], details: { nulls: 1,
+   small_classes: { b: 1 } } }, bogus: { status: 'odd', rows: 1, columns: [], details: [] },
+   extra_check: { status: 'warn', rows: 'x', columns: [1], details: null } } }`;
+   `assert.deepEqual(qualityRows(summary), [...])` with, in order:
+   `{ name: 'disguised_missing', label: 'Placeholder values for missing data', status: 'warn',
+   rows: 3, columns: ['a'], note: 'a: ?, n/a' }`,
+   `{ name: 'duplicate_rows', label: 'Duplicate rows', status: 'pass', rows: 0, columns: [],
+   note: '' }`,
+   `{ name: 'conflicting_labels', label: 'Identical rows with different targets', status:
+   'skipped', rows: 0, columns: [], note: 'continuous target' }`,
+   `{ name: 'target_health', label: 'Target problems', status: 'fail', rows: 2, columns:
+   ['y'], note: 'missing target values: 1; classes with too few rows: b (1)' }`,
+   `{ name: 'extra_check', label: 'Extra check', status: 'warn', rows: 0, columns: [], note:
+   '' }`. Also `assert.deepEqual(qualityRows({}), [])` and
+   `assert.deepEqual(qualityRows({ checks: [] }), [])`.
+2. `test('qualityNote explains each finding', ...)` with `assert.equal`:
+   - `qualityNote('mixed_types', [{ column: 'age', numeric_share: 0.9, examples: ['ten'] }])` -> `'age: ten'`
+   - `qualityNote('category_variants', [{ column: 'city', groups: [['Paris', 'paris'], ['Rome', 'ROME']] }])` -> `'city: Paris / paris, Rome / ROME'`
+   - `qualityNote('rare_categories', [{ column: 'c', levels: 2, rows: 3, examples: ['x', 'y'] }])` -> `'c: 2 rare levels (x, y)'`
+   - `qualityNote('near_constant', [{ column: 'k', value: 0, share: 0.995 }])` -> `'k: 0 in 99.5% of rows'`
+   - `qualityNote('duplicate_rows', { share: 0.02, example_rows: [1] })` -> `'2.0% of rows'`
+   - `qualityNote('conflicting_labels', { groups: 2, example_rows: [] })` -> `'2 groups of identical rows with different targets'`
+   - `qualityNote('duplicate_columns', { pairs: [['a', 'b']] })` -> `'a = b'`
+   - `qualityNote('disguised_missing', [{ column: 'x', count: 7, values: ['1', '2', '3', '4', '5', '6', '7'] }])` -> `'x: 1, 2, 3, 4, 5'`
+   - `qualityNote('near_constant', 'not a list')` -> `''`
+   - `qualityNote('unknown', [])` -> `''`
+   If a literal result differs only by floating-point formatting, stop and report the actual
+   value; do not change the function.
+
+### Checks (implementer)
+
+From the repo root: `make test-fast TESTS="tests/test_nodes_champion.py"`;
+`.venv/bin/python -m ruff check`, `.venv/bin/python -m ruff format --check` and
+`.venv/bin/python -m mypy` on `backend/statlab/domains/champion.py
+tests/test_nodes_champion.py`. From `frontend/`: `npm test`, `npm run typecheck`,
+`npm run build`. Receipt: changed files, commands, exits, results, deviations.
+Stop and report on any failing check or missing helper; do not work around it.
+
+Main then: review, `make check`, a browser look at a quality step on the offline stack if
+practical, commit, mark chunk 63 completed.
+
+### Addendum 63c-A (test parameter types)
+
+mypy rejects `dict[str, list[str]]` / `list[str]` inside a `JsonValue` dict (invariance). In
+`test_report_lists_data_quality_checks_and_fixes` annotate the parameters as
+`mark_missing: dict[str, JsonValue]` and `merge_variants: list[JsonValue]` (both are
+`JsonValue` members); the parametrize values and the summary dict stay unchanged.
+
+### Stage 63c acceptance receipt (2026-10-09)
+
+Implementer (after addendum A): `tests/test_nodes_champion.py` exit 0 (27 passed); Ruff
+check/format and mypy on `champion.py` and the test file exit 0; `npm test` 99/99, typecheck
+0, build 0. Main reviewed the full diff against the recipe (report section built only from a
+completed `data_quality` boundary, capped names, escaped cells, inserted before the caveats;
+card shown only for the `data_quality` step; icon). `make check` (`check63c.log`, temporary)
+exit 0: coverage 100 % (TOTAL 12562 stmts, 0 missed), mypy 200 files, Ruff clean. No browser
+check: the user's next run shows the step end to end.

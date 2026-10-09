@@ -94,6 +94,95 @@ export function stepShortLabel(node: string): string {
   return STEP_SHORT_LABELS[node] ?? nodeLabel(node);
 }
 
+export type QualityStatus = 'pass' | 'warn' | 'fail' | 'skipped';
+
+export type QualityRow = { name: string; label: string; status: QualityStatus; rows: number; columns: string[]; note: string };
+
+export const QUALITY_LABELS: Record<string, string> = {
+  disguised_missing: 'Placeholder values for missing data',
+  mixed_types: 'Numbers and text mixed in a column',
+  category_variants: 'Same category spelled differently',
+  duplicate_rows: 'Duplicate rows',
+  conflicting_labels: 'Identical rows with different targets',
+  near_constant: 'Almost constant columns',
+  rare_categories: 'Very rare categories',
+  target_health: 'Target problems',
+  duplicate_columns: 'Duplicate columns',
+};
+
+export const QUALITY_STATUS_LABELS: Record<QualityStatus, string> = { pass: 'Passed', warn: 'Warning', fail: 'Failed', skipped: 'Skipped' };
+
+function isQualityStatus(value: unknown): value is QualityStatus {
+  return value === 'pass' || value === 'warn' || value === 'fail' || value === 'skipped';
+}
+
+function text(value: JsonValue | undefined): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function texts(value: JsonValue | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(text).filter((item) => item !== '').slice(0, 5);
+}
+
+function percent(value: JsonValue | undefined): string {
+  return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '';
+}
+
+export function qualityNote(name: string, details: JsonValue | undefined): string {
+  const items = Array.isArray(details) ? details.filter(isJsonObject) : [];
+  const one = isJsonObject(details) ? details : {};
+  switch (name) {
+    case 'disguised_missing':
+      return items.map((i) => `${text(i.column)}: ${texts(i.values).join(', ')}`).join('; ');
+    case 'mixed_types':
+      return items.map((i) => `${text(i.column)}: ${texts(i.examples).join(', ')}`).join('; ');
+    case 'category_variants':
+      return items.map((i) => {
+        const groups = (Array.isArray(i.groups) ? i.groups : []).map((g) => texts(g).join(' / ')).join(', ');
+        return `${text(i.column)}: ${groups}`;
+      }).join('; ');
+    case 'rare_categories':
+      return items.map((i) => `${text(i.column)}: ${text(i.levels)} rare levels (${texts(i.examples).join(', ')})`).join('; ');
+    case 'near_constant':
+      return items.map((i) => `${text(i.column)}: ${text(i.value)} in ${percent(i.share)} of rows`).join('; ');
+    case 'duplicate_rows':
+      return `${percent(one.share)} of rows`;
+    case 'conflicting_labels':
+      return one.reason !== undefined ? text(one.reason) : `${text(one.groups)} groups of identical rows with different targets`;
+    case 'target_health': {
+      const parts: string[] = [];
+      if (typeof one.nulls === 'number' && one.nulls > 0) parts.push(`missing target values: ${one.nulls}`);
+      const small = isJsonObject(one.small_classes) ? Object.entries(one.small_classes) : [];
+      if (small.length > 0) parts.push(`classes with too few rows: ${small.map(([k, v]) => `${k} (${text(v)})`).join(', ')}`);
+      return parts.join('; ');
+    }
+    case 'duplicate_columns':
+      return (Array.isArray(one.pairs) ? one.pairs : []).map((p) => texts(p).join(' = ')).join(', ');
+    default:
+      return '';
+  }
+}
+
+export function qualityRows(summary: JsonObject): QualityRow[] {
+  const { checks } = summary;
+  if (!isJsonObject(checks)) return [];
+  return Object.entries(checks).flatMap(([name, entry]) => {
+    const status = isJsonObject(entry) ? entry.status : undefined;
+    if (!isJsonObject(entry) || !isQualityStatus(status)) return [];
+    return [{
+      name,
+      label: QUALITY_LABELS[name] ?? humanize(name),
+      status,
+      rows: typeof entry.rows === 'number' ? entry.rows : 0,
+      columns: isStrings(entry.columns) ? entry.columns : [],
+      note: status === 'pass' ? '' : qualityNote(name, entry.details),
+    }];
+  });
+}
+
 export const ESTIMATOR_LABELS: Record<string, string> = {
   logistic_regression: 'Logistic regression',
   random_forest_classifier: 'Random forest',

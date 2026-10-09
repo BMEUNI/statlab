@@ -3,7 +3,7 @@ import { formatTime } from '../ui/format.ts';
 import type { ArtifactEntry, RunExecutions } from '../api/types.ts';
 import { ARTIFACT_HEADERS, ArtifactRow } from './ArtifactBrowser.tsx';
 import DecisionView from './DecisionView.tsx';
-import { executionsFor, failureText, latestOutcome, metricLabel, nodeLabel, type RunView } from './model.ts';
+import { executionsFor, failureText, latestOutcome, metricLabel, nodeLabel, QUALITY_STATUS_LABELS, qualityRows, type QualityStatus, type RunView } from './model.ts';
 import { metricsOf, type MetricValue } from './compare.ts';
 import type { Selection } from './RunTimeline.tsx';
 
@@ -13,6 +13,13 @@ type Props = {
   selected: Selection | null;
   artifacts: ArtifactEntry[] | undefined;
   onClose: () => void;
+};
+
+const QUALITY_PILLS: Record<QualityStatus, string> = {
+  pass: 'pill signal',
+  warn: 'pill gate',
+  fail: 'pill fault',
+  skipped: 'pill',
 };
 
 export default function NodeInspector({ view, data, selected, artifacts, onClose }: Props) {
@@ -31,6 +38,7 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
   const metrics: Record<string, MetricValue> = outcome === null ? {} : metricsOf(outcome);
   const decision = outcome?.summary.decision;
   const attempts = data === undefined ? null : executionsFor(node, candidateId, data);
+  const quality = outcome === null || node !== 'data_quality' ? [] : qualityRows(outcome.summary);
 
   return (
     <section className="panel" aria-labelledby="inspector-heading">
@@ -67,6 +75,27 @@ export default function NodeInspector({ view, data, selected, artifacts, onClose
                           ? `${metric.ciLow.toFixed(3)} to ${metric.ciHigh.toFixed(3)}`
                           : '—'}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {quality.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <caption>Data quality checks</caption>
+                <thead>
+                  <tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Rows</th><th scope="col">Columns</th><th scope="col">Details</th></tr>
+                </thead>
+                <tbody>
+                  {quality.map((row) => (
+                    <tr key={row.name}>
+                      <td>{row.label}</td>
+                      <td><span className={QUALITY_PILLS[row.status]}>{QUALITY_STATUS_LABELS[row.status]}</span></td>
+                      <td>{row.rows}</td>
+                      <td>{row.columns.length === 0 ? '—' : row.columns.join(', ')}</td>
+                      <td>{row.note === '' ? '—' : row.note}</td>
                     </tr>
                   ))}
                 </tbody>

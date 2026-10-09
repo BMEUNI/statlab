@@ -30,6 +30,8 @@ import {
   nowLine,
   parseGateQuestion,
   parseRunView,
+  qualityNote,
+  qualityRows,
   runControls,
   splitLead,
   STEP_PURPOSES,
@@ -578,4 +580,39 @@ test('failureText reads the failure message', () => {
   assert.equal(failureText('plain text'), 'plain text');
   assert.equal(failureText('{"message":""}'), '{"message":""}');
   assert.equal(failureText('[1]'), '[1]');
+});
+
+test('qualityRows reads the checks and skips malformed entries', () => {
+  const summary: JsonObject = {
+    checks: {
+      disguised_missing: { status: 'warn', rows: 3, columns: ['a'], details: [{ column: 'a', count: 3, values: ['?', 'n/a'] }] },
+      duplicate_rows: { status: 'pass', rows: 0, columns: [], details: { share: 0, example_rows: [] } },
+      conflicting_labels: { status: 'skipped', rows: 0, columns: [], details: { reason: 'continuous target' } },
+      target_health: { status: 'fail', rows: 2, columns: ['y'], details: { nulls: 1, small_classes: { b: 1 } } },
+      bogus: { status: 'odd', rows: 1, columns: [], details: [] },
+      extra_check: { status: 'warn', rows: 'x', columns: [1], details: null },
+    },
+  };
+  assert.deepEqual(qualityRows(summary), [
+    { name: 'disguised_missing', label: 'Placeholder values for missing data', status: 'warn', rows: 3, columns: ['a'], note: 'a: ?, n/a' },
+    { name: 'duplicate_rows', label: 'Duplicate rows', status: 'pass', rows: 0, columns: [], note: '' },
+    { name: 'conflicting_labels', label: 'Identical rows with different targets', status: 'skipped', rows: 0, columns: [], note: 'continuous target' },
+    { name: 'target_health', label: 'Target problems', status: 'fail', rows: 2, columns: ['y'], note: 'missing target values: 1; classes with too few rows: b (1)' },
+    { name: 'extra_check', label: 'Extra check', status: 'warn', rows: 0, columns: [], note: '' },
+  ]);
+  assert.deepEqual(qualityRows({}), []);
+  assert.deepEqual(qualityRows({ checks: [] }), []);
+});
+
+test('qualityNote explains each finding', () => {
+  assert.equal(qualityNote('mixed_types', [{ column: 'age', numeric_share: 0.9, examples: ['ten'] }]), 'age: ten');
+  assert.equal(qualityNote('category_variants', [{ column: 'city', groups: [['Paris', 'paris'], ['Rome', 'ROME']] }]), 'city: Paris / paris, Rome / ROME');
+  assert.equal(qualityNote('rare_categories', [{ column: 'c', levels: 2, rows: 3, examples: ['x', 'y'] }]), 'c: 2 rare levels (x, y)');
+  assert.equal(qualityNote('near_constant', [{ column: 'k', value: 0, share: 0.995 }]), 'k: 0 in 99.5% of rows');
+  assert.equal(qualityNote('duplicate_rows', { share: 0.02, example_rows: [1] }), '2.0% of rows');
+  assert.equal(qualityNote('conflicting_labels', { groups: 2, example_rows: [] }), '2 groups of identical rows with different targets');
+  assert.equal(qualityNote('duplicate_columns', { pairs: [['a', 'b']] }), 'a = b');
+  assert.equal(qualityNote('disguised_missing', [{ column: 'x', count: 7, values: ['1', '2', '3', '4', '5', '6', '7'] }]), 'x: 1, 2, 3, 4, 5');
+  assert.equal(qualityNote('near_constant', 'not a list'), '');
+  assert.equal(qualityNote('unknown', []), '');
 });

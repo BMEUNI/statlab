@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
@@ -18,11 +18,13 @@ from statlab.domains.candidate_pipeline import candidate_result, pipeline_from_s
 from statlab.domains.decisions import ChampionChoice, PipelineState
 from statlab.domains.design_inference import _artifact
 from statlab.domains.foundation import (
+    _completed,
     _Evidence,
     _frame,
     _object,
     _ref,
     _RefusalError,
+    _strings,
     problem_from_state,
     shared_result,
 )
@@ -40,6 +42,74 @@ from statlab.persistence.repository import (
 from statlab.storage import get_artifact, list_artifacts
 
 TIMING_CAVEAT = "Concurrent candidate fit timings compete for permits and are not comparable."
+_QUALITY_LABELS: dict[str, str] = {
+    "disguised_missing": "Placeholder values for missing data",
+    "mixed_types": "Numbers and text mixed in a column",
+    "category_variants": "Same category spelled differently",
+    "duplicate_rows": "Duplicate rows",
+    "conflicting_labels": "Identical rows with different targets",
+    "near_constant": "Almost constant columns",
+    "rare_categories": "Very rare categories",
+    "target_health": "Target problems",
+    "duplicate_columns": "Duplicate columns",
+}
+_QUALITY_RESULTS: dict[str, str] = {
+    "pass": "passed",
+    "warn": "warning",
+    "fail": "failed",
+    "skipped": "skipped",
+}
+
+
+def _short(text: str) -> str:
+    """Cap a column name for a report cell."""
+    return text if len(text) <= 40 else text[:39] + "…"
+
+
+def _names(columns: Sequence[str]) -> str:
+    """List at most five capped names, counting the rest."""
+    names = ", ".join(_short(column) for column in columns[:5])
+    if len(columns) > 5:
+        names += f" and {len(columns) - 5} more"
+    return names
+
+
+def _cell(text: str) -> str:
+    """Make text safe for one Markdown table cell."""
+    return " ".join(text.splitlines()).replace("|", "\\|")
+
+
+def _quality_sections(state: RunState) -> tuple[ReportSection, ...]:
+    """Build the data quality report section when the step ran."""
+    result = _completed(state, "data_quality")
+    if result is None:
+        return ()
+    checks = _object(result.summary.get("checks"), "quality checks")
+    lines = [
+        "The checks ran on the whole dataset before the split.",
+        "",
+        "| Check | Result | Rows affected | Columns |",
+        "| --- | --- | --- | --- |",
+    ]
+    for name, value in checks.items():
+        entry = _object(value, "quality check")
+        columns = _strings(entry.get("columns"), "quality check columns")
+        status = str(entry.get("status"))
+        cells = _cell(_names(columns)) if columns else "—"
+        lines.append(
+            f"| {_QUALITY_LABELS.get(name, name)} | {_QUALITY_RESULTS.get(status, status)} | "
+            f"{entry.get('rows')} | {cells} |"
+        )
+    decision = _object(result.summary.get("decision"), "quality decision")
+    marked = _object(decision.get("mark_missing"), "quality mark_missing")
+    merged = _strings(decision.get("merge_variants"), "quality merge_variants")
+    fixes: list[str] = []
+    if marked:
+        fixes.append(f"Placeholder values were marked as missing in: {_names(list(marked))}.")
+    if merged:
+        fixes.append(f"Spelling variants were merged in: {_names(merged)}.")
+    lines += ["", " ".join(fixes) if fixes else "No fixes were applied."]
+    return (ReportSection(heading="Data quality", body="\n".join(lines)),)
 
 
 @dataclass(frozen=True)
@@ -374,7 +444,8 @@ class ChampionExecutor:
                 "coefficient_table": coefficient,
                 "plots": plots,
                 "sections": [
-                    section.model_dump(mode="json") for section in (*choice.sections, caveats)
+                    section.model_dump(mode="json")
+                    for section in (*choice.sections, *_quality_sections(state), caveats)
                 ],
             },
             trusted={"prior_test_scorings": prior, "n_waves": state.wave},

@@ -1,6 +1,6 @@
 import {
   Archive, ChartColumn, CircleCheck, CircleDashed, CircleDot, CircleX, Cpu, Eraser, FileInput, FlaskConical,
-  Gauge, Hand, Lightbulb, LoaderCircle, Shapes, Sigma, SkipForward, Split, Target, Trophy,
+  Gauge, Hand, Lightbulb, LoaderCircle, Shapes, ShieldCheck, Sigma, SkipForward, Split, Target, Trophy,
   type LucideIcon,
 } from 'lucide-react';
 import type { CellStatus } from '../run/model.ts';
@@ -9,6 +9,7 @@ export const NODE_ICONS: Record<string, LucideIcon> = {
   intake: FileInput,
   problem_definition: Target,
   data_profiling: ChartColumn,
+  data_quality: ShieldCheck,
   data_splitting: Split,
   experiment_design: FlaskConical,
   inferential_analysis: Sigma,

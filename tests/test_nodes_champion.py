@@ -385,7 +385,74 @@ async def test_champion_selects_before_exact_replay_and_one_task_score(
     assert report["n_waves"] == h.state.wave and report["prior_test_scorings"] == 0
     assert report["coefficient_table"] is None
     assert "not comparable" in str(report["sections"])
+    assert "Data quality" not in str(report["sections"])
     assert output.summary["candidate_id"] == "c_01"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mark_missing", "merge_variants", "line"),
+    [
+        ({"c": ["?"]}, [], "Placeholder values were marked as missing in: c."),
+        ({}, ["d"], "Spelling variants were merged in: d."),
+        ({}, [], "No fixes were applied."),
+    ],
+)
+async def test_report_lists_data_quality_checks_and_fixes(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+    mark_missing: dict[str, JsonValue],
+    merge_variants: list[JsonValue],
+    line: str,
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    long = "x" * 50
+    checks: dict[str, JsonValue] = {
+        "disguised_missing": {"status": "warn", "rows": 3, "columns": ["a|b", "c"], "details": []},
+        "duplicate_rows": {"status": "pass", "rows": 0, "columns": [], "details": {}},
+        "near_constant": {
+            "status": "warn",
+            "rows": 9,
+            "columns": [long, "k2", "k3", "k4", "k5", "k6", "k7"],
+            "details": [],
+        },
+    }
+    quality = BoundaryResult(
+        node_name="data_quality",
+        execution_id="quality-execution",
+        result=NodeResult(
+            status="completed",
+            summary={
+                "passed": True,
+                "checks": checks,
+                "decision": {
+                    "rationale": "r",
+                    "findings": [],
+                    "mark_missing": mark_missing,
+                    "merge_variants": merge_variants,
+                },
+            },
+        ),
+    )
+    h.state = h.state.model_copy(update={"shared_results": (*h.state.shared_results, quality)})
+    output = await ChampionExecutor(h.runtime)(tail_invocation(h))
+    assert output.status == "completed"
+    report = next(arguments for _, name, arguments in tools.calls if name == "assemble_report")
+    sections = report["sections"]
+    assert isinstance(sections, list)
+    section = sections[-2]
+    last = sections[-1]
+    assert isinstance(section, dict) and isinstance(last, dict)
+    assert section["heading"] == "Data quality"
+    assert last["heading"] == "Selection and execution caveats"
+    body = section["body"]
+    assert isinstance(body, str)
+    assert "| Placeholder values for missing data | warning | 3 | a\\|b, c |" in body
+    assert "| Duplicate rows | passed | 0 | — |" in body
+    assert "x" * 39 + "…" in body
+    assert "and 2 more" in body
+    assert line in body
 
 
 @pytest.mark.asyncio

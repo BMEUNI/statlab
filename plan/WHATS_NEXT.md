@@ -26,7 +26,17 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
-## Next: user's online test of chunks 46-51, then the next phase
+## Next: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
+
+Chunk [63](./63_data_quality.md) accepted 2026-10-09: a `data_quality` step after profiling
+runs nine checks on the whole input and can apply two safe fixes (placeholders to missing,
+merge spelling variants) before the split; the step card and a report section show the
+checks. Runs keep their captured spine: old runs open and work; a run the current code
+cannot rebuild is view-only. Next: chunk 64 `label_quality` (cleanlab, train only; starts
+with a warnings-as-errors spike). Open: offline-rich S01 fails at experiment_design wave 2
+since `c0cc6de` (approved shortlist vs candidate specs); separate chunk.
+
+## Earlier: user's online test of chunks 46-51
 
 Chunks 48-51 accepted 2026-10-08: profiling question lists numeric/non-numeric columns (48),
 chat titles search waves (49), threaded random-forest final fit and a third of the cores for
