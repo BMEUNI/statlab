@@ -102,6 +102,14 @@ export const ESTIMATOR_LABELS: Record<string, string> = {
   ridge: 'Ridge regression',
   random_forest_regressor: 'Random forest',
   hist_gb_regressor: 'Gradient boosting',
+  gaussian_nb: 'Naive Bayes',
+  lda: 'Linear discriminant analysis',
+  extra_trees_classifier: 'Extra trees',
+  decision_tree_classifier: 'Decision tree',
+  lasso: 'Lasso regression',
+  elastic_net: 'Elastic net',
+  extra_trees_regressor: 'Extra trees',
+  decision_tree_regressor: 'Decision tree',
 };
 
 export function estimatorLabel(name: string | null): string {

@@ -12,6 +12,7 @@ from statlab_contracts.vocabulary import (
     RegressionMetric,
     TargetType,
     Task,
+    tunable_param_errors,
 )
 
 
@@ -81,6 +82,17 @@ def test_vocabularies_contain_no_duplicates() -> None:
     ):
         values = get_args(vocabulary)
         assert len(values) == len(set(values)), f"{vocabulary!r} has duplicate members"
+
+
+def test_unit_interval_and_shrinkage_kinds() -> None:
+    for ok_ratio in (0, 0.5, 1):
+        assert tunable_param_errors({"l1_ratio": ok_ratio}, frozenset({"l1_ratio"})) == []
+    for bad_ratio in (1.5, -0.1, True, "auto"):
+        assert tunable_param_errors({"l1_ratio": bad_ratio}, frozenset({"l1_ratio"})) != []
+    for ok_shrink in (None, "auto", 0.3):
+        assert tunable_param_errors({"shrinkage": ok_shrink}, frozenset({"shrinkage"})) == []
+    for bad_shrink in ("sqrt", 1.2, False):
+        assert tunable_param_errors({"shrinkage": bad_shrink}, frozenset({"shrinkage"})) != []
 
 
 def test_split_role_members() -> None:

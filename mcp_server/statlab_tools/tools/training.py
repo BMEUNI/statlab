@@ -408,9 +408,10 @@ def train_estimator(
         estimator = _wrap_calibrated(estimator, cv_folds, seed)
         calibrated = True
 
-    # D17 addendum 50: forest trees fit on threads; predictions stay single-threaded because a
-    # threaded forest sums tree outputs in completion order (last-bit nondeterminism).
-    threaded = entry.family == "random_forest" and not calibrated
+    # D17 addendum 50: forest and extra-trees trees fit on threads; predictions stay
+    # single-threaded because a threaded forest sums tree outputs in completion order
+    # (last-bit nondeterminism).
+    threaded = entry.family in ("random_forest", "extra_trees") and not calibrated
     if threaded:
         from joblib import parallel_config
 

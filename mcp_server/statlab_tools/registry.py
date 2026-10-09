@@ -1,4 +1,5 @@
-"""The predictive model registry (D6, D25): `ESTIMATORS` -- six estimators, three per task --
+"""The predictive model registry (D6, D25): `ESTIMATORS` -- fifteen estimators (seven
+classifiers, eight regressors) --
 and `SCORERS`, the map from our metric vocabulary to sklearn scorers. `PLAN.md` §6.4 names it
 `registry.ESTIMATORS`; adding an estimator is one `EstimatorEntry` (§6.2).
 
@@ -41,12 +42,21 @@ class EstimatorEntry:
     that dynamic type from leaking out -- the training tool narrows it only enough to call
     documented methods (`fit`, `predict`, `get_params`), never widening it. `handles_missing` and
     `supports_class_weight` gate the two P2/§3.1 pre-checks the training tool runs before a fit.
-    `interpretable` is true only for the two linear models (`logistic_regression`,
-    `linear_regression`); `rank_models` (chunk 14 §3.5) reads it to flag a non-interpretable
+    `interpretable` is true only for the linear models with plain coefficients
+    (`logistic_regression`, `linear_regression`, `ridge`, `lasso`, `elastic_net`); `rank_models`
+    (chunk 14 §3.5) reads it to flag a non-interpretable
     estimator ineligible when the contract requires interpretability (D-g)."""
 
     task: Task
-    family: Literal["linear", "random_forest", "hist_gradient_boosting"]
+    family: Literal[
+        "linear",
+        "random_forest",
+        "hist_gradient_boosting",
+        "naive_bayes",
+        "discriminant",
+        "extra_trees",
+        "decision_tree",
+    ]
     build: Callable[[int, ClassWeight], object]
     default_grid: Grid
     handles_missing: bool
@@ -61,17 +71,23 @@ def _class_weight_arg(class_weight: ClassWeight) -> str | None:
 
 
 def _build_estimators() -> dict[str, EstimatorEntry]:
-    """Construct the six-entry registry. Lazy sklearn import (see the module docstring)."""
+    """Construct the fifteen-entry registry. Lazy sklearn import (see the module docstring)."""
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
     from sklearn.ensemble import (
+        ExtraTreesClassifier,
+        ExtraTreesRegressor,
         HistGradientBoostingClassifier,
         HistGradientBoostingRegressor,
         RandomForestClassifier,
         RandomForestRegressor,
     )
-    from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
+    from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
+    from sklearn.naive_bayes import GaussianNB
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
     _grid_rf: Grid = {"max_depth": (None, 5, 10), "min_samples_leaf": (1, 5)}
     _grid_hgb: Grid = {"learning_rate": (0.05, 0.1), "max_leaf_nodes": (15, 31)}
+    _grid_tree: Grid = {"max_depth": (3, 5, 10, None), "min_samples_leaf": (1, 5, 20)}
 
     def logistic_regression(seed: int, class_weight: ClassWeight) -> object:
         return LogisticRegression(
@@ -108,6 +124,41 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
     def hist_gb_regressor(seed: int, class_weight: ClassWeight) -> object:
         return HistGradientBoostingRegressor(random_state=seed)
 
+    def gaussian_nb(seed: int, class_weight: ClassWeight) -> object:
+        # GaussianNB has no random_state and no class_weight: both arguments are ignored.
+        return GaussianNB()
+
+    def lda(seed: int, class_weight: ClassWeight) -> object:
+        # solver="lsqr": the default "svd" solver warns on collinear one-hot columns.
+        return LinearDiscriminantAnalysis(solver="lsqr")
+
+    def extra_trees_classifier(seed: int, class_weight: ClassWeight) -> object:
+        return ExtraTreesClassifier(
+            n_estimators=200,
+            n_jobs=1,
+            random_state=seed,
+            class_weight=_class_weight_arg(class_weight),
+        )
+
+    def decision_tree_classifier(seed: int, class_weight: ClassWeight) -> object:
+        return DecisionTreeClassifier(
+            random_state=seed, class_weight=_class_weight_arg(class_weight)
+        )
+
+    def lasso(seed: int, class_weight: ClassWeight) -> object:
+        # Linear, interpretable regressor with a 1-d coef_ like ridge; no class_weight.
+        return Lasso(alpha=1.0, max_iter=5000, random_state=seed)
+
+    def elastic_net(seed: int, class_weight: ClassWeight) -> object:
+        # Linear, interpretable regressor with a 1-d coef_ like ridge; no class_weight.
+        return ElasticNet(alpha=1.0, l1_ratio=0.5, max_iter=5000, random_state=seed)
+
+    def extra_trees_regressor(seed: int, class_weight: ClassWeight) -> object:
+        return ExtraTreesRegressor(n_estimators=200, n_jobs=1, random_state=seed)
+
+    def decision_tree_regressor(seed: int, class_weight: ClassWeight) -> object:
+        return DecisionTreeRegressor(random_state=seed)
+
     return {
         "logistic_regression": EstimatorEntry(
             task="classification",
@@ -133,6 +184,42 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             build=hist_gb_classifier,
             default_grid=_grid_hgb,
             handles_missing=True,
+            supports_class_weight=True,
+            interpretable=False,
+        ),
+        "gaussian_nb": EstimatorEntry(
+            task="classification",
+            family="naive_bayes",
+            build=gaussian_nb,
+            default_grid={"var_smoothing": (1e-9, 1e-7, 1e-5)},
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=False,
+        ),
+        "lda": EstimatorEntry(
+            task="classification",
+            family="discriminant",
+            build=lda,
+            default_grid={"shrinkage": (None, "auto")},
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=False,
+        ),
+        "extra_trees_classifier": EstimatorEntry(
+            task="classification",
+            family="extra_trees",
+            build=extra_trees_classifier,
+            default_grid=_grid_rf,
+            handles_missing=False,
+            supports_class_weight=True,
+            interpretable=False,
+        ),
+        "decision_tree_classifier": EstimatorEntry(
+            task="classification",
+            family="decision_tree",
+            build=decision_tree_classifier,
+            default_grid=_grid_tree,
+            handles_missing=False,
             supports_class_weight=True,
             interpretable=False,
         ),
@@ -172,12 +259,48 @@ def _build_estimators() -> dict[str, EstimatorEntry]:
             supports_class_weight=False,
             interpretable=False,
         ),
+        "lasso": EstimatorEntry(
+            task="regression",
+            family="linear",
+            build=lasso,
+            default_grid={"alpha": (0.001, 0.01, 0.1, 1.0)},
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=True,
+        ),
+        "elastic_net": EstimatorEntry(
+            task="regression",
+            family="linear",
+            build=elastic_net,
+            default_grid={"alpha": (0.001, 0.01, 0.1, 1.0), "l1_ratio": (0.2, 0.5, 0.8)},
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=True,
+        ),
+        "extra_trees_regressor": EstimatorEntry(
+            task="regression",
+            family="extra_trees",
+            build=extra_trees_regressor,
+            default_grid=_grid_rf,
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=False,
+        ),
+        "decision_tree_regressor": EstimatorEntry(
+            task="regression",
+            family="decision_tree",
+            build=decision_tree_regressor,
+            default_grid=_grid_tree,
+            handles_missing=False,
+            supports_class_weight=False,
+            interpretable=False,
+        ),
     }
 
 
 def estimators() -> dict[str, EstimatorEntry]:
-    """The six-entry registry, built on first use and cached. Not a module-level dict: building it
-    imports sklearn, and that import must stay lazy (module docstring)."""
+    """The fifteen-entry registry, built on first use and cached. Not a module-level dict: building
+    it imports sklearn, and that import must stay lazy (module docstring)."""
     if not _ESTIMATORS:
         _ESTIMATORS.update(_build_estimators())
     return _ESTIMATORS

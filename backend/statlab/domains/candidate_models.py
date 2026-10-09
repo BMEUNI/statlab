@@ -555,7 +555,13 @@ class CandidateModelExecutor:
         if decision.coefficients:
             if (
                 branch.spec.estimator.name
-                not in ("linear_regression", "ridge", "logistic_regression")
+                not in (
+                    "linear_regression",
+                    "ridge",
+                    "lasso",
+                    "elastic_net",
+                    "logistic_regression",
+                )
                 or branch.spec.estimator.calibrate
             ):
                 raise _RefusalError(

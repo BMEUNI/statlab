@@ -129,6 +129,8 @@ TunableKind = Literal[
     "int_at_least_2",
     "int_at_least_2_or_none",
     "bool",
+    "unit_interval",
+    "shrinkage",
     "max_features",
 ]
 
@@ -148,6 +150,9 @@ TUNABLE_PARAM_KINDS: dict[str, TunableKind] = {
     "learning_rate": "positive_number",
     "max_leaf_nodes": "int_at_least_2_or_none",
     "l2_regularization": "nonnegative_number",
+    "var_smoothing": "positive_number",
+    "l1_ratio": "unit_interval",
+    "shrinkage": "shrinkage",
 }
 
 # v1 tunable hyperparameters per registry estimator; combo-prone ones (penalty/solver/criterion)
@@ -196,6 +201,36 @@ TUNABLE_PARAMS: dict[str, frozenset[str]] = {
             "l2_regularization",
         }
     ),
+    "gaussian_nb": frozenset({"var_smoothing"}),
+    "lda": frozenset({"shrinkage"}),
+    "extra_trees_classifier": frozenset(
+        {
+            "n_estimators",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "max_features",
+            "bootstrap",
+        }
+    ),
+    "extra_trees_regressor": frozenset(
+        {
+            "n_estimators",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "max_features",
+            "bootstrap",
+        }
+    ),
+    "decision_tree_classifier": frozenset(
+        {"max_depth", "min_samples_split", "min_samples_leaf", "max_features", "max_leaf_nodes"}
+    ),
+    "decision_tree_regressor": frozenset(
+        {"max_depth", "min_samples_split", "min_samples_leaf", "max_features", "max_leaf_nodes"}
+    ),
+    "lasso": frozenset({"alpha", "fit_intercept", "tol", "max_iter"}),
+    "elastic_net": frozenset({"alpha", "l1_ratio", "fit_intercept", "tol", "max_iter"}),
 }
 
 
@@ -207,6 +242,15 @@ def _number_at_least(value: ParamValue, floor: float, strict: bool) -> bool:
 
 def _int_at_least(value: ParamValue, floor: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= floor
+
+
+def _unit(value: ParamValue) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and 0 <= value <= 1
+    )
 
 
 def _matches_kind(value: ParamValue, kind: TunableKind) -> bool:
@@ -225,6 +269,10 @@ def _matches_kind(value: ParamValue, kind: TunableKind) -> bool:
             return value is None or _int_at_least(value, 2)
         case "bool":
             return isinstance(value, bool)
+        case "unit_interval":
+            return _unit(value)
+        case "shrinkage":
+            return value is None or value == "auto" or _unit(value)
         case _:
             return (
                 value is None

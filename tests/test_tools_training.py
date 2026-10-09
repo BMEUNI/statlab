@@ -24,6 +24,7 @@ from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import load_dataframe, save_dataframe
+from statlab_tools.registry import estimators
 from statlab_tools.tool import ToolDataError, ToolParamError
 from statlab_tools.tools import training
 from statlab_tools.tools.cleaning import apply_imputer, fit_imputer
@@ -102,9 +103,17 @@ _FAST_RF = {"n_estimators": 10}
 
 def test_list_estimators_all_and_filtered() -> None:
     allo = _dict(list_estimators().summary["estimators"])
-    assert len(allo) == 7
+    assert len(allo) == 15
     clf = _dict(list_estimators(task="classification").summary["estimators"])
-    assert set(clf) == {"logistic_regression", "random_forest_classifier", "hist_gb_classifier"}
+    assert set(clf) == {
+        "logistic_regression",
+        "random_forest_classifier",
+        "hist_gb_classifier",
+        "gaussian_nb",
+        "lda",
+        "extra_trees_classifier",
+        "decision_tree_classifier",
+    }
     entry = _dict(clf["logistic_regression"])
     assert entry["supports_proba"] is True
     reg = _dict(list_estimators(task="regression").summary["estimators"])
@@ -113,14 +122,51 @@ def test_list_estimators_all_and_filtered() -> None:
         "logistic_regression": "linear",
         "linear_regression": "linear",
         "ridge": "linear",
+        "lasso": "linear",
+        "elastic_net": "linear",
         "random_forest_classifier": "random_forest",
         "random_forest_regressor": "random_forest",
         "hist_gb_classifier": "hist_gradient_boosting",
         "hist_gb_regressor": "hist_gradient_boosting",
+        "gaussian_nb": "naive_bayes",
+        "lda": "discriminant",
+        "extra_trees_classifier": "extra_trees",
+        "extra_trees_regressor": "extra_trees",
+        "decision_tree_classifier": "decision_tree",
+        "decision_tree_regressor": "decision_tree",
     }
 
 
 # --- train & predict -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "gaussian_nb",
+        "lda",
+        "extra_trees_classifier",
+        "decision_tree_classifier",
+        "lasso",
+        "elastic_net",
+        "extra_trees_regressor",
+        "decision_tree_regressor",
+    ],
+)
+def test_added_estimators_fit_and_predict(run_paths: RunPaths, name: str) -> None:
+    params = _FAST_RF if name.startswith("extra_trees") else {}
+    if estimators()[name].task == "classification":
+        for frame in (_separable_binary(), _multiclass_frame()):
+            ref = _save(run_paths, frame)
+            res = train_estimator(run_paths, ref, target="y", name=name, seed=1, params=params)
+            proba = _loaded(run_paths, predict_proba(run_paths, res.artifacts[0].ref, ref))
+            assert len(proba) == len(frame)
+    else:
+        frame = _regression_frame()
+        ref = _save(run_paths, frame)
+        res = train_estimator(run_paths, ref, target="y", name=name, seed=1, params=params)
+        out = _loaded(run_paths, predict(run_paths, res.artifacts[0].ref, ref))
+        assert len(out) == len(frame)
 
 
 def test_separable_binary_trains_and_predicts_above_0_9(run_paths: RunPaths) -> None:

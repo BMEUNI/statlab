@@ -282,6 +282,16 @@ def test_coef_std_coef_equals_coef_times_sd(run_paths: RunPaths) -> None:
         assert _f(r["std_coef"]) == pytest.approx(_f(r["coef"]) * sd, abs=1e-9)
 
 
+@pytest.mark.parametrize("name", ["lasso", "elastic_net"])
+def test_coef_lasso_and_elastic_net(run_paths: RunPaths, name: str) -> None:
+    frame = _regression_frame(noise=0.01)
+    ref = _save(run_paths, frame)
+    model = _fit(run_paths, frame, name)
+    res = coefficient_importance(run_paths, model, ref)
+    features = {str(_d(row)["feature"]) for row in _l(_table(run_paths, res)["coefficients"])}
+    assert features == {"x1", "x2"}
+
+
 def test_coef_sign_flips_for_classes0_positive(run_paths: RunPaths) -> None:
     frame = _binary_frame()
     ref = _save(run_paths, frame)

@@ -29,33 +29,59 @@ def _params(estimator: object) -> dict[str, object]:
     return dict(cast(BaseEstimator, estimator).get_params())
 
 
-def test_exactly_the_six_d25_names_with_tasks() -> None:
+def test_registry_names_tasks_and_families() -> None:
     reg = estimators()
     assert set(reg) == {
         "logistic_regression",
         "random_forest_classifier",
         "hist_gb_classifier",
+        "gaussian_nb",
+        "lda",
+        "extra_trees_classifier",
+        "decision_tree_classifier",
         "linear_regression",
         "ridge",
         "random_forest_regressor",
         "hist_gb_regressor",
+        "lasso",
+        "elastic_net",
+        "extra_trees_regressor",
+        "decision_tree_regressor",
     }
     tasks = {name: entry.task for name, entry in reg.items()}
-    assert tasks["logistic_regression"] == "classification"
-    assert tasks["random_forest_classifier"] == "classification"
-    assert tasks["hist_gb_classifier"] == "classification"
-    assert tasks["linear_regression"] == "regression"
-    assert tasks["ridge"] == "regression"
-    assert tasks["random_forest_regressor"] == "regression"
-    assert tasks["hist_gb_regressor"] == "regression"
+    assert tasks == {
+        "logistic_regression": "classification",
+        "random_forest_classifier": "classification",
+        "hist_gb_classifier": "classification",
+        "gaussian_nb": "classification",
+        "lda": "classification",
+        "extra_trees_classifier": "classification",
+        "decision_tree_classifier": "classification",
+        "linear_regression": "regression",
+        "ridge": "regression",
+        "random_forest_regressor": "regression",
+        "hist_gb_regressor": "regression",
+        "lasso": "regression",
+        "elastic_net": "regression",
+        "extra_trees_regressor": "regression",
+        "decision_tree_regressor": "regression",
+    }
     assert {name: entry.family for name, entry in reg.items()} == {
         "logistic_regression": "linear",
         "linear_regression": "linear",
         "ridge": "linear",
+        "lasso": "linear",
+        "elastic_net": "linear",
         "random_forest_classifier": "random_forest",
         "random_forest_regressor": "random_forest",
         "hist_gb_classifier": "hist_gradient_boosting",
         "hist_gb_regressor": "hist_gradient_boosting",
+        "gaussian_nb": "naive_bayes",
+        "lda": "discriminant",
+        "extra_trees_classifier": "extra_trees",
+        "extra_trees_regressor": "extra_trees",
+        "decision_tree_classifier": "decision_tree",
+        "decision_tree_regressor": "decision_tree",
     }
 
 
@@ -92,7 +118,12 @@ def test_linear_regression_has_no_random_state() -> None:
 
 def test_every_forest_is_single_threaded() -> None:
     # D17: n_jobs=1 so nothing oversubscribes the fit semaphore.
-    for name in ("random_forest_classifier", "random_forest_regressor"):
+    for name in (
+        "random_forest_classifier",
+        "random_forest_regressor",
+        "extra_trees_classifier",
+        "extra_trees_regressor",
+    ):
         params = _params(estimators()[name].build(0, "none"))
         assert params["n_jobs"] == 1
 
@@ -117,6 +148,37 @@ def test_handles_missing_and_class_weight_flags() -> None:
     assert reg["logistic_regression"].supports_class_weight is True
     assert reg["linear_regression"].supports_class_weight is False
     assert reg["random_forest_regressor"].supports_class_weight is False
+    for name in (
+        "gaussian_nb",
+        "lda",
+        "extra_trees_classifier",
+        "decision_tree_classifier",
+        "lasso",
+        "elastic_net",
+        "extra_trees_regressor",
+        "decision_tree_regressor",
+    ):
+        assert reg[name].handles_missing is False, name
+    assert reg["extra_trees_classifier"].supports_class_weight is True
+    assert reg["decision_tree_classifier"].supports_class_weight is True
+    assert reg["gaussian_nb"].supports_class_weight is False
+    assert reg["lda"].supports_class_weight is False
+
+
+def test_new_linear_models_are_interpretable_and_lda_uses_lsqr() -> None:
+    reg = estimators()
+    assert reg["lasso"].interpretable is True
+    assert reg["elastic_net"].interpretable is True
+    for name in (
+        "gaussian_nb",
+        "lda",
+        "extra_trees_classifier",
+        "decision_tree_classifier",
+        "extra_trees_regressor",
+        "decision_tree_regressor",
+    ):
+        assert reg[name].interpretable is False, name
+    assert _params(reg["lda"].build(0, "none"))["solver"] == "lsqr"
 
 
 def test_scorer_roc_auc_binary_vs_multiclass() -> None:

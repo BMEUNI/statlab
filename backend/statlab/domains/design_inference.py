@@ -211,7 +211,10 @@ class DesignInferenceExecutor:
             DesignDecision,
             evidence=tuple(evidence.tools),
             question="Use actual profiling, problem and memory to propose normally 3-5 reasoned "
-            "candidates within max_candidates. Include an interpretable linear baseline, vary "
+            "candidates within max_candidates. Pick the estimators that suit this data (rows, "
+            "linearity, collinearity, missingness, class balance, number of classes) from the "
+            "registry; you need not use every family. Include an interpretable linear baseline, "
+            "vary "
             "recorded dimensions and justify families above two. Respect explicit contract "
             "choices and shared pre-split row threshold. If checkpointed candidates exist, "
             "confirm that exact cumulative set, preserving every specification. "
