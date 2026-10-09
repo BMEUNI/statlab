@@ -420,7 +420,7 @@ export type FeedItem =
       title?: string;
     }
   | { kind: 'fork'; seq: number; ts: string; newRunId: string };
-export type RunFeed = { items: FeedItem[]; drafts: Record<string, string>; completedSeq: number | null };
+export type RunFeed = { items: FeedItem[]; drafts: Record<string, string>; completedSeq: number | null; searching: boolean };
 
 export function firstSentences(text: string, n: number): string {
   return text.trim().split(/(?<=[.!?])\s+/).slice(0, n).join(' ');
@@ -463,6 +463,7 @@ export function foldEvents(events: RunEvent[]): RunFeed {
   const answered = new Set<string>();
   const forks = new Set<string>();
   let completedSeq: number | null = null;
+  let searching = false;
   let designCount: number | null = null;
   let wave = 1;
   for (const event of events) {
@@ -576,6 +577,20 @@ export function foldEvents(events: RunEvent[]): RunFeed {
           items.push({ ...base, kind: 'fork', newRunId: p.new_run_id });
         }
         break;
+      case 'search.started':
+        searching = true;
+        items.push({ ...base, kind: 'activity', text: 'Comparing the models' });
+        break;
+      case 'search.finished':
+        searching = false;
+        items.push({
+          ...base,
+          kind: 'activity',
+          text: typeof p.added === 'number' && p.added > 0
+            ? `Trying ${p.added} more model${p.added === 1 ? '' : 's'}`
+            : 'No more models needed',
+        });
+        break;
       case 'run.status':
         if (typeof p.status === 'string') {
           items.push({ ...base, kind: 'activity', text: `Run ${p.status.replace('_', ' ')}` });
@@ -586,7 +601,7 @@ export function foldEvents(events: RunEvent[]): RunFeed {
         break;
     }
   }
-  return { items, drafts, completedSeq };
+  return { items, drafts, completedSeq, searching };
 }
 
 export const STATUS_LABELS: Record<RunStatus, string> = {
@@ -756,6 +771,7 @@ export function nowLine(
   view: RunView | null,
   executions: ExecutionRecord[],
   pending: GateQuestion[],
+  searching = false,
 ): string {
   if (pending.length > 0) {
     const counts = new Map<string, number>();
@@ -765,6 +781,7 @@ export function nowLine(
     const parts = [...counts].map(([node, n]) => (n > 1 ? `${nodeLabel(node)} (${n} models)` : nodeLabel(node)));
     return `Waiting for your decision: ${parts.join(', ')}`;
   }
+  if (searching && status === 'running') return 'Comparing the models and deciding whether to try more…';
   if ((status === 'running' || status === 'pending') && view !== null) {
     const parts: string[] = [];
     for (const node of view.spine) {

@@ -30,9 +30,10 @@ type Props = {
   championId: string | null;
   onSelect: (next: Selection | null) => void;
   detail: ReactNode;
+  searching?: boolean;
 };
 
-export default function RunTimeline({ view, executions, pending, selected, championId, onSelect, detail }: Props) {
+export default function RunTimeline({ view, executions, pending, selected, championId, onSelect, detail, searching = false }: Props) {
   const layout = graphLayout(view.spine);
   const rows = candidateRows(view);
   const detailRef = useRef<HTMLDivElement>(null);
@@ -52,9 +53,10 @@ export default function RunTimeline({ view, executions, pending, selected, champ
   );
 
   const shared = (node: SpineNode) => {
-    const status = statusOf(node.name, null);
+    const comparing = searching && node.name === 'champion_selection' && statusOf(node.name, null) === 'pending';
+    const status = comparing ? 'running' : statusOf(node.name, null);
     const outcome = latestOutcome(view, node.name, null);
-    const note = outcome?.skipReason ?? outcome?.error?.message ?? null;
+    const note = comparing ? 'Comparing the models first.' : (outcome?.skipReason ?? outcome?.error?.message ?? null);
     const isSel = isSelected(node.name, null);
     return (
       <li className={`tl-item tl-${TONES[status]}`} key={node.name}>

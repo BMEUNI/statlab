@@ -791,7 +791,10 @@ class RunLoop:
                     or self.budget.snapshot().exhausted
                 ):
                     break
-                proposal = await self.candidate_planner(self._latest, self._latest.wave + 1)
+                wave = self._latest.wave + 1
+                await self.events.append("search.started", {"wave": wave})
+                proposal = await self.candidate_planner(self._latest, wave)
+                await self.events.append("search.finished", {"wave": wave, "added": len(proposal)})
                 if not proposal:
                     break
                 if len(self._latest.branches) + len(proposal) > self.constraints.max_candidates:
@@ -807,7 +810,6 @@ class RunLoop:
                 CandidateSet(
                     candidates=tuple(branch.spec for branch in self._latest.branches) + proposal
                 )
-                wave = self._latest.wave + 1
                 new = tuple(
                     CandidateProgress(
                         public_id=f"c_{len(self._latest.branches) + i:02d}",

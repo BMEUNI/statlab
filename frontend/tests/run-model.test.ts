@@ -249,6 +249,23 @@ test('foldEvents records the completion seq', () => {
   assert.equal(foldEvents([]).completedSeq, null);
 });
 
+test('foldEvents tracks the model comparison pause', () => {
+  nextSeq = 0;
+  const started = foldEvents([event('search.started', { wave: 2 })]);
+  assert.equal(started.searching, true);
+  const startedLast = started.items[started.items.length - 1];
+  assert.equal(startedLast?.kind === 'activity' && startedLast.text, 'Comparing the models');
+  const none = foldEvents([event('search.started', { wave: 2 }), event('search.finished', { wave: 2, added: 0 })]);
+  assert.equal(none.searching, false);
+  const noneLast = none.items[none.items.length - 1];
+  assert.equal(noneLast?.kind === 'activity' && noneLast.text, 'No more models needed');
+  const two = foldEvents([event('search.started', { wave: 2 }), event('search.finished', { wave: 2, added: 2 })]);
+  assert.equal(two.searching, false);
+  const twoLast = two.items[two.items.length - 1];
+  assert.equal(twoLast?.kind === 'activity' && twoLast.text, 'Trying 2 more models');
+  assert.equal(foldEvents([]).searching, false);
+});
+
 test('foldEvents dedupes repeated answers and forks', () => {
   nextSeq = 0;
   const answer = { gate_id: 'g', answer: { action: 'approve', revision: 1 } };
@@ -527,6 +544,8 @@ test('nowLine', () => {
   assert.equal(nowLine('running', view, [], []), 'Starting the next step…');
   assert.equal(nowLine('completed', view, [], []), 'Completed');
   assert.equal(nowLine('running', null, [], []), 'Running');
+  assert.equal(nowLine('running', view, [], [], true), 'Comparing the models and deciding whether to try more…');
+  assert.equal(nowLine('completed', view, [], [], true), 'Completed');
 });
 
 test('jsonBlock and splitLead', () => {

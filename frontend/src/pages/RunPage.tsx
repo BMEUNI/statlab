@@ -53,7 +53,8 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
     .filter((gate) => gate.status === 'pending' && !finished)
     .map((gate) => ({ gate, question: parseGateQuestion(gate.question_json) }));
   const pendingQuestions = pending.flatMap(({ question }) => (question === null ? [] : [question]));
-  const now = nowLine(data.run.status, view, executions.data?.executions ?? [], pendingQuestions);
+  const searching = feed.searching && data.run.status === 'running';
+  const now = nowLine(data.run.status, view, executions.data?.executions ?? [], pendingQuestions, searching);
 
   const rows = view === null ? [] : candidateRows(view);
   const tabs = [
@@ -123,6 +124,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                       selected={selected}
                       championId={championId}
                       onSelect={setSelected}
+                      searching={searching}
                       detail={selected === null
                         ? null
                         : <NodeInspector view={view} data={executions.data} selected={selected} artifacts={artifacts.data} onClose={() => setSelected(null)} />}

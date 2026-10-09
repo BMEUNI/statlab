@@ -314,6 +314,13 @@ async def test_search_and_retune_caps_append_attempts(world: World) -> None:
     rows = list_node_executions(world.conn, result.run_id)
     assert all(row.attempt in (1, 2) for row in rows)
     assert world.conn.execute("SELECT wave FROM candidates ORDER BY rowid").fetchall()[-1][0] == 2
+    searches = [
+        (e.type, e.payload) for e in await runner.events.replay() if e.type.startswith("search.")
+    ]
+    assert searches == [
+        ("search.started", {"wave": 2}),
+        ("search.finished", {"wave": 2, "added": 1}),
+    ]
 
 
 @pytest.mark.asyncio
