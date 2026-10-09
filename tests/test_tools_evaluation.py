@@ -755,6 +755,13 @@ def test_plot_curve_renders_each_kind(run_paths: RunPaths) -> None:
     for res in (roc, pr, cal, lc):
         out = plot_curve(run_paths, res.artifacts[0].ref, title="t $x$ y")
         assert out.artifacts[0].kind == "plot"
+        sidecar = run_paths.artifacts / "charts" / f"{out.artifacts[0].ref}.json"
+        spec = cast("dict[str, JsonValue]", json.loads(sidecar.read_text(encoding="utf-8")))
+        panel = cast("list[dict[str, JsonValue]]", spec["panels"])[0]
+        assert panel["kind"] == "line"
+        if res is lc:
+            series = cast("list[dict[str, JsonValue]]", panel["series"])
+            assert [s["name"] for s in series] == ["train", "valid"]
 
 
 def test_plot_curve_unknown_kind_is_tool_param(run_paths: RunPaths) -> None:

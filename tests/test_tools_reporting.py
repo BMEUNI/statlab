@@ -543,13 +543,17 @@ def test_report_plots_copied_and_linked(run_paths: RunPaths) -> None:
     )
     valid = _validation_table(run_paths)
     plot = _plot(run_paths)
+    plot_without_chart = _plot(run_paths)
+    charts = run_paths.artifacts / "charts"
+    charts.mkdir(exist_ok=True)
+    (charts / f"{plot}.json").write_bytes(b"{}")
     res = assemble_report(
         run_paths,
         title="t",
         champion=champ,
         test_score=test,
         validation_table=valid,
-        plots=(plot,),
+        plots=(plot, plot_without_chart),
         prior_test_scorings=0,
         n_waves=1,
     )
@@ -558,7 +562,9 @@ def test_report_plots_copied_and_linked(run_paths: RunPaths) -> None:
     # the link resolves relative to report.md.
     copied = run_paths.report / "plots" / f"{plot}.png"
     assert copied.exists()
-    assert res.summary["n_plots"] == 1
+    assert (run_paths.report / "plots" / f"{plot}.chart.json").read_bytes() == b"{}"
+    assert not (run_paths.report / "plots" / f"{plot_without_chart}.chart.json").exists()
+    assert res.summary["n_plots"] == 2
 
 
 def test_report_no_figures_section_without_plots(run_paths: RunPaths) -> None:

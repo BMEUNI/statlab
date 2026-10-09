@@ -111,9 +111,15 @@ def load_model(path: Path) -> object:
 
 
 def save_plot(
-    path: Path, figure: Figure, *, ref: ArtifactRef, label: str | None = None
+    path: Path,
+    figure: Figure,
+    *,
+    ref: ArtifactRef,
+    label: str | None = None,
+    chart: JsonValue | None = None,
 ) -> ArtifactMeta:
-    """Write `figure` as PNG.
+    """Write `figure` as PNG, and when `chart` is given its chart spec JSON beside it in
+    `charts/<ref>.json` (chunk 55).
 
     No `plt.close()`: this chunk's tools build `matplotlib.figure.Figure()` directly rather
     than through `pyplot`, so the figure was never registered in pyplot's global figure
@@ -127,6 +133,15 @@ def save_plot(
         figure.savefig(path, format="png")
     except OSError as exc:
         raise ToolArtifactError(str(path), f"cannot write plot: {exc}", cause=exc) from exc
+    if chart is not None:
+        sidecar = path.parent / "charts" / f"{ref}.json"
+        try:
+            sidecar.parent.mkdir(exist_ok=True)
+            sidecar.write_text(
+                json.dumps(chart, allow_nan=False, separators=(",", ":")), encoding="utf-8"
+            )
+        except OSError as exc:
+            raise ToolArtifactError(str(sidecar), f"cannot write chart: {exc}", cause=exc) from exc
     return ArtifactMeta(ref=ref, kind="plot", label=label)
 
 

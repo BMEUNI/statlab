@@ -385,6 +385,9 @@ def _copy_plots(paths: RunPaths, plots: tuple[ArtifactRef, ...]) -> str:
     for plot in plots:
         source = paths.artifact(plot, "plot")
         shutil.copyfile(source, plots_dir / f"{plot}.png")
+        sidecar = paths.artifacts / "charts" / f"{plot}.json"
+        if sidecar.is_file():
+            shutil.copyfile(sidecar, plots_dir / f"{plot}.chart.json")
         lines.append(f"![{plot}](plots/{plot}.png)")
     return "\n".join(lines)
 

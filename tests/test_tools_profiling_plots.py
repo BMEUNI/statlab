@@ -7,18 +7,22 @@ the concurrent-plot test that proves bodies overlap in time (T17b's barrier is t
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import pandas as pd
 import pytest
 import statlab_tools.artifacts as mcp_artifacts
 import statlab_tools.tools.profiling as profiling
+from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactRef, new_artifact_ref
+from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import save_dataframe
 from statlab_tools.tool import ToolDataError, ToolParamError
@@ -408,3 +412,95 @@ async def test_eight_concurrent_plots_overlap_in_time(
     assert len(results) == n_parties
     for result in results:
         assert not result.is_error
+
+
+def _chart(run_paths: RunPaths, res: ToolSuccess) -> dict[str, JsonValue]:
+    text = (run_paths.artifacts / "charts" / f"{res.artifacts[0].ref}.json").read_text(
+        encoding="utf-8"
+    )
+    return cast("dict[str, JsonValue]", json.loads(text))
+
+
+def test_plot_distribution_numeric_chart_is_histogram_bars(run_paths: RunPaths) -> None:
+    ref = _save(run_paths, pd.DataFrame({"x": [1.0, 2.0, 2.0, 3.0, None]}))
+    res = plot_distribution(run_paths, ref, column="x")
+    panel = cast("list[dict[str, JsonValue]]", _chart(run_paths, res)["panels"])[0]
+    assert panel["kind"] == "bar"
+    series = cast("list[dict[str, JsonValue]]", panel["series"])[0]
+    values = cast("list[float]", series["values"])
+    assert sum(values) == 4
+    assert len(cast("list[str]", panel["categories"])) == len(values)
+
+
+def test_plot_distribution_categorical_chart_orders_levels_by_count(
+    run_paths: RunPaths,
+) -> None:
+    ref = _save(run_paths, pd.DataFrame({"c": ["a", "b", "b", None]}))
+    res = plot_distribution(run_paths, ref, column="c")
+    panel = cast("list[dict[str, JsonValue]]", _chart(run_paths, res)["panels"])[0]
+    assert panel["categories"] == ["b", "a"]
+    series = cast("list[dict[str, JsonValue]]", panel["series"])[0]
+    assert series["values"] == [2.0, 1.0]
+
+
+def test_plot_target_relation_class_target_numeric_feature_chart_is_box(
+    run_paths: RunPaths,
+) -> None:
+    frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "y": ["p", "p", "p", "q", "q", "q"]})
+    ref = _save(run_paths, frame)
+    res = plot_target_relation(run_paths, ref, column="x", target="y")
+    panel = cast("list[dict[str, JsonValue]]", _chart(run_paths, res)["panels"])[0]
+    assert panel["kind"] == "box"
+    groups = cast("list[dict[str, JsonValue]]", panel["groups"])
+    assert [g["name"] for g in groups] == ["p", "q"]
+    assert [g["n"] for g in groups] == [3, 3]
+
+
+def test_plot_target_relation_class_target_categorical_feature_chart_is_bars(
+    run_paths: RunPaths,
+) -> None:
+    frame = pd.DataFrame({"c": ["a", "a", "b", "b"], "y": ["p", "q", "p", "p"]})
+    ref = _save(run_paths, frame)
+    res = plot_target_relation(run_paths, ref, column="c", target="y")
+    panel = cast("list[dict[str, JsonValue]]", _chart(run_paths, res)["panels"])[0]
+    assert panel["kind"] == "bar"
+    assert set(cast("list[str]", panel["categories"])) == {"a", "b"}
+    series = cast("list[dict[str, JsonValue]]", panel["series"])
+    assert [s["name"] for s in series] == ["p", "q"]
+
+
+def test_plot_target_relation_continuous_target_chart_is_scatter(run_paths: RunPaths) -> None:
+    x = [float(i) for i in range(30)]
+    y = [2.0 * v for v in x]
+    ref = _save(run_paths, pd.DataFrame({"x": x, "y": y}))
+    res = plot_target_relation(run_paths, ref, column="x", target="y")
+    spec = _chart(run_paths, res)
+    panel = cast("list[dict[str, JsonValue]]", spec["panels"])[0]
+    assert panel["kind"] == "scatter"
+    series = cast("list[dict[str, JsonValue]]", panel["series"])[0]
+    assert series["x"] == x
+    assert spec["note"] is None
+
+
+def test_plot_target_relation_scatter_chart_thins_to_point_cap(run_paths: RunPaths) -> None:
+    x = np.arange(2500.0)
+    ref = _save(run_paths, pd.DataFrame({"x": x, "y": 2 * x}))
+    res = plot_target_relation(run_paths, ref, column="x", target="y")
+    spec = _chart(run_paths, res)
+    panel = cast("list[dict[str, JsonValue]]", spec["panels"])[0]
+    series = cast("list[dict[str, JsonValue]]", panel["series"])[0]
+    assert len(cast("list[float]", series["x"])) == 2000
+    assert spec["note"] == "showing 2000 of 2500 points"
+
+
+def test_plot_target_relation_continuous_target_categorical_column_chart_is_box(
+    run_paths: RunPaths,
+) -> None:
+    frame = pd.DataFrame({"c": ["a"] * 20 + ["b"] * 10, "y": [float(i) for i in range(30)]})
+    ref = _save(run_paths, frame)
+    res = plot_target_relation(run_paths, ref, column="c", target="y")
+    panel = cast("list[dict[str, JsonValue]]", _chart(run_paths, res)["panels"])[0]
+    assert panel["kind"] == "box"
+    groups = cast("list[dict[str, JsonValue]]", panel["groups"])
+    assert [g["name"] for g in groups] == ["a", "b"]
+    assert [g["n"] for g in groups] == [20, 10]

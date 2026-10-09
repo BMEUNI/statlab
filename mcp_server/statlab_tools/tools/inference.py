@@ -58,6 +58,7 @@ from statlab_tools.artifacts import (
     save_model,
     save_plot,
 )
+from statlab_tools.charts import POINT_CAP, chart, panel, sample_note, xy_series
 from statlab_tools.tool import ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import (
     as_str,
@@ -1302,8 +1303,35 @@ def plot_residuals(paths: RunPaths, fit: _Fit) -> ToolSuccess:
     ax_qq.set_title("normal QQ plot", parse_math=False)
 
     fig.tight_layout()
+    spec = chart(
+        f"{fitted.model} residuals",
+        [
+            panel(
+                "scatter",
+                x_label="fitted values",
+                y_label="residuals",
+                title="residuals vs fitted",
+                series=[xy_series("residuals", fitted_vals, resid, POINT_CAP)],
+                hline=0.0,
+            ),
+            panel(
+                "scatter",
+                x_label="theoretical quantiles",
+                y_label="ordered residuals",
+                title="normal QQ plot",
+                series=[xy_series("residuals", theoretical, sample, POINT_CAP)],
+            ),
+        ],
+        note=sample_note(min(n, POINT_CAP), n),
+    )
     ref = new_artifact_ref()
-    meta = save_plot(paths.artifact(ref, "plot"), fig, ref=ref, label=f"{fitted.model} residuals")
+    meta = save_plot(
+        paths.artifact(ref, "plot"),
+        fig,
+        ref=ref,
+        label=f"{fitted.model} residuals",
+        chart=spec,
+    )
     return ToolSuccess(summary={"model": fitted.model, "n_obs": json_scalar(n)}, artifacts=(meta,))
 
 

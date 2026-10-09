@@ -48,6 +48,7 @@ from statlab_contracts.vocabulary import (
 )
 
 from statlab_tools.artifacts import load_dataframe, load_json, save_json, save_plot
+from statlab_tools.charts import LINE_CAP, chart, panel, xy_series
 from statlab_tools.registry import greater_is_better, is_binary_only, is_negated, scorer_for
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import as_str, as_str_scalar, is_numeric_column, json_scalar
@@ -858,10 +859,13 @@ _CURVE_LABELS: Final[dict[str, tuple[str, str]]] = {
 }
 
 
-def _plot_partial_dependence(ax: Axes, loaded: dict[str, JsonValue]) -> tuple[str, str]:
+def _plot_partial_dependence(
+    ax: Axes, loaded: dict[str, JsonValue]
+) -> tuple[str, str, list[dict[str, JsonValue]]]:
     """Draw a `partial_dependence` curve: one line per series over `x_original` (else `x`), and
-    return `(xlabel, ylabel)`. The x axis is the column name, with "(scaled)" when the grid is
-    scaled but no scaler mapped it back; the y axis is "average prediction" for regression or
+    return `(xlabel, ylabel, series)` where `series` is the chart spec's series list (chunk 55).
+    The x axis is the column name, with "(scaled)" when the grid is scaled but no scaler mapped
+    it back; the y axis is "average prediction" for regression or
     "average P(class)" for classification (chunk 18 §3.3)."""
     column = str(loaded["column"])
     x = np.asarray(cast("list[float]", loaded["x"]), dtype="float64")
@@ -871,16 +875,18 @@ def _plot_partial_dependence(ax: Axes, loaded: dict[str, JsonValue]) -> tuple[st
     else:
         x_axis = np.asarray(cast("list[float]", x_original_raw), dtype="float64")
     series = cast("dict[str, JsonValue]", loaded["series"])
+    chart_series: list[dict[str, JsonValue]] = []
     for name, values in series.items():
         y = np.asarray(cast("list[float]", values), dtype="float64")
         ax.plot(x_axis, y, marker="o", label=str(name))
+        chart_series.append(xy_series(str(name), x_axis, y, LINE_CAP))
     if len(series) > 1:
         ax.legend()
     # x_original is null only when no scaler was supplied, so the grid is still in model units,
     # which for a scaled feature are standardised -- flag that uncertainty with "(scaled)".
     xlabel = column if x_original_raw is not None else f"{column} (scaled)"
     ylabel = "average prediction" if str(loaded["task"]) == "regression" else "average P(class)"
-    return xlabel, ylabel
+    return xlabel, ylabel, chart_series
 
 
 @tool(phase="evaluation", allow_in=_CURVE_PHASES)
@@ -910,7 +916,7 @@ def plot_curve(
     kind_str = str(kind)
     fig, ax = new_figure()
     if kind_str == "partial_dependence":
-        xlabel, ylabel = _plot_partial_dependence(ax, loaded)
+        xlabel, ylabel, chart_series = _plot_partial_dependence(ax, loaded)
     elif kind_str == "learning":
         xlabel, ylabel = _CURVE_LABELS[kind_str]
         sizes = np.asarray(cast("list[float]", loaded["sizes"]), dtype="float64")
@@ -919,17 +925,28 @@ def plot_curve(
         ax.plot(sizes, train_mean, marker="o", label="train")
         ax.plot(sizes, valid_mean, marker="o", label="valid")
         ax.legend()
+        chart_series = [
+            xy_series("train", sizes, train_mean, LINE_CAP),
+            xy_series("valid", sizes, valid_mean, LINE_CAP),
+        ]
     else:
         xlabel, ylabel = _CURVE_LABELS[kind_str]
         x = np.asarray(cast("list[float]", loaded["x"]), dtype="float64")
         y = np.asarray(cast("list[float]", loaded["y"]), dtype="float64")
         ax.plot(x, y, marker="o")
+        chart_series = [xy_series(kind_str, x, y, LINE_CAP)]
     ax.set_xlabel(xlabel, parse_math=False)
     ax.set_ylabel(ylabel, parse_math=False)
     ax.set_title(title or f"{kind_str} curve", parse_math=False)
     fig.tight_layout()
     ref = new_artifact_ref()
-    meta = save_plot(paths.artifact(ref, "plot"), fig, ref=ref, label=f"{kind_str} curve")
+    spec = chart(
+        title or f"{kind_str} curve",
+        [panel("line", x_label=xlabel, y_label=ylabel, series=chart_series)],
+    )
+    meta = save_plot(
+        paths.artifact(ref, "plot"), fig, ref=ref, label=f"{kind_str} curve", chart=spec
+    )
     return ToolSuccess(summary={"kind": kind_str}, artifacts=(meta,))
 
 

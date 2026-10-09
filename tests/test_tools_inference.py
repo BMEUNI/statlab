@@ -11,6 +11,7 @@ converged check removed, exploratory->confirmatory) each failing a named test.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -664,6 +665,11 @@ def test_plot_residuals_renders_for_every_model(run_paths: RunPaths, model: str)
     res = plot_residuals(run_paths, fit_ref)
     assert res.artifacts[0].kind == "plot"
     assert run_paths.artifact(res.artifacts[0].ref, "plot").exists()
+    sidecar = run_paths.artifacts / "charts" / f"{res.artifacts[0].ref}.json"
+    spec = cast("dict[str, JsonValue]", json.loads(sidecar.read_text(encoding="utf-8")))
+    panels = cast("list[dict[str, JsonValue]]", spec["panels"])
+    assert [p["kind"] for p in panels] == ["scatter", "scatter"]
+    assert panels[0]["hline"] == 0.0
 
 
 # --- inferential_fit_summary --------------------------------------------------------------------

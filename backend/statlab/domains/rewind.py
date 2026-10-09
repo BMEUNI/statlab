@@ -66,3 +66,6 @@ async def publish_retained_report(parent: RunPaths, child: RunPaths, state: RunS
             plots = child.report / "plots"
             plots.mkdir(exist_ok=True)
             (plots / artifact.name).write_bytes(artifact.read_bytes())
+            chart = parent.artifacts / "charts" / f"{ref}.json"
+            if chart.is_file():
+                (plots / f"{ref}.chart.json").write_bytes(chart.read_bytes())

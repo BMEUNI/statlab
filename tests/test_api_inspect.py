@@ -246,6 +246,15 @@ async def test_run_files_and_report_plots(tmp_path: Path, monkeypatch: pytest.Mo
         plot = await client.get(f"{base}/plots/{seed.report_plot}")
         assert plot.status_code == 200
         assert plot.content == b"png"
+        chart_name = seed.report_plot.replace(".png", ".chart.json")
+        chart_path = RunPaths(settings.data_dir, "demo", seed.run_id).report / "plots" / chart_name
+        chart_path.write_bytes(b'{"version":1}')
+        chart = await client.get(f"{base}/plots/{chart_name}")
+        assert chart.status_code == 200
+        assert chart.headers["content-type"].startswith("application/json")
+        assert chart.content == b'{"version":1}'
+        missing = f"{base}/plots/{new_artifact_ref()}.chart.json"
+        assert (await client.get(missing)).status_code == 404
         assert (await client.get(f"{base}/plots/x.png")).status_code == 404
         assert (await client.get(f"{base}/plots/{new_artifact_ref()}.png")).status_code == 404
         assert (await client.get(f"{base}/manifest.json")).status_code == 404

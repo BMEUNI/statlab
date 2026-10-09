@@ -152,6 +152,32 @@ def test_a8_plot_writes_valid_png(tmp_path: Path) -> None:
     assert meta.kind == "plot"
 
 
+def test_save_plot_writes_chart_sidecar_beside_png(tmp_path: Path) -> None:
+    fig = Figure()
+    fig.add_subplot().plot([1, 2, 3])
+    path, ref = _ref_path(tmp_path, ".png")
+    save_plot(path, fig, ref=ref, chart={"version": 1})
+    sidecar = path.parent / "charts" / f"{ref}.json"
+    assert sidecar.read_text(encoding="utf-8") == '{"version":1}'
+
+
+def test_save_plot_without_chart_creates_no_charts_directory(tmp_path: Path) -> None:
+    fig = Figure()
+    fig.add_subplot().plot([1, 2, 3])
+    path, ref = _ref_path(tmp_path, ".png")
+    save_plot(path, fig, ref=ref)
+    assert not (path.parent / "charts").exists()
+
+
+def test_save_plot_chart_write_failure_raises_tool_artifact_error(tmp_path: Path) -> None:
+    fig = Figure()
+    fig.add_subplot().plot([1, 2, 3])
+    path, ref = _ref_path(tmp_path, ".png")
+    (path.parent / "charts").write_text("x", encoding="utf-8")
+    with pytest.raises(ToolArtifactError, match="cannot write chart"):
+        save_plot(path, fig, ref=ref, chart={"version": 1})
+
+
 def test_a9_save_plot_never_touches_pyplots_figure_registry(tmp_path: Path) -> None:
     """A9, restated for chunk 09 (§3.2): `save_plot` no longer calls `plt.close` -- a figure
     built via `matplotlib.figure.Figure()` directly, as every tool in this project now builds

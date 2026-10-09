@@ -13,6 +13,9 @@ The suite's spine is oracle-checked numbers, not eyeballed ones:
 
 from __future__ import annotations
 
+import json
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -486,6 +489,11 @@ def test_plot_curve_renders_multiclass_partial_dependence(run_paths: RunPaths) -
     res = plot_curve(run_paths, pd_res.artifacts[0].ref)
     out = run_paths.artifact(res.artifacts[0].ref, "plot")
     assert out.exists() and out.stat().st_size > 0
+    sidecar = run_paths.artifacts / "charts" / f"{res.artifacts[0].ref}.json"
+    spec = cast("dict[str, JsonValue]", json.loads(sidecar.read_text(encoding="utf-8")))
+    panel = cast("list[dict[str, JsonValue]]", spec["panels"])[0]
+    assert panel["kind"] == "line"
+    assert len(cast("list[dict[str, JsonValue]]", panel["series"])) >= 2
 
 
 # --- error analysis ------------------------------------------------------------------------------

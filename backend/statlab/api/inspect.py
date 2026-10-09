@@ -67,7 +67,7 @@ ARTIFACT_MEDIA: dict[ArtifactKind, str] = {
     "plot": "image/png",
     "report": "text/markdown; charset=utf-8",
 }
-PLOT_NAME = re.compile(r"^a_[0-9a-f]{16}\.png\Z")
+PLOT_NAME = re.compile(r"^a_[0-9a-f]{16}\.(?:png|chart\.json)\Z")
 
 
 def _locked(artifact: ArtifactRow, run: RunRow) -> bool:
@@ -162,7 +162,8 @@ def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
         path = paths.report / "plots" / plot
         if not path.is_file():
             raise HTTPException(404, "run file not found")
-        return FileResponse(path, media_type="image/png")
+        media = "application/json" if plot.endswith(".chart.json") else "image/png"
+        return FileResponse(path, media_type=media)
 
     @router.get("/api/runs/{run_id}/files/{name}")
     async def run_file(run_id: str, name: str) -> FileResponse:

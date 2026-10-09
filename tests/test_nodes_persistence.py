@@ -414,9 +414,12 @@ async def test_publish_retained_report_copies_plots_and_rejects_changed_report(
     ensure_run_layout(child)
     ref = sorted(h.state.retained_refs)[0]
     (parent.artifacts / f"{ref}.png").write_bytes(b"png bytes")
+    (parent.artifacts / "charts").mkdir(exist_ok=True)
+    (parent.artifacts / "charts" / f"{ref}.json").write_bytes(b"{}")
     await publish_retained_report(parent, child, h.state)
     assert (child.report / "report.md").read_bytes() == (parent.report / "report.md").read_bytes()
     assert (child.report / "plots" / f"{ref}.png").read_bytes() == b"png bytes"
+    assert (child.report / "plots" / f"{ref}.chart.json").read_bytes() == b"{}"
     (parent.report / "report.md").write_bytes(b"# changed\n")
     with pytest.raises(
         PersistenceError, match="retained report hash disagrees with committed champion"

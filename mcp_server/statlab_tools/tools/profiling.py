@@ -35,6 +35,15 @@ from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 
 from statlab_tools.artifacts import load_dataframe, save_json, save_plot
+from statlab_tools.charts import (
+    POINT_CAP,
+    bar_series,
+    box_group,
+    chart,
+    panel,
+    sample_note,
+    xy_series,
+)
 from statlab_tools.tool import ToolDataError, ToolParamError, tool
 from statlab_tools.tools._frame import (
     is_class_target,
@@ -519,9 +528,11 @@ def _new_figure() -> tuple[Figure, Axes]:
     return fig, ax
 
 
-def _save_plot_artifact(paths: RunPaths, fig: Figure, *, label: str) -> ArtifactMeta:
+def _save_plot_artifact(
+    paths: RunPaths, fig: Figure, *, label: str, chart: JsonValue
+) -> ArtifactMeta:
     ref = new_artifact_ref()
-    return save_plot(paths.artifact(ref, "plot"), fig, ref=ref, label=label)
+    return save_plot(paths.artifact(ref, "plot"), fig, ref=ref, label=label, chart=chart)
 
 
 @tool(phase="profiling", allow_in=["data_profiling"])
@@ -554,6 +565,9 @@ def plot_distribution(
         kind = "histogram"
         bins = min(HIST_MAX_BINS, non_null.nunique())
         ax.hist(non_null.to_numpy(), bins=max(bins, 1))
+        hist_counts, edges = np.histogram(non_null.to_numpy(), bins=max(bins, 1))
+        bar_categories = [f"{edges[i]:.4g} to {edges[i + 1]:.4g}" for i in range(len(hist_counts))]
+        bar_values = hist_counts.tolist()
         shown_levels = int(non_null.nunique())
         total_levels = shown_levels
         ax.set_ylabel("count", parse_math=False)
@@ -567,12 +581,27 @@ def plot_distribution(
         ax.bar(positions, top.to_numpy())
         ax.set_xticks(positions, [str(v) for v in top.index], parse_math=False)
         ax.set_ylabel("count", parse_math=False)
+        bar_categories = [str(v) for v in top.index]
+        bar_values = top.to_numpy().tolist()
         if total_levels > PLOT_MAX_CATEGORIES:
             warnings.append(f"showing {PLOT_MAX_CATEGORIES} of {total_levels} levels")
     ax.set_xlabel(str(column), parse_math=False)
     ax.set_title(f"distribution of {column}", parse_math=False)
     fig.tight_layout()
-    meta = _save_plot_artifact(paths, fig, label=f"distribution of {column}")
+    spec = chart(
+        f"distribution of {column}",
+        [
+            panel(
+                "bar",
+                x_label=str(column),
+                y_label="count",
+                categories=bar_categories,
+                series=[bar_series("count", bar_values)],
+            )
+        ],
+        note=warnings[0] if warnings else None,
+    )
+    meta = _save_plot_artifact(paths, fig, label=f"distribution of {column}", chart=spec)
     return ToolSuccess(
         summary={"kind": kind, "shown_levels": shown_levels, "total_levels": total_levels},
         artifacts=(meta,),
@@ -617,6 +646,7 @@ def plot_target_relation(
 
     fig, ax = _new_figure()
     warnings: list[str] = []
+    scatter_note: str | None = None
 
     if is_target_class and feature_is_numeric:
         kind = "box"
@@ -625,6 +655,12 @@ def plot_target_relation(
         ax.boxplot(groups, tick_labels=[str(v) for v in classes])
         ax.set_xlabel(str(target), parse_math=False)
         ax.set_ylabel(str(column), parse_math=False)
+        chart_panel = panel(
+            "box",
+            x_label=str(target),
+            y_label=str(column),
+            groups=[box_group(str(cls), group) for cls, group in zip(classes, groups, strict=True)],
+        )
     elif is_target_class and not feature_is_numeric:
         kind = "bars"
         level_counts = observed_counts(feature_series)
@@ -634,6 +670,7 @@ def plot_target_relation(
             warnings.append(f"showing {PLOT_MAX_CATEGORIES} of {total_levels} levels")
         classes = sorted(target_series.unique(), key=str)
         width = 0.8 / max(len(classes), 1)
+        class_bars: list[dict[str, JsonValue]] = []
         for i, cls in enumerate(classes):
             shares = [
                 float(
@@ -644,6 +681,7 @@ def plot_target_relation(
             ]
             positions = [p + i * width for p in range(len(levels))]
             ax.bar(positions, shares, width=width, label=str(cls))
+            class_bars.append(bar_series(str(cls), shares))
         ax.set_xticks(
             [p + width * (len(classes) - 1) / 2 for p in range(len(levels))],
             [str(v) for v in levels],
@@ -652,11 +690,32 @@ def plot_target_relation(
         ax.set_xlabel(str(column), parse_math=False)
         ax.set_ylabel(f"share of {target}", parse_math=False)
         ax.legend()
+        chart_panel = panel(
+            "bar",
+            x_label=str(column),
+            y_label=f"share of {target}",
+            categories=[str(v) for v in levels],
+            series=class_bars,
+        )
     elif not is_target_class and feature_is_numeric:
         kind = "scatter"
         ax.scatter(feature_series.to_numpy(), target_series.to_numpy())
         ax.set_xlabel(str(column), parse_math=False)
         ax.set_ylabel(str(target), parse_math=False)
+        chart_panel = panel(
+            "scatter",
+            x_label=str(column),
+            y_label=str(target),
+            series=[
+                xy_series(
+                    str(column),
+                    feature_series.to_numpy(dtype="float64"),
+                    target_series.to_numpy(dtype="float64"),
+                    POINT_CAP,
+                )
+            ],
+        )
+        scatter_note = sample_note(min(len(pair), POINT_CAP), len(pair))
     else:
         kind = "box"
         counts = observed_counts(feature_series)
@@ -670,8 +729,19 @@ def plot_target_relation(
         ax.boxplot(groups, tick_labels=[str(v) for v in levels_sorted])
         ax.set_xlabel(str(column), parse_math=False)
         ax.set_ylabel(str(target), parse_math=False)
+        chart_panel = panel(
+            "box",
+            x_label=str(column),
+            y_label=str(target),
+            groups=[
+                box_group(str(level), group)
+                for level, group in zip(levels_sorted, groups, strict=True)
+            ],
+        )
 
     ax.set_title(f"{column} vs {target}", parse_math=False)
     fig.tight_layout()
-    meta = _save_plot_artifact(paths, fig, label=f"{column} vs {target}")
+    note = scatter_note if kind == "scatter" else (warnings[0] if warnings else None)
+    spec = chart(f"{column} vs {target}", [chart_panel], note=note)
+    meta = _save_plot_artifact(paths, fig, label=f"{column} vs {target}", chart=spec)
     return ToolSuccess(summary={"kind": kind}, artifacts=(meta,), warnings=tuple(warnings))
