@@ -2,7 +2,7 @@
 status: in_progress
 dependencies: [62]
 completion_date: null
-implementation_notes: "63-0 accepted (runs keep captured spine, view-only fallback); 63a next"
+implementation_notes: "63-0 and 63a accepted (captured spine; quality tools check_data_quality, fix_data_quality); 63b next"
 ---
 
 # Chunk 63 — data quality check node (proposal)
@@ -316,3 +316,230 @@ exit 0: coverage 100 % (TOTAL 12258 stmts, 0 missed), mypy 198 files, Ruff clean
 spine lacks a current node opens, keeps that spine and rewinds to a child with the same
 spine; an unknown captured node opens view-only, its event log reads, every action returns
 409 `VIEW_ONLY`, and startup recovery logs and continues; a reordered spine is view-only.
+
+## Stage 63a — quality tools (detailed spec)
+
+Goal: two MCP tools in a new phase `quality`, `allow_in=["data_quality"]` (the node arrives in
+63b; `allow_in` names are free strings and nothing validates them against the spine). No new
+dependency. Non-goals: the node, skill section, UI, report.
+
+Owned: new `mcp_server/statlab_tools/tools/quality.py`, `mcp_server/statlab_tools/tools/__init__.py`
+(one import line, alphabetical: `from statlab_tools.tools import quality as quality` after
+`profiling`), new `tests/test_tools_quality.py`. Preserve other edits.
+
+Reuse from `statlab_tools.tools._frame`: `is_numeric_column`, `is_class_target`,
+`observed_counts`, `json_scalar`, `json_list`, `as_str`, `as_str_scalar`, `require_columns`,
+`save_frame`; `load_dataframe` from `statlab_tools.artifacts`; `ToolParamError`, `tool` from
+`statlab_tools.tool`; `ToolSuccess` from `statlab_contracts.envelope`. Every parameter is
+`Annotated[..., Field(description=...)]` (the decorator and `test_server_mcp_session` M4
+require it); docstrings follow the module style.
+
+### Module `quality.py`
+
+Docstring: "Data quality checks before the split (chunk 63): Deepchecks-style integrity checks
+written in pandas. No fitting, so they may read the whole input like profiling does. Two
+tools: `check_data_quality` reports, `apply_quality_fixes` applies the two safe fixes. Output
+frames keep the input's index labels and row order."
+
+Constants (`Final`, each with a one-line docstring):
+- `MISSING_TOKENS = frozenset({"", "?", "-", "--", "na", "n/a", "nan", "null", "none",
+  "missing", "unknown", "undefined", "not available"})` (compared after `strip()` and
+  `casefold()`).
+- `SENTINELS = (-999.0, -9999.0, 9999.0, 99999.0, 999999.0)`.
+- `MIXED_LOW = 0.05`, `MIXED_HIGH = 0.95`, `NEAR_CONSTANT_SHARE = 0.99`, `RARE_LEVEL_ROWS = 5`,
+  `ID_LIKE_SHARE = 0.5`, `EXAMPLES = 5`.
+
+Private helpers:
+- `_text(series) -> bool`: `not is_numeric_column(series) and not
+  pd.api.types.is_bool_dtype(series) and not pd.api.types.is_datetime64_any_dtype(series)`.
+- `_check(status, rows, columns, details) -> dict[str, JsonValue]`: returns `{"status": status,
+  "rows": rows, "columns": columns, "details": details}`; `status` is `"pass"`, `"warn"`,
+  `"fail"` or `"skipped"`.
+- `_variant_groups(series) -> list[list[str]]`: `strings = as_str(series.dropna())`; `keys =
+  strings.str.casefold().str.replace(r"[\W_]+", "", regex=True)`; group the distinct spellings
+  by key, ignoring the empty key; keep groups with at least two spellings; inside a group
+  order spellings by count descending, then text ascending (so element 0 is canonical);
+  order groups by their canonical spelling. Return the list.
+
+### `check_data_quality(paths, frame, target, id_columns=(), min_class_rows=5)`
+
+`@tool(phase="quality", allow_in=["data_quality"])`. Params: `frame: ArtifactRef` ("The
+frame to check, usually the profiled frame."), `target: str` (min_length 1, "The target
+column."), `id_columns: tuple[str, ...] = ()` ("Identifier columns; excluded from every
+check."), `min_class_rows: int = 5` (ge=2, "Smallest class size cross-validation needs;
+pass the contract's CV fold count.").
+
+Load the frame; `require_columns(data, (target, *id_columns), "columns")`. `n = len(data)`.
+`features = [c for c in data.columns if c != target and c not in id_columns]` (column order
+kept). Checks, in this order, each producing `_check(...)`; `rows` is the number of distinct
+row labels affected; `columns` a list of column names in frame order:
+1. `disguised_missing`: for each feature column, `values = data[c].dropna()`; text columns:
+   `hit = values[as_str(values).str.strip().str.casefold().isin(MISSING_TOKENS)]`; numeric
+   columns: `hit = values[values.isin(SENTINELS)]`; other dtypes: none. Per column with hits a
+   detail `{"column": c, "count": len(hit), "values": sorted(set(as_str(hit)))}`. Status
+   `warn` when any detail, else `pass`.
+2. `mixed_types`: text feature columns with `len(values) > 0`: `numeric =
+   pd.to_numeric(values.astype("str"), errors="coerce").notna()`; `share = numeric.mean()`;
+   when `MIXED_LOW <= share <= MIXED_HIGH`: minority mask = `~numeric` if `share >= 0.5` else
+   `numeric`; detail `{"column": c, "numeric_share": round(share, 3), "examples":
+   sorted(set(as_str(values[minority])))[:EXAMPLES]}`; affected rows are the minority rows.
+   `warn`/`pass`.
+3. `category_variants`: text feature columns with groups from `_variant_groups`: detail
+   `{"column": c, "groups": groups[:EXAMPLES]}`; affected rows: rows whose spelling is in a
+   group but is not its element 0. `warn`/`pass`.
+4. `duplicate_rows`: `mask = data.duplicated(subset=[c for c in data.columns if c not in
+   id_columns], keep="first")`; details `{"share": round(rows / n, 4) if n else 0.0,
+   "example_rows": json_list(data.index[mask][:EXAMPLES])}`; `columns` `[]`. `warn` when any.
+5. `conflicting_labels`: when `not is_class_target(data[target])`: `_check("skipped", 0, [],
+   {"reason": "continuous target"})`. Otherwise, with no features: `pass`, 0 rows. Else
+   `keys = pd.util.hash_pandas_object(data[features], index=False)`; `per_key =
+   data[target].groupby(keys).nunique(dropna=False)`; `mask = keys.isin(per_key.index[per_key
+   > 1])`; details `{"groups": int((per_key > 1).sum()), "example_rows":
+   json_list(data.index[mask.to_numpy()][:EXAMPLES])}`. `warn` when any row.
+6. `near_constant`: feature columns with `n > 0`: `counts = observed_counts(data[c])`; when
+   `len(counts) > 0` and `counts.iloc[0] / n >= NEAR_CONSTANT_SHARE`: detail `{"column": c,
+   "value": json_scalar(counts.index[0]), "share": round(counts.iloc[0] / n, 4)}`; affected
+   rows are rows equal to that value. `warn`/`pass`.
+7. `rare_categories`: text feature columns where `counts = observed_counts(data[c])` has more
+   than one level and `data[c].nunique() <= ID_LIKE_SHARE * n`: `rare = counts[counts <
+   RARE_LEVEL_ROWS]`; when non-empty, detail `{"column": c, "levels": len(rare), "rows":
+   int(rare.sum()), "examples": json_list(rare.index[:EXAMPLES])}`; affected rows are rows
+   whose value is a rare level. `warn`/`pass`.
+8. `target_health`: `nulls = int(data[target].isna().sum())`; class target: `small =
+   counts[counts < min_class_rows]` with `counts = observed_counts(data[target].dropna())`,
+   else empty. Details `{"nulls": nulls, "small_classes": {as_str_scalar(k): int(v) for k, v
+   in small.items()}}`; `columns` `[target]` when not `pass`. Status `fail` when `small`
+   non-empty, else `warn` when `nulls`, else `pass`; affected rows: null-target rows plus
+   rows in small classes.
+9. `duplicate_columns`: pairs `(a, b)`, `a` before `b` in `features`, with
+   `data[a].equals(data[b])` (comment `# ponytail: O(k^2) column compare; hash columns if
+   very wide frames matter`); detail `{"pairs": [[a, b], ...][:EXAMPLES]}` only when pairs
+   exist; `columns` the distinct names in those pairs; `rows` `0`. `warn`/`pass`.
+
+Summary: `{"rows": n, "passed": <no check has status fail>, "checks": {name: check, ...}
+(names in the order above), "fixable": {"mark_missing": {column: values} from
+disguised_missing details, "merge_variants": [columns] from category_variants details}}`.
+Warnings: `tuple(f"{name} check status is {status}" for name, check in checks if status in
+("warn", "fail"))`. No artifact.
+
+### `apply_quality_fixes(paths, frame, target, mark_missing=None, merge_variants=())`
+
+`@tool(phase="quality", allow_in=["data_quality"])`. Params: `frame` ("The frame to fix,
+the one `check_data_quality` read."), `target` (as above), `mark_missing: dict[str,
+tuple[str, ...]] | None = None` ("Per column, the exact cell texts (as reported under
+fixable.mark_missing) to turn into missing values."), `merge_variants: tuple[str, ...] = ()`
+("Text columns whose spelling variants merge into the most frequent spelling.").
+
+Validation, in order, each a `ToolParamError` with the given field: no fixes (`not
+mark_missing and not merge_variants`) -> field `mark_missing`, "no fixes requested";
+`require_columns` for `tuple(mark_missing or {})` (field `mark_missing`) and
+`merge_variants` (field `merge_variants`); target listed in either -> that field, "the target
+is never changed here"; a `merge_variants` column that is not `_text` -> field
+`merge_variants`, "only text columns have spelling variants".
+
+Then on `data.copy()`: for each `mark_missing` column, `wanted = {v.strip().casefold() for v
+in values}`; `mask = data[c].notna() & as_str(data[c]).str.strip().str.casefold().isin(wanted)`;
+`data[c] = data[c].mask(mask)`; record `marked[c] = int(mask.sum())`. Then for each
+`merge_variants` column: `mapping = {spelling: group[0] for group in
+_variant_groups(data[c]) for spelling in group[1:]}`; `categorical =
+isinstance(data[c].dtype, pd.CategoricalDtype)`; `merged_column = as_str(data[c]).replace(mapping)`
+with original nulls kept null (`.where(data[c].notna())`); if `categorical`,
+`.astype("category")`; assign; record `merged[c] = mapping`. Summary `{"rows": len(data),
+"marked_missing": marked, "merged": merged}`; artifact `save_frame(paths, data,
+"quality_fixed")`.
+
+### Tests `tests/test_tools_quality.py`
+
+Use the `run_paths` fixture and a `_save(paths, frame) -> ArtifactRef` helper copied from
+`tests/test_tools_cleaning_fit.py`, plus a `_check(res, name) -> dict[str, JsonValue]`
+narrowing helper. Cases (inputs -> exact expectations):
+1. Disguised: `{"city": ["a", "?", " unknown ", "b", None], "n": [1.0, -999.0, 3.0, 4.0, 5.0],
+   "y": [0, 1, 0, 1, 0]}`, target `y`: status `warn`, rows 2, columns `["city", "n"]`,
+   details `[{"column": "city", "count": 2, "values": [" unknown ", "?"]}, {"column": "n",
+   "count": 1, "values": ["-999"]}]`; `fixable["mark_missing"] == {"city": [" unknown ",
+   "?"], "n": ["-999"]}`.
+2. Mixed: `{"code": ["1", "2", "3", "4", "x"], "y": [0, 1, 0, 1, 0]}`: `warn`, rows 1,
+   details `[{"column": "code", "numeric_share": 0.8, "examples": ["x"]}]`.
+3. Variants: `{"sex": ["Male", "Male", "male ", "MALE", "Female"], "y": [0, 1, 0, 1, 0]}`:
+   `warn`, rows 2, details `[{"column": "sex", "groups": [["Male", "MALE", "male "]]}]`;
+   `fixable["merge_variants"] == ["sex"]`.
+4. Duplicates and conflicts: `{"id": [1, 2, 3, 4], "x": [1, 1, 1, 2], "y": ["a", "a", "b",
+   "a"]}`, `id_columns=("id",)`: `duplicate_rows` `warn` rows 1 (`example_rows == [1]`);
+   `conflicting_labels` `warn` rows 3, `details["groups"] == 1`.
+5. Hundred rows: `c = ["k"] * 99 + ["z"]`, `e = [float(i) for i in range(100)]`, `f = e`
+   copy, `y = ["a"] * 50 + ["b"] * 47 + ["c"] * 3`: `near_constant` details `[{"column": "c",
+   "value": "k", "share": 0.99}]`; `rare_categories` details `[{"column": "c", "levels": 1,
+   "rows": 1, "examples": ["z"]}]`; `duplicate_columns` details `{"pairs": [["e", "f"]]}`;
+   `target_health` `fail`, details `{"nulls": 0, "small_classes": {"c": 3}}`; `passed` false.
+6. Continuous target: `x = [1.0] * 25`, `y = [float(i) for i in range(25)]`:
+   `conflicting_labels` status `skipped`, details `{"reason": "continuous target"}`.
+7. Clean: `{"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "y": ["p", "q"] * 3}`, `min_class_rows=2`:
+   every check status `pass`, `passed` true, `res.warnings == ()`.
+8. Fixes: `{"city": pd.Categorical(["Budapest", "budapest ", "?", "Szeged"]), "n": [1.0,
+   -999.0, 3.0, 4.0], "y": [0, 1, 0, 1]}`; `apply_quality_fixes(..., target="y",
+   mark_missing={"city": ("?",), "n": ("-999",)}, merge_variants=("city",))`: output `city`
+   is categorical with values `["Budapest", "Budapest", NaN, "Szeged"]`, `n` is `[1.0, NaN,
+   3.0, 4.0]`, index unchanged; summary `marked_missing == {"city": 1, "n": 1}`, `merged ==
+   {"city": {"budapest ": "Budapest"}}`; artifact label `quality_fixed`.
+9. Fix errors, each `ToolParamError` with the field named: no fixes; unknown column in
+   `mark_missing`; target in `merge_variants`; numeric column `n` in `merge_variants`.
+If a computed value differs from an expectation above because of a pandas fact the spec did
+not foresee (dtype of a result, ordering), stop and report the actual value; do not change
+the algorithm.
+
+Checks: `make test-fast TESTS="tests/test_tools_quality.py tests/test_server_mcp_session.py tests/test_tool_decorator.py"`;
+Ruff check, Ruff format --check and mypy on the three owned Python files.
+
+### Addendum 63a-A (conflicting labels with no features)
+
+The no-features branch of `conflicting_labels` returns `_check("pass", 0, [], {"groups": 0,
+"example_rows": []})` (same keys as the normal branch). Add test 10: `{"id": [1, 2], "y":
+["a", "b"]}` with `id_columns=("id",)`: `conflicting_labels` is exactly `{"status": "pass",
+"rows": 0, "columns": [], "details": {"groups": 0, "example_rows": []}}`.
+
+### Addendum 63a-B (tool name; test assertion)
+
+1. Every `apply_*` tool is transform-only, meaning it applies fitted state and may touch test
+   data in node 12 (D32, `test_every_apply_tool_is_transform_only`). The quality fix fits
+   nothing and runs only before the split, so it is not an `apply_*` tool: rename
+   `apply_quality_fixes` to `fix_data_quality` everywhere (function, tests, error-message
+   field names unchanged). The decorator stays `@tool(phase="quality",
+   allow_in=["data_quality"])`.
+2. Test 8 assertions, without list `iloc` (mypy overloads): `isinstance(out["city"].dtype,
+   pd.CategoricalDtype)`; `out["city"].isna().tolist() == [False, False, True, False]`;
+   `out["city"].dropna().tolist() == ["Budapest", "Budapest", "Szeged"]`;
+   `out["n"].isna().tolist() == [False, True, False, False]`; `out["n"].dropna().tolist() ==
+   [1.0, 3.0, 4.0]`; `out.index.tolist() == [0, 1, 2, 3]`.
+3. Accepted: `duplicate_columns` details `{}` when no pairs.
+Checks: the 63a Checks again.
+
+### Addendum 63a-C (coverage)
+
+`make check` (`check63a.log`): tests pass; `quality.py` misses 160, 182, 259, 284, 310, 391
+and branch 422->424. All reachable; add tests in `tests/test_tools_quality.py`, no product
+change:
+11. Other dtypes: ten rows, `flag = [True, False] * 5`, `when = pd.date_range("2024-01-01",
+    periods=10)`, `empty = pd.Series([None] * 10, dtype="str")`, `grp = ["a"] * 5 + ["b"] *
+    5`, `y = [0, 1] * 5`: `disguised_missing`, `mixed_types`, `near_constant` and
+    `rare_categories` all status `pass` (covers 160, 182, 259, 284).
+12. Target nulls: `x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]`, `y = ["p", "q", "p", "q", "p", None]`,
+    `min_class_rows=2`: `target_health == {"status": "warn", "rows": 1, "columns": ["y"],
+    "details": {"nulls": 1, "small_classes": {}}}` (310).
+13. In test 9 add: target in `mark_missing` (`mark_missing={"y": ("1",)}`) raises
+    `ToolParamError` with field `mark_missing` (391).
+14. Plain text merge: `{"sex": ["Male", "male "], "y": [0, 1]}`, `merge_variants=("sex",)`:
+    output `sex.tolist() == ["Male", "Male"]`, dtype not categorical, `merged == {"sex":
+    {"male ": "Male"}}` (422->424).
+If a listed line stays uncovered, report which; do not add pragmas. Checks: `make test-fast
+TESTS="tests/test_tools_quality.py"`; Ruff check, Ruff format --check, mypy on that file.
+
+### Stage 63a acceptance receipt (2026-10-09)
+
+Implementer (after addenda A, B, C): `tests/test_tools_quality.py` 13 tests exit 0;
+`test_server_mcp_session.py` and `test_tool_decorator.py` with it exit 0 (86); Ruff
+check/format and mypy on the owned files exit 0. Main reviewed `quality.py` against the
+spec. `make check` first run (`check63a.log`): tests pass, coverage 99.92 % (seven
+reachable gaps in `quality.py`) -> addendum C. Final `make check` (`check63a2.log`) exit 0:
+coverage 100 % (TOTAL 12486 stmts, 0 missed; `quality.py` 227 stmts, 78 branches), mypy 200
+files, Ruff clean. Logs temporary. Tool names: `check_data_quality`, `fix_data_quality`
+(phase `quality`, `allow_in` `data_quality`, not transform-only).
