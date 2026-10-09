@@ -52,6 +52,18 @@ type Revision = Callable[[GateQuestion, str, type[BaseModel]], Awaitable[BaseMod
 type GateRewind = Callable[[str, str], Awaitable[str]]
 
 
+def _without_descriptions(value: JsonValue) -> JsonValue:
+    if isinstance(value, dict):
+        return {
+            key: _without_descriptions(item)
+            for key, item in value.items()
+            if key != "description" or not isinstance(item, str)
+        }
+    if isinstance(value, list):
+        return [_without_descriptions(item) for item in value]
+    return value
+
+
 class GateService:
     """Bind approval/decision_override/failure hooks before starting the bound lifecycle."""
 
@@ -113,10 +125,9 @@ class GateService:
             raise PersistenceError("gate execution ownership mismatch")
         if question.node not in {spec.name for spec in self.loop.nodes}:
             raise EngineError("gate node is undeclared")
-        if (
-            current_schema
-            and question.decision_schema != self._schema(question).model_json_schema()
-        ):
+        if current_schema and _without_descriptions(
+            question.decision_schema
+        ) != _without_descriptions(self._schema(question).model_json_schema()):
             raise EngineError("gate decision schema changed")
         return question
 
@@ -528,7 +539,7 @@ class GateService:
     async def reconcile(self, state: RunState) -> RunState:
         """Boot preparation seam: no task creation; unanswered gates remain dormant."""
         for gate in list_gates(self.conn, self.run_id):
-            question = self._validate(gate, current_schema=gate.status != "applied")
+            question = self._validate(gate, current_schema=gate.status in ("pending", "answered"))
             for entry in question.history:
                 if isinstance(entry, dict) and "answer" in entry:
                     prior = GateAnswer.model_validate(entry["answer"])

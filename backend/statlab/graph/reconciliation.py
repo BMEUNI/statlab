@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from statlab.persistence.repository import (
     update_candidate_status,
 )
 from statlab.storage import validate_checkpoint_ownership
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +98,13 @@ class RestartReconciler:
                             raise EngineError("recovery requires shared run tracker")
                         state = await loop.load_state(binding.initial, row)
                         if loop.gate_reconciler is not None:
-                            state = await loop.gate_reconciler(state)
+                            try:
+                                state = await loop.gate_reconciler(state)
+                            except EngineError as exc:
+                                _LOGGER.warning(
+                                    "Run %s gate reconciliation failed: %s", row.id, exc.message
+                                )
+                                continue
                             row = get_run(self.conn, row.id) or row
                         if row.status in ("paused", "awaiting_user", "cancelled", "superseded"):
                             state = RunState.model_validate(

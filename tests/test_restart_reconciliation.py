@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -884,6 +885,117 @@ async def test_reconcile_projects_corrupt_second_run_starts_no_first_run(
     assert set(resolved) == set(bindings)
     assert entered == []
     assert all(not list_node_executions(world.conn, world.paths.run_id) for world in worlds)
+
+
+@pytest.mark.asyncio
+async def test_gate_engine_error_skips_one_run_and_prepares_other(
+    engine_world: World,
+    project: ProjectRow,
+    minimal_contract: DataContract,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    nodes = (node(),)
+    original = engine_world
+    second_project = create_project(engine_world.conn, slug="gate-error-second", name="Second")
+    second = new_world(
+        engine_world.conn,
+        second_project,
+        minimal_contract,
+        tmp_path / "second",
+        data_dir=engine_world.paths.data_dir,
+    )
+    worlds = (original, second)
+    tracker = RunTracker()
+    bindings: dict[str, RecoveryBinding] = {}
+    initials: dict[str, RunState] = {}
+    for world in worlds:
+        initial = world.initial(nodes)
+        Checkpointer(world.paths).save(initial)
+        lifecycle = RunLifecycle(world.loop(nodes, complete, tracker), initial)
+        bindings[initial.run_id] = RecoveryBinding(lifecycle.loop, initial, lifecycle)
+        initials[initial.run_id] = initial
+    gate_calls: list[str] = []
+    entered: list[str] = []
+
+    async def gate_reconciler(state: RunState) -> RunState:
+        gate_calls.append(state.run_id)
+        if state.run_id == original.paths.run_id:
+            raise EngineError("gate decision schema changed")
+        return state
+
+    async def executor(invocation: NodeInvocation) -> NodeResult:
+        assert original.paths.run_id in gate_calls
+        entered.append(invocation.state.run_id)
+        return await complete(invocation)
+
+    for binding in bindings.values():
+        binding.loop.executor = executor
+    bindings[original.paths.run_id].loop.gate_reconciler = gate_reconciler
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        return bindings[row.id]
+
+    reconciler = RestartReconciler(conn=engine_world.conn, resolver=resolve, tracker=tracker)
+    with caplog.at_level(logging.WARNING, logger="statlab.graph.reconciliation"):
+        batch = await reconciler.reconcile_projects((project.id, second_project.id))
+    assert [task.get_name() for task in batch.tasks] == ["statlab-run:" + second.paths.run_id]
+    assert batch.dormant == ()
+    await asyncio.gather(*batch.tasks)
+    second_row = get_run(engine_world.conn, second.paths.run_id)
+    assert second_row is not None and second_row.status == "completed"
+    assert entered == [second.paths.run_id]
+    assert gate_calls.count(original.paths.run_id) == 1
+    original_row = get_run(engine_world.conn, original.paths.run_id)
+    assert original_row is not None and original_row.status == "pending"
+    assert list_node_executions(engine_world.conn, original.paths.run_id) == ()
+    initial = initials[original.paths.run_id]
+    assert (
+        Checkpointer(original.paths).load(spine_id=initial.spine_id, spine=initial.spine) == initial
+    )
+    matching = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith(
+            f"Run {original.paths.run_id} gate reconciliation failed: "
+        )
+    ]
+    assert len(matching) == 1
+    assert matching[0].name == "statlab.graph.reconciliation"
+    assert matching[0].levelno == logging.WARNING
+    assert matching[0].getMessage() == (
+        f"Run {original.paths.run_id} gate reconciliation failed: gate decision schema changed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_reconciliation_cancellation_propagates(
+    engine_world: World, project: ProjectRow
+) -> None:
+    nodes = (node(),)
+    initial = engine_world.initial(nodes)
+    Checkpointer(engine_world.paths).save(initial)
+    tracker = RunTracker()
+    lifecycle = RunLifecycle(engine_world.loop(nodes, complete, tracker), initial)
+    marker = asyncio.CancelledError("preserved")
+
+    async def gate_reconciler(state: RunState) -> RunState:
+        raise marker
+
+    lifecycle.loop.gate_reconciler = gate_reconciler
+
+    def resolve(row: RunRow) -> RecoveryBinding:
+        return RecoveryBinding(lifecycle.loop, initial, lifecycle)
+
+    reconciler = RestartReconciler(conn=engine_world.conn, resolver=resolve, tracker=tracker)
+    before = asyncio.all_tasks()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await reconciler.reconcile_projects((project.id,))
+    assert raised.value is marker
+    assert asyncio.all_tasks() == before
+    assert list_node_executions(engine_world.conn, initial.run_id) == ()
+    row = get_run(engine_world.conn, initial.run_id)
+    assert row is not None and row.status == "pending"
 
 
 @pytest.mark.asyncio

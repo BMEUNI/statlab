@@ -28,6 +28,12 @@ are M9 prerequisites; B9–B11 domain/control behavior still needs runtime accep
 
 ## Next: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
 
+Chunk [68](./68_gate_schema_startup.md) accepted 2026-10-09: gate comparisons ignore string
+descriptions; prepared/applied gates retain their captured schema; a gate EngineError warns
+and skips that run during boot. `make check` passed with 100% line/branch. Copied real-data
+API/MCP boot opened all 11 runs, retained the four formerly failing prepared gates and original
+source hashes, made no provider calls, and stopped scratch servers. Ports 8765/8000/5173 untouched.
+
 Chunk [63](./63_data_quality.md) accepted 2026-10-09: a `data_quality` step after profiling
 runs nine checks on the whole input and can apply two safe fixes (placeholders to missing,
 merge spelling variants) before the split; the step card and a report section show the

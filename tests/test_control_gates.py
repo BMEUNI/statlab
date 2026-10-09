@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from typing import Literal
 
@@ -12,7 +13,7 @@ from statlab.domains.base import NodeResult, NodeSpec
 from statlab.errors import EngineError, PersistenceError
 from statlab.graph import TraversalPlan
 from statlab.graph.engine import NodeInvocation
-from statlab.graph.gates import GateQuestion, GateRewind, GateService
+from statlab.graph.gates import GateQuestion, GateRewind, GateService, _without_descriptions
 from statlab.graph.lifecycle import RunLifecycle
 from statlab.graph.reconciliation import RecoveryBinding, RestartReconciler
 from statlab.graph.router import InterruptClass
@@ -819,29 +820,132 @@ async def test_restart_repairs_mode_written_before_gate_preparation(engine_world
     assert list_gates(conn, lifecycle.initial.run_id)[0].status == "applied"
 
 
+def test_schema_comparison_ignores_only_string_descriptions() -> None:
+    value: JsonValue = {
+        "description": "old prose",
+        "title": "Keep",
+        "properties": {
+            "count": {"type": "integer", "exclusiveMinimum": 0, "description": "Count prose"},
+            "description": {"type": "string", "description": "Field prose"},
+        },
+        "anyOf": [
+            {"description": "Branch prose", "type": "null"},
+            None,
+            True,
+            2,
+            1.5,
+            "keep",
+        ],
+        "nested": {"description": 7},
+        "required": ["count"],
+        "default": 1,
+        "enum": [1, 2],
+    }
+    original = deepcopy(value)
+    expected: JsonValue = {
+        "title": "Keep",
+        "properties": {
+            "count": {"type": "integer", "exclusiveMinimum": 0},
+            "description": {"type": "string"},
+        },
+        "anyOf": [{"type": "null"}, None, True, 2, 1.5, "keep"],
+        "nested": {"description": 7},
+        "required": ["count"],
+        "default": 1,
+        "enum": [1, 2],
+    }
+    normalized = _without_descriptions(value)
+    assert normalized == expected
+    assert value == original
+    assert _without_descriptions(expected) == expected
+
+
 @pytest.mark.asyncio
-async def test_reconcile_skips_schema_check_for_applied_gates(engine_world: World) -> None:
+async def test_pending_gate_accepts_description_changes(engine_world: World) -> None:
     lifecycle, service, _seen = await shared_gate(engine_world)
     conn = engine_world.conn
     gate = list_gates(conn, lifecycle.initial.run_id)[0]
-    applied = transition_gate(
+    schema = Proposal.model_json_schema()
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    count = properties["count"]
+    assert isinstance(count, dict)
+    schema["properties"] = {
+        **properties,
+        "count": {**count, "description": "Updated count instructions"},
+    }
+    schema["description"] = "Updated proposal instructions"
+    transition_gate(
         conn,
         gate,
-        status="applied",
+        status="pending",
+        answer_json=None,
+        question={**gate.question(), "decision_schema": schema},
+    )
+    state = await service.reconcile(await lifecycle.state())
+    assert state.status == "awaiting_user"
+    updated = get_gate(conn, gate.id)
+    assert updated is not None
+    assert updated.status == "pending"
+    assert updated.question()["decision_schema"] == schema
+    service.check_edits(updated, {"count": 2})
+    await service.answer(
+        GateAnswer(gate_id=gate.id, action="approve_with_edits", edits={"count": 2})
+    )
+    answered = get_gate(conn, gate.id)
+    assert answered is not None
+    assert answered.status == "prepared"
+    proposal = answered.question()["proposal"]
+    assert isinstance(proposal, dict)
+    assert proposal["count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["prepared", "applied"])
+async def test_reconcile_skips_schema_check_for_terminal_gates(
+    engine_world: World, status: Literal["prepared", "applied"]
+) -> None:
+    lifecycle, service, _seen = await shared_gate(engine_world)
+    conn = engine_world.conn
+    gate = list_gates(conn, lifecycle.initial.run_id)[0]
+    transition_gate(
+        conn,
+        gate,
+        status=status,
         answer_json=GateAnswer(gate_id=gate.id, action="approve").model_dump_json(),
         question={**gate.question(), "decision_schema": {}},
     )
     await service.reconcile(await lifecycle.state())
+    selected = get_gate(conn, gate.id)
+    assert selected is not None and selected.status == status
     assert any(
         event.type == "gate.closed" and event.payload["gate_id"] == gate.id
         for event in await lifecycle.loop.events.replay()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "answered"])
+async def test_reconcile_rejects_structural_schema_changes(
+    engine_world: World, status: Literal["pending", "answered"]
+) -> None:
+    lifecycle, service, _seen = await shared_gate(engine_world)
+    conn = engine_world.conn
+    gate = list_gates(conn, lifecycle.initial.run_id)[0]
+    answer_json = (
+        None
+        if status == "pending"
+        else GateAnswer(gate_id=gate.id, action="approve").model_dump_json()
+    )
     transition_gate(
         conn,
-        applied,
-        status="pending",
-        answer_json=None,
+        gate,
+        status=status,
+        answer_json=answer_json,
         question={**gate.question(), "decision_schema": {}},
     )
     with pytest.raises(EngineError, match="gate decision schema changed"):
         await service.reconcile(await lifecycle.state())
+    unchanged = get_gate(conn, gate.id)
+    assert unchanged is not None and unchanged.status == status
+    assert unchanged.question()["decision_schema"] == {}
