@@ -315,7 +315,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--signal); }
 .summary-plots figure { margin: 0; }
 .summary-plots img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); border-radius: var(--radius); background: #fff; }
 .summary-plots figcaption { margin-top: 4px; color: var(--graphite); font-size: 0.8125rem; }
-table.confusion { width: auto; margin-top: 12px; }
+table.confusion { width: auto; }
+.scroll-x { overflow-x: auto; max-width: 100%; margin-top: 12px; }
 table.confusion th, table.confusion td { padding: 4px 12px; text-align: right; }
 table.confusion caption { padding: 0 0 6px; font-weight: 400; color: var(--graphite); font-size: 0.8125rem; }
 .bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }

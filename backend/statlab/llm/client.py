@@ -584,11 +584,11 @@ def _schema_instruction(
             return f"{prefix}{schema_json}"
         selected_example = example if example is not None else _model_example(schema)
         if selected_example is None:
-            selected_example = {}
-            example_json = json.dumps(selected_example, separators=(",", ":"), allow_nan=False)
+            keys = ", ".join(schema.get("properties", {}))
             return (
-                f"{prefix}Example (syntax only; schema defines required fields): "
-                f"{example_json}\nSchema: {schema_json}"
+                f"{prefix}Fill in the values and return one JSON object with only these top-level "
+                f'keys: {keys}. Never return the schema itself and add no other key (no "type", '
+                f'"properties" or "additionalProperties").\nSchema: {schema_json}'
             )
         example_json = json.dumps(selected_example, separators=(",", ":"), allow_nan=False)
         return f"{prefix}Example: {example_json}\nSchema: {schema_json}"

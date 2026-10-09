@@ -341,7 +341,11 @@ async def test_json_tier_repairs_once_and_records_cached_flash_cost(
     assert isinstance(first_messages, list) and isinstance(second_messages, list)
     assert isinstance(first_messages[0], dict) and isinstance(second_messages[-2], dict)
     assert "json" in first_messages[0]["content"]
-    assert "syntax only" in first_messages[0]["content"]
+    assert (
+        "return one JSON object with only these top-level keys: value."
+        in first_messages[0]["content"]
+    )
+    assert "Never return the schema itself" in first_messages[0]["content"]
     assert "{bad" in second_messages[-2]["content"]
     assert second_messages[0]["content"].startswith("Keep invariant prefix.")
     rows = _rows(conn)

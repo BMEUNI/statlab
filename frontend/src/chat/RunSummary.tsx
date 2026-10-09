@@ -69,7 +69,7 @@ export default function RunSummary({ view, onTab, onStep }: Props) {
         </>
       )}
       {confusion !== null && (
-        <table className="confusion">
+        <div className="scroll-x"><table className="confusion">
           <caption>Confusion matrix (validation): rows are the true class, columns the predicted class</caption>
           <thead>
             <tr>
@@ -85,7 +85,7 @@ export default function RunSummary({ view, onTab, onStep }: Props) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       )}
       {features !== null && (
         <>
