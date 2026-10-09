@@ -116,6 +116,7 @@ class RunLoop:
         self.gate_reconciler: GateReconciler | None = None
         self.gate_boundary_hook: GateBoundaryHook | None = None
         self.budget = FitBudget(conn, checkpointer.paths.run_id, self.constraints)
+        self._announced: tuple[str, str | None] | None = None
         self._coordinator = asyncio.Lock()
         self._state: RunState
         self._lifecycle_stop = False
@@ -145,6 +146,10 @@ class RunLoop:
             if state.status in ("completed", "failed", "cancelled", "superseded")
             else None,
         )
+        announced = (state.status, current_node)
+        if announced == self._announced:
+            return
+        self._announced = announced
         await self.events.append(
             "run.status", {"status": state.status, "current_node": current_node}
         )

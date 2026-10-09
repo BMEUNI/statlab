@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 from statlab_contracts.artifacts import ArtifactRef
 from statlab_contracts.candidate import CandidateSet, CandidateSpec
 from statlab_contracts.contract import InferenceGoal, Objective
@@ -132,6 +132,12 @@ class ProfileDecision(Decision):
     correlations: tuple[str, ...] = ()
     outliers: tuple[str, ...] = ()
     plots: tuple[ProfilePlot, ...] = Field(default=(), max_length=4)
+
+    @field_validator("numeric", "categorical", "correlations", "outliers")
+    @classmethod
+    def _unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Repeated column names are dropped; the first occurrence is kept (chunk 69)."""
+        return tuple(dict.fromkeys(value))
 
 
 class ProfileFindings(Decision):

@@ -714,6 +714,19 @@ async def test_profile_check_feeds_llm_repair(
         check(ProfileDecision(rationale="bad", categorical=("x",)))
     with pytest.raises(DecisionRejectedError, match=r"rejected \['x vs y'\]"):
         check(ProfileDecision(rationale="bad", correlations=("x vs y",)))
+    assert ProfileDecision(
+        rationale="r", numeric=("x", "x", "y"), correlations=("x", "y", "x")
+    ).numeric == (
+        "x",
+        "y",
+    )
+    assert ProfileDecision(
+        rationale="r", numeric=("x", "x", "y"), correlations=("x", "y", "x")
+    ).correlations == (
+        "x",
+        "y",
+    )
+    assert check(ProfileDecision(rationale="dup", numeric=("x", "x"))) is None
     messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
     assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
     assert "never a sentence, pair or comment" in messages[-1]["content"]

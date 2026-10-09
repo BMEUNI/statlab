@@ -469,14 +469,11 @@ class FoundationExecutor:
         )
         allowed = self.runtime.skill.node(invocation.spec.name).allowed
         for selected, tool, compatible in selections:
-            bad = sorted(
-                {entry for entry in selected if entry not in compatible}
-                | {entry for entry in selected if selected.count(entry) > 1}
-            )
+            bad = sorted({entry for entry in selected if entry not in compatible})
             if bad:
                 raise _RefusalError(
                     f"{tool} entries must be exact column names; rejected {bad!r} "
-                    f"(unknown, repeated or incompatible); allowed: {sorted(compatible)!r}"
+                    f"(unknown or incompatible); allowed: {sorted(compatible)!r}"
                 )
             if selected and tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")

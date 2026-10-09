@@ -103,6 +103,31 @@ async def complete(invocation: NodeInvocation) -> NodeResult:
     return NodeResult(status="completed", summary={"node": invocation.spec.name})
 
 
+@pytest.mark.asyncio
+async def test_status_event_is_announced_once(engine_world: World) -> None:
+    nodes = (node(),)
+
+    async def execute(invocation: NodeInvocation) -> NodeResult:
+        return NodeResult(status="completed")
+
+    loop = engine_world.loop(nodes, execute)
+    state = engine_world.initial(nodes)
+    await loop._status(state.model_copy(update={"status": "paused"}), "alpha")
+    await loop._status(state.model_copy(update={"status": "paused"}), "alpha")
+    await loop._status(state.model_copy(update={"status": "running"}), "alpha")
+    await loop._status(state.model_copy(update={"status": "running"}), "alpha")
+    await loop._status(state.model_copy(update={"status": "paused"}), "alpha")
+    events = await loop.events.replay()
+    assert [e.payload["status"] for e in events if e.type == "run.status"] == [
+        "paused",
+        "running",
+        "paused",
+    ]
+    row = get_run(engine_world.conn, state.run_id)
+    assert row is not None
+    assert row.status == "paused"
+
+
 def artifact(world: World, kind: ArtifactKind = "dataframe") -> ArtifactMeta:
     ref = new_artifact_ref()
     path = world.paths.artifact(ref, kind)
