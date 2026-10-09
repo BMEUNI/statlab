@@ -102,6 +102,7 @@ class LlmClient:
         litellm.suppress_debug_info = True
         self._acompletion = acompletion or litellm.acompletion
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_llm)
+        self._reasoning = settings.llm_reasoning
 
     async def complete[T: BaseModel](
         self,
@@ -317,8 +318,9 @@ class LlmClient:
         elif tier == "json":
             kwargs["response_format"] = {"type": "json_object"}
         if model.lower().startswith("deepseek/"):
-            kwargs["thinking"] = {"type": "enabled" if reasoning else "disabled"}
-            if reasoning:
+            thinking = reasoning and self._reasoning
+            kwargs["thinking"] = {"type": "enabled" if thinking else "disabled"}
+            if thinking:
                 kwargs["reasoning_effort"] = "high"
 
         async with self._semaphore:

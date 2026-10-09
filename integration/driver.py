@@ -98,6 +98,15 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _cheap_constraints(contract: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    constraints = (
+        dict(_obj(contract["constraints"])) if isinstance(contract.get("constraints"), dict) else {}
+    )
+    constraints.setdefault("max_search_waves", 1)
+    constraints.setdefault("max_retune_loops", 0)
+    return {**contract, "constraints": constraints}
+
+
 class Driver:
     def __init__(
         self,
@@ -105,8 +114,10 @@ class Driver:
         base_url: str,
         workspace: Workspace,
         restart: Callable[[], Awaitable[None]] | None = None,
+        cheap: bool = False,
     ) -> None:
         self._restart = restart
+        self._cheap = cheap
         self.workspace = workspace
         self.client = httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(120, read=300))
         self.http_log: list[dict[str, JsonValue]] = []
@@ -181,6 +192,8 @@ class Driver:
                 json.dumps(proposal, indent=2), encoding="utf-8"
             )
             contract = _obj(proposal["contract"])
+        if self._cheap:
+            contract = _cheap_constraints(contract)
         DataContract.model_validate(contract)
         validated = await self._call(
             "POST",

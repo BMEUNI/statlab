@@ -603,6 +603,32 @@ async def test_legacy_flash_peak_cost_and_explicit_reasoning(
 
 
 @pytest.mark.asyncio
+async def test_reasoning_setting_off_disables_thinking(
+    llm_context: tuple[sqlite3.Connection, str, str], tmp_path: Path
+) -> None:
+    conn, run_id, execution_id = llm_context
+    calls: list[dict[str, object]] = []
+
+    async def fake(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return _response('{"value":"ok"}', prompt=10, completion=5, cached=4)
+
+    await LlmClient(
+        _settings(tmp_path).model_copy(update={"llm_reasoning": False}), acompletion=fake
+    ).complete(
+        conn,
+        run_id=run_id,
+        node_execution_id=execution_id,
+        model="deepseek/deepseek-v4-flash-vision-exp",
+        messages=[],
+        output=Result,
+        reasoning=True,
+    )
+    assert calls[0]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in calls[0]
+
+
+@pytest.mark.asyncio
 async def test_generic_cost_uses_requested_model(
     llm_context: tuple[sqlite3.Connection, str, str],
     tmp_path: Path,

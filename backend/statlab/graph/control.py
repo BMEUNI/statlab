@@ -15,6 +15,7 @@ from statlab_contracts.envelope import Failure
 
 from statlab.errors import EngineError, LlmOutputError
 from statlab.graph.candidates import BudgetState
+from statlab.graph.digest import boundary_digest, candidate_digest
 from statlab.graph.state import RunState
 from statlab.llm.client import CallRecovery, LlmClient, ProseSink
 from statlab.llm.prompts import PromptContext
@@ -310,8 +311,8 @@ async def answer_question(message: str, context: ControlContext) -> ControlRespo
     messages = context._prompt.messages(
         state_summary={
             "status": facts.model_dump(mode="json"),
-            "boundaries": [item.model_dump(mode="json") for item in context.state.shared_results],
-            "candidates": [item.model_dump(mode="json") for item in context.state.branches],
+            "boundaries": boundary_digest(context.state.shared_results, keep_tools=False),
+            "candidates": [candidate_digest(item) for item in context.state.branches],
             "visible_refs": [str(ref) for ref in sorted(context.visible_refs)],
             "conversation": [item.model_dump(mode="json") for item in context.conversation],
         },

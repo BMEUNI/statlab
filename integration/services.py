@@ -141,4 +141,6 @@ def build_settings(
         data_dir=data_dir,
         db_path=db_path,
         api_port=api_port,
+        # The harness proves the backend runs; thinking tokens buy nothing (chunk 59).
+        llm_reasoning=False,
     )

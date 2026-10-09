@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     keep_intermediates: bool = Field(default=False, alias="STATLAB_KEEP_INTERMEDIATES")
     max_concurrent_runs: int = Field(default=0, ge=0, alias="STATLAB_MAX_CONCURRENT_RUNS")
     max_concurrent_llm: int = Field(default=4, ge=1, alias="STATLAB_MAX_CONCURRENT_LLM")
+    llm_reasoning: bool = Field(default=True, alias="STATLAB_LLM_REASONING")
 
     @field_validator("mcp_token")
     @classmethod

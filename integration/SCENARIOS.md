@@ -68,9 +68,24 @@ Neither offline mode judges the data.
 | G6 | Every `llm_calls` row belongs to the run and an execution of that run; total cost recorded | must |
 | G7 | Scenario cost ≤ its `max_cost_usd` (live mode only) | must |
 
-Any unexpected node failure opens a failure gate (also in autonomous mode); unless a scenario
-says otherwise the harness answers it with its default `abort`, so the run ends `cancelled` and
-G2 fails with the failure message in the scenario folder (`gates.json`).
+A failure in one model's own step ends only that model's branch; the others continue and
+champion selection leaves it out (chunk 58). Any other unexpected node failure opens a failure
+gate (also in autonomous mode); unless a scenario says otherwise the harness answers it with its
+default `abort`, so the run ends `cancelled` and G2 fails with the failure message in the
+scenario folder (`gates.json`).
+
+## Cost controls (chunk 59)
+
+The harness only proves the backend runs, so it buys no answer quality:
+
+- `STATLAB_LLM_REASONING=false` for every harness run: DeepSeek thinking is off, so no hidden
+  reasoning tokens.
+- Live mode only: a scenario contract that does not set them gets `max_search_waves = 1` and
+  `max_retune_loops = 0` (no second search wave, no retunes). Offline modes keep the defaults,
+  so `offline-rich` still exercises waves and retunes.
+- Per-model steps and chat questions see a digest of earlier steps without raw tool results
+  (this applies to every run, not only the harness).
+- No output-token cap: a cut-off JSON answer costs a repair call, which is more than it saves.
 
 ## Datasets (synthetic, deterministic, planted truth)
 

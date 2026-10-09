@@ -3,13 +3,40 @@
 from __future__ import annotations
 
 from statlab.domains.base import NodeResult
-from statlab.domains.runtime import boundary_digest
-from statlab.graph.state import BoundaryResult
+from statlab.graph.digest import boundary_digest, candidate_digest
+from statlab.graph.state import BoundaryResult, CandidateProgress
+from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.envelope import Failure
 
 
 def _b(node: str, result: NodeResult) -> BoundaryResult:
     return BoundaryResult(node_name=node, execution_id=f"ne_{node}", result=result)
+
+
+def test_candidate_digest_drops_tools_and_pending() -> None:
+    branch = CandidateProgress(
+        public_id="c_01",
+        spec=CandidateSpec(
+            label="Human baseline",
+            rationale="A simple reference candidate.",
+            estimator=EstimatorSpec(name="logistic_regression"),
+        ),
+        results=(
+            _b(
+                "preprocessing",
+                NodeResult(
+                    status="completed", summary={"decision": {"x": 1}, "tools": [{"tool": "t"}]}
+                ),
+            ),
+        ),
+        pending_result=_b("model_training", NodeResult(status="completed")),
+    )
+    digest = candidate_digest(branch)
+    assert "pending_result" not in digest
+    assert digest["results"] == [
+        {"node": "preprocessing", "status": "completed", "summary": {"decision": {"x": 1}}}
+    ]
+    assert digest["public_id"] == branch.public_id
 
 
 def test_last_entry_per_node_keeps_first_position() -> None:

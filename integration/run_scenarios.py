@@ -359,7 +359,9 @@ async def _suite(scenarios: tuple[Scenario, ...], args: argparse.Namespace) -> i
             await server.stop()
             await server.start()
 
-        driver = Driver(base_url=base_url, workspace=workspace, restart=restart)
+        driver = Driver(
+            base_url=base_url, workspace=workspace, restart=restart, cheap=args.llm == "live"
+        )
         budget = Budget(workspace.db_path, args.budget_usd)
         stop = False
         for scenario in scenarios:
