@@ -709,6 +709,10 @@ export async function getRunFile(runId: string, name: string, signal?: AbortSign
   return body;
 }
 
+export async function getRunChart(runId: string, ref: string, signal?: AbortSignal): Promise<unknown> {
+  return request(runFileUrl(runId, `plots/${ref}.chart.json`), { method: 'GET', signal });
+}
+
 export async function listRunArtifacts(runId: string, signal?: AbortSignal): Promise<ArtifactEntry[]> {
   return parseArtifactEntries(await request(`${runPath(runId)}/artifacts`, { method: 'GET', signal }));
 }

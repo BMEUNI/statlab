@@ -7,6 +7,7 @@ import { estimatorLabel, humanize, metricLabel, type RunView } from '../run/mode
 import { errorText } from '../ui/format.ts';
 import { champion, plotImageUrl } from './champion.ts';
 import Markdown from './Markdown.tsx';
+import PlotFigure from './PlotFigure.tsx';
 
 const DOWNLOADS: Array<[string, string]> = [
   ['Report (report.md)', 'report.md'],
@@ -85,7 +86,7 @@ export default function ReportView({ run, view }: { run: RunSummary; view: RunVi
           : <p role="alert">{errorText(report.error)}</p>
       )}
       {report.isSuccess && (
-        <article className="report"><Markdown source={report.data} imageUrl={plotImageUrl(run.id)} /></article>
+        <article className="report"><Markdown source={report.data} imageUrl={plotImageUrl(run.id)} figure={(fig) => <PlotFigure runId={run.id} {...fig} />} /></article>
       )}
     </>
   );

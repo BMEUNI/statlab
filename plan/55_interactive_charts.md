@@ -1,8 +1,8 @@
 ---
-status: in_progress
+status: completed
 dependencies: [54]
-completion_date: null
-implementation_notes: null
+completion_date: 2026-10-09
+implementation_notes: "plot tools write chart JSON sidecars; report draws SVG charts with hover; two per row; make check 100%, npm 95/95"
 ---
 
 # Chunk 55 — interactive report charts, two per row
@@ -367,3 +367,38 @@ Implementer: focused selectors exit 0, Ruff check/format and mypy on 17 files ex
 empty) and ran `make check` exit 0: coverage 100 % (TOTAL 12151 stmts, 0 missed), mypy 197
 files, Ruff clean, 206 files formatted (log `check55a2.log`, temporary). The first run
 (`check55a.log`) showed `artifacts.py` 143-144 uncovered, fixed by addendum D.
+
+### Addendum 55b-A (narrowing)
+
+TypeScript cannot remove a union member whose `kind` is `'line' | 'scatter'` with `===`
+checks. In `chart.ts` define `type XYFields = { title: string | null; xLabel: string; yLabel:
+string; series: XYSeries[]; hline: number | null }` and make `ChartPanel` =
+`(XYFields & { kind: 'line' }) | (XYFields & { kind: 'scatter' }) | bar member | box member`
+(bar/box unchanged). No logic change in `Chart.tsx`. Accepted deviations: tick label offsets
+(y0 + 16 / y0 + 14), tooltip anchors at each mark's own coordinates, `ticks` in the niceScale
+test assertions, `parseChart` requiring the `title`/`note`/`hline` keys. Logs go to the
+scratchpad, not `/tmp`.
+
+### Addendum 55b-B (readable text)
+
+Browser check: in the two-column grid an SVG is about 384 px wide, so the 640-unit viewBox
+scales 12 px text to about 7 px. In `Chart.tsx`: `W = 480`, `H = 300`; margins top 12, right
+12, left 52, bottom 44 (78 for a bar panel with more than 8 categories), i.e. `x0 = 52`,
+`x1 = W - 12`, `y1 = 12`; x axis title at `y = H - 6`; y axis title at `x = 14` (its rotate
+centre uses the same 14); y tick labels get `dominantBaseline="middle"`. In `style.css`
+`.chart-panel text` font-size becomes `13px`. Nothing else changes.
+
+### Addendum 55b-C (box hover)
+
+Browser check: the box median `<line>` is drawn over the box rect and swallows hover at the
+box centre. In `Chart.tsx` give the median line `pointerEvents="none"`. Nothing else changes.
+
+## Stage 55b receipt (2026-10-09)
+
+Implementer: `npm test` 95/95, `npm run typecheck` 0, `npm run build` 0 after addenda A-C.
+Main reviewed the diff and checked in the browser on an offline run (port 8766/5174): six
+report charts (box, bar, roc, learning, partial dependence, calibration) render as SVG in two
+383.5 px columns; hover shows values on line points and box rects; old reports without a
+sidecar fall back to the PNG. Screenshots `.playwright-mcp/55-charts-hover.png`,
+`55-charts-box.png`. Not seen in the browser: a scatter (residuals) chart. Frontend only after
+55a, so the 55a `make check` evidence stands.

@@ -1,7 +1,8 @@
-import type { ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import { figureRow, parseMarkdown, type Inline } from './markdown.ts';
 
 type ImageUrl = (src: string) => string | null;
+type Figure = (fig: { alt: string; src: string; url: string }) => ReactNode;
 
 function inlines(items: Inline[], imageUrl: ImageUrl): ReactNode[] {
   return items.map((item, index) => {
@@ -19,7 +20,7 @@ function inlines(items: Inline[], imageUrl: ImageUrl): ReactNode[] {
   });
 }
 
-export default function Markdown({ source, imageUrl }: { source: string; imageUrl: ImageUrl }) {
+export default function Markdown({ source, imageUrl, figure }: { source: string; imageUrl: ImageUrl; figure?: Figure }) {
   return (
     <>
       {parseMarkdown(source).map((block, index) => {
@@ -34,6 +35,9 @@ export default function Markdown({ source, imageUrl }: { source: string; imageUr
               <div className="plot-grid" key={index}>
                 {figures.map((fig, at) => {
                   const url = imageUrl(fig.src);
+                  if (url !== null && figure !== undefined) {
+                    return <Fragment key={at}>{figure({ alt: fig.alt, src: fig.src, url })}</Fragment>;
+                  }
                   return url === null
                     ? <p key={at}>{`[figure: ${fig.alt}]`}</p>
                     : <a key={at} href={url} target="_blank" rel="noreferrer noopener" title="Open full size"><img className="plot" alt={fig.alt} src={url} /></a>;

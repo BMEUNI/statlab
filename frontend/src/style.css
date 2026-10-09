@@ -158,9 +158,23 @@ th[aria-sort="ascending"] button::after { content: " ▲"; }
 th[aria-sort="descending"] button::after { content: " ▼"; }
 
 .report p, .report li { text-align: justify; hyphens: auto; }
-.plot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: 16px; margin: 12px 0; }
+.plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 12px 0; }
+@media (max-width: 48rem) { .plot-grid { grid-template-columns: 1fr; } }
 .plot-grid a { display: block; cursor: zoom-in; }
 .plot-grid img.plot { display: block; width: 100%; }
+.chart { margin: 0; }
+.chart-title, .chart-panel-title { margin: 0 0 6px; font-weight: 600; font-size: 0.875rem; }
+.chart-panel { position: relative; }
+.chart-panel + .chart-panel { margin-top: 10px; }
+.chart-panel svg { display: block; width: 100%; height: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); }
+.chart-panel text { font-size: 13px; fill: var(--graphite); }
+.chart-grid { stroke: var(--rule); }
+.chart-ref { stroke: var(--graphite); stroke-dasharray: 4 4; }
+.chart-panel circle:hover, .chart-panel .mark:hover { stroke: var(--ink); stroke-width: 1.5; }
+.chart-tip { position: absolute; transform: translate(-50%, calc(-100% - 10px)); pointer-events: none; padding: 6px 8px; border-radius: 6px; background: var(--ink); color: var(--surface); font-size: 0.75rem; white-space: nowrap; z-index: 5; }
+.chart-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 0; font-size: 0.75rem; color: var(--graphite); }
+.chart-legend .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }
+.chart-open { display: inline-block; margin-top: 4px; font-size: 0.75rem; }
 .report table { font-size: 0.875rem; }
 .report blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--rule); color: var(--graphite); }
 .report pre { padding: 8px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); }
