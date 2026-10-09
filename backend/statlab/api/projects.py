@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, f
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
-from statlab_contracts.contract import DataContract, DatasetOptions
+from statlab_contracts.contract import DataContract, DatasetOptions, TargetSpec
 from statlab_contracts.layout import ProjectPaths
 
 from statlab.config import Settings
@@ -358,6 +358,13 @@ class ProjectsService:
             output=ContractProposal,
             check=check,
         )
+        default = DataContract(target=TargetSpec(column=request.contract.target.column)).model_dump(
+            mode="json"
+        )
+        contract = DataContract.model_validate(
+            _sparse(proposal.contract.model_dump(mode="json"), default, provided)
+        )
+        proposal = ContractProposal(contract=contract, reasoning=proposal.reasoning)
         validation = await self.validate(project_id, request.dataset_id, proposal.contract)
         if not validation.valid:
             raise HTTPException(422, "proposed contract does not match dataset")
@@ -373,6 +380,24 @@ def _contains_supplied(proposed: JsonValue, supplied: JsonValue) -> bool:
     return json.dumps(
         proposed, sort_keys=True, separators=(",", ":"), allow_nan=False
     ) == json.dumps(supplied, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _sparse(
+    proposed: dict[str, JsonValue], default: dict[str, JsonValue], supplied: JsonValue
+) -> dict[str, JsonValue]:
+    """Keep supplied fields and fields that differ from the default contract, so
+    defaults are not stored as explicit choices."""
+    out: dict[str, JsonValue] = {}
+    for key, value in proposed.items():
+        kept = isinstance(supplied, dict) and key in supplied
+        base = default.get(key)
+        if isinstance(value, dict) and value and isinstance(base, dict):
+            inner = _sparse(value, base, supplied.get(key) if isinstance(supplied, dict) else None)
+            if inner or kept:
+                out[key] = inner if inner else value
+        elif kept or value != base:
+            out[key] = value
+    return out
 
 
 def missing_setup_fields(contract: DataContract) -> list[str]:

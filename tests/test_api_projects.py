@@ -770,6 +770,44 @@ async def test_proposal_partial_unresolved_mismatch_and_missing_target_paths(
 
 
 @pytest.mark.asyncio
+async def test_proposal_keeps_only_supplied_and_non_default_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full = _complete_contract().model_dump(mode="json")
+    full["constraints"]["max_candidates"] = 6
+    answer = DataContract.model_validate(full)
+    partial = DataContract(target=TargetSpec(column="a"))
+    async with _open_project_api(tmp_path, monkeypatch, answer=answer) as (
+        client,
+        _settings,
+        _session,
+        project,
+    ):
+        dataset = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        response = await client.post(
+            f"/api/projects/{project['id']}/contracts/propose",
+            json={
+                "dataset_id": dataset.json()["id"],
+                "contract": partial.model_dump(mode="json", exclude_unset=True),
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()["contract"]
+        assert "preprocessing" not in body
+        assert "modelling" not in body
+        assert body["constraints"] == {"max_candidates": 6}
+        assert body["target"] == {"column": "a", "type": "binary", "positive_class": True}
+        assert body["objective"] == {"task": "classification", "primary_metric": "roc_auc"}
+        assert body["split"]["seed"] == 7
+        assert DataContract.model_validate(body).model_dump(mode="json") == answer.model_dump(
+            mode="json"
+        )
+
+
+@pytest.mark.asyncio
 async def test_proposal_unresolved_and_data_mismatch_return_422(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
