@@ -1,5 +1,7 @@
 import type {
   AssistantReply,
+  ValidationPage,
+  ValidationRow,
   ChatTurn,
   SetupState,
   ArtifactEntry,
@@ -702,6 +704,61 @@ export function parseArtifactPreview(value: unknown): ArtifactPreview {
     dtypes,
     head: objectArray(value.head),
   };
+}
+
+function nullableNumber(value: JsonValue | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw invalidResponse();
+  return value;
+}
+
+export function parseValidationPage(value: unknown): ValidationPage {
+  if (!isJsonObject(value)) throw invalidResponse();
+  if (value.task !== 'classification' && value.task !== 'regression') throw invalidResponse();
+  if (!Array.isArray(value.rows)) throw invalidResponse();
+  const rows = value.rows.map((item): ValidationRow => {
+    if (!isJsonObject(item) || !isJsonObject(item.values)) throw invalidResponse();
+    const confidence = nullableNumber(item.confidence);
+    const error = nullableNumber(item.error);
+    if (item.correct !== null && typeof item.correct !== 'boolean') throw invalidResponse();
+    return {
+      row: item.row ?? null,
+      actual: item.actual ?? null,
+      predicted: item.predicted ?? null,
+      confidence,
+      error,
+      correct: item.correct ?? null,
+      values: item.values,
+    };
+  });
+  return {
+    task: value.task,
+    total: requiredNumber(value, 'total'),
+    shownTotal: requiredNumber(value, 'shown_total'),
+    offset: requiredNumber(value, 'offset'),
+    limit: requiredNumber(value, 'limit'),
+    correct: nullableNumber(value.correct),
+    meanAbsError: nullableNumber(value.mean_abs_error),
+    threshold: nullableNumber(value.threshold),
+    columns: stringArray(value.columns),
+    rows,
+  };
+}
+
+export async function getValidation(
+  runId: string,
+  query: { candidate: string; worstFirst: boolean; offset: number; limit: number },
+  signal?: AbortSignal,
+): Promise<ValidationPage> {
+  const params = new URLSearchParams({
+    candidate: query.candidate,
+    worst_first: String(query.worstFirst),
+    offset: String(query.offset),
+    limit: String(query.limit),
+  });
+  return parseValidationPage(
+    await request(`${runPath(runId)}/validation?${params.toString()}`, { method: 'GET', signal }),
+  );
 }
 
 export function artifactUrl(id: string): string {

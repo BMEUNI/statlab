@@ -44,6 +44,7 @@ from statlab_tools.tools.evaluation import (
     score_classification,
     score_regression,
     select_threshold,
+    validation_rows,
 )
 
 if TYPE_CHECKING:
@@ -1330,3 +1331,131 @@ def test_ci_overlap_treats_missing_bound_as_overlapping() -> None:
     assert ev._ci_overlap({"ci_low": None, "ci_high": None}, {"ci_low": 0.1, "ci_high": 0.2})
     assert ev._ci_overlap({"ci_low": 0.1, "ci_high": 0.2}, {"ci_low": 0.15, "ci_high": 0.25})
     assert not ev._ci_overlap({"ci_low": 0.1, "ci_high": 0.2}, {"ci_low": 0.3, "ci_high": 0.4})
+
+
+def test_validation_rows_classification(run_paths: RunPaths) -> None:
+    _write_snapshot(run_paths, _binary_contract(1))
+    frame = _save(
+        run_paths,
+        pd.DataFrame(
+            {"x": [1, 2, 3, 4], "c": ["a", "b", "c", "d"], "y": [0, 1, 1, 0]},
+            index=[10, 11, 12, 13],
+        ),
+    )
+    probas = _save(
+        run_paths,
+        pd.DataFrame(
+            {"proba__0": [0.8, 0.3, 0.6, 0.45, 0.5], "proba__1": [0.2, 0.7, 0.4, 0.55, 0.5]},
+            index=[10, 11, 12, 13, 99],
+        ),
+        kind="predictions",
+    )
+    res = validation_rows(
+        run_paths, frame=frame, predictions=probas, target="y", task="classification"
+    )
+    assert res.summary["total"] == 4
+    assert res.summary["shown_total"] == 4
+    assert res.summary["correct"] == 2
+    assert res.summary["columns"] == ["x", "c"]
+    assert _l(res.summary["rows"])[0] == {
+        "row": 10,
+        "actual": "0",
+        "predicted": "0",
+        "confidence": 0.8,
+        "error": None,
+        "correct": True,
+        "values": {"x": 1, "c": "a"},
+    }
+    worst = validation_rows(
+        run_paths,
+        frame=frame,
+        predictions=probas,
+        target="y",
+        task="classification",
+        worst_first=True,
+    )
+    assert worst.summary["shown_total"] == 2
+    assert [_d(r)["row"] for r in _l(worst.summary["rows"])] == [12, 13]
+    tuned = validation_rows(
+        run_paths,
+        frame=frame,
+        predictions=probas,
+        target="y",
+        task="classification",
+        threshold=0.65,
+    )
+    assert tuned.summary["correct"] == 3
+    row13 = _d(_l(tuned.summary["rows"])[3])
+    assert row13["predicted"] == "0"
+    assert row13["confidence"] == 0.45
+    paged = validation_rows(
+        run_paths,
+        frame=frame,
+        predictions=probas,
+        target="y",
+        task="classification",
+        offset=1,
+        limit=2,
+    )
+    assert [_d(r)["row"] for r in _l(paged.summary["rows"])] == [11, 12]
+
+
+def test_validation_rows_regression(run_paths: RunPaths) -> None:
+    frame = _save(run_paths, pd.DataFrame({"x": [1, 2, 3], "y": [1.0, 2.0, 3.0]}, index=[0, 1, 2]))
+    preds = _save(
+        run_paths,
+        pd.DataFrame({"prediction": [1.5, 2.0, 0.0]}, index=[0, 1, 2]),
+        kind="predictions",
+    )
+    res = validation_rows(run_paths, frame=frame, predictions=preds, target="y", task="regression")
+    errors = [_d(r)["error"] for r in _l(res.summary["rows"])]
+    assert errors == [0.5, 0.0, -3.0]
+    mean_abs_error = res.summary["mean_abs_error"]
+    assert isinstance(mean_abs_error, float)
+    assert abs(mean_abs_error - 3.5 / 3) < 1e-9
+    assert all(_d(r)["correct"] is None for r in _l(res.summary["rows"]))
+    assert all(_d(r)["confidence"] is None for r in _l(res.summary["rows"]))
+    worst = validation_rows(
+        run_paths, frame=frame, predictions=preds, target="y", task="regression", worst_first=True
+    )
+    assert [_d(r)["row"] for r in _l(worst.summary["rows"])] == [2, 0, 1]
+    unjoined = _save(run_paths, pd.DataFrame({"prediction": [1.0]}, index=[7]), kind="predictions")
+    empty = validation_rows(
+        run_paths, frame=frame, predictions=unjoined, target="y", task="regression"
+    )
+    assert empty.summary["total"] == 0
+    assert empty.summary["rows"] == []
+    assert empty.summary["mean_abs_error"] is None
+
+
+def test_validation_rows_refusals(run_paths: RunPaths) -> None:
+    _write_snapshot(run_paths, _binary_contract(1))
+    frame = _save(run_paths, pd.DataFrame({"x": [1, 2], "y": [0, 1]}, index=[0, 1]))
+    probas = _save(
+        run_paths,
+        pd.DataFrame({"proba__0": [0.6, 0.4], "proba__1": [0.4, 0.6]}, index=[0, 1]),
+        kind="predictions",
+    )
+    three = _save(
+        run_paths,
+        pd.DataFrame(
+            {"proba__0": [0.2, 0.3], "proba__1": [0.3, 0.3], "proba__2": [0.5, 0.4]},
+            index=[0, 1],
+        ),
+        kind="predictions",
+    )
+    with pytest.raises(ToolParamError):
+        validation_rows(
+            run_paths, frame=frame, predictions=probas, target="missing", task="classification"
+        )
+    with pytest.raises(ToolParamError):
+        validation_rows(run_paths, frame=frame, predictions=probas, target="y", task="regression")
+    with pytest.raises(ToolParamError):
+        validation_rows(
+            run_paths,
+            frame=frame,
+            predictions=three,
+            target="y",
+            task="classification",
+            threshold=0.5,
+        )

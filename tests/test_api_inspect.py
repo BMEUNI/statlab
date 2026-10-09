@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 from statlab.config import Settings
-from statlab.graph.state import RunState
+from statlab.domains.base import NodeResult
+from statlab.domains.decisions import ProblemSpec
+from statlab.graph.state import BoundaryResult, RunState
 from statlab.persistence.db import connect
 from statlab.persistence.repository import (
     claim_test_scoring,
@@ -31,6 +33,7 @@ from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
 
 from tests.test_api_projects import _open_project_api
+from tests.test_graph_state import candidate_spec, node
 
 
 @dataclass(frozen=True)
@@ -294,3 +297,107 @@ async def test_artifact_list_reads_checkpoint(
             encoding="utf-8",
         )
         assert (await client.get(url)).status_code == 500
+
+
+NO_VALIDATION = "this model has no validation predictions yet"
+
+
+def _validation_state(seed: _Seed, *, evaluation: dict[str, JsonValue] | None) -> RunState:
+    problem = ProblemSpec(
+        rationale="r",
+        target="a",
+        target_type="binary",
+        task="classification",
+        primary_metric="roc_auc",
+        metric_rule="explicit",
+    )
+    state = RunState.initial(
+        run_id=seed.run_id,
+        spine_id="s",
+        nodes=(
+            node("problem_definition"),
+            node("data_splitting"),
+            node("model_evaluation", candidate=True),
+        ),
+        mode="autonomous",
+        candidates=(candidate_spec(),),
+    )
+    results: tuple[BoundaryResult, ...] = ()
+    if evaluation is not None:
+        results = (
+            BoundaryResult(
+                node_name="model_evaluation",
+                execution_id="e3",
+                result=NodeResult(status="completed", summary=evaluation),
+            ),
+        )
+    branch = state.branches[0].model_copy(update={"results": results})
+    shared = (
+        BoundaryResult(
+            node_name="problem_definition",
+            execution_id="e1",
+            result=NodeResult(
+                status="completed", summary={"problem": problem.model_dump(mode="json")}
+            ),
+        ),
+        BoundaryResult(
+            node_name="data_splitting",
+            execution_id="e2",
+            result=NodeResult(status="completed", summary={"valid": seed.frame}),
+        ),
+    )
+    cursor = 3 if evaluation is not None else 2
+    return state.model_copy(
+        update={"shared_results": shared, "branches": (branch,), "cursor": cursor}
+    )
+
+
+@pytest.mark.asyncio
+async def test_validation_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, session, project):
+        seed = _seed(settings, str(project["id"]))
+        paths = RunPaths(settings.data_dir, "demo", seed.run_id)
+        url = f"/api/runs/{seed.run_id}/validation"
+        missing = await client.get(f"{url}?candidate=c_01")
+        assert missing.status_code == 404
+        assert missing.json() == {"detail": NO_VALIDATION}
+        state = _validation_state(
+            seed,
+            evaluation={"probabilities": seed.frame, "predictions": seed.frame, "threshold": 0.4},
+        )
+        paths.state_json.write_text(state.model_dump_json(), encoding="utf-8")
+        branch_id = state.branches[0].public_id
+        unknown = await client.get(f"{url}?candidate=c_99")
+        assert unknown.status_code == 404
+        assert unknown.json() == {"detail": "model not found"}
+        session.responses.append(ToolSuccess(summary={"task": "classification"}))
+        ok = await client.get(f"{url}?candidate={branch_id}&worst_first=true&offset=5&limit=10")
+        assert ok.status_code == 200
+        assert ok.json() == {"task": "classification"}
+        name, arguments, _timeout = session.calls[-1]
+        assert name == "validation_rows"
+        assert arguments == {
+            "project": "demo",
+            "run": seed.run_id,
+            "frame": seed.frame,
+            "predictions": seed.frame,
+            "target": "a",
+            "task": "classification",
+            "threshold": 0.4,
+            "worst_first": True,
+            "offset": 5,
+            "limit": 10,
+        }
+        assert (await client.get(f"{url}?candidate={branch_id}&limit=500")).status_code == 422
+        no_evaluation = _validation_state(seed, evaluation=None)
+        paths.state_json.write_text(no_evaluation.model_dump_json(), encoding="utf-8")
+        absent = await client.get(f"{url}?candidate={branch_id}")
+        assert absent.status_code == 404
+        assert absent.json() == {"detail": NO_VALIDATION}
+        no_probabilities = _validation_state(
+            seed, evaluation={"predictions": seed.frame, "threshold": 0.4}
+        )
+        paths.state_json.write_text(no_probabilities.model_dump_json(), encoding="utf-8")
+        lacking = await client.get(f"{url}?candidate={branch_id}")
+        assert lacking.status_code == 404
+        assert lacking.json() == {"detail": NO_VALIDATION}

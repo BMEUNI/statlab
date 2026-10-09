@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ArtifactEntry, JsonObject } from '../src/api/types.ts';
+import type { ArtifactEntry, JsonObject, ValidationPage } from '../src/api/types.ts';
 import {
   artifactKinds,
   artifactSplits,
@@ -10,8 +10,11 @@ import {
   formatMetric,
   metricColumns,
   sortRows,
+  cellText,
+  validationModels,
+  validationSummary,
 } from '../src/run/compare.ts';
-import type { Branch, NodeOutcome, RunView } from '../src/run/model.ts';
+import { humanize, type Branch, type NodeOutcome, type RunView } from '../src/run/model.ts';
 
 function outcome(node: string, summary: JsonObject): NodeOutcome {
   return { node, executionId: 'e', status: 'completed', summary, artifacts: [], metrics: {}, warnings: [], skipReason: null, error: null };
@@ -91,4 +94,33 @@ test('artifact kind and split helpers filter entries', () => {
   assert.deepEqual(artifactSplits(entries), ['test', 'train']);
   assert.deepEqual(filterArtifacts(entries, 'dataframe', 'train').map((entry) => entry.id), ['b']);
   assert.deepEqual(filterArtifacts(entries, '', '').length, 3);
+});
+
+test('validationModels keeps candidates with a completed model_evaluation and marks the champion', () => {
+  const failed = { ...branch('c_03', {}, [{ ...outcome('model_evaluation', {}), status: 'failed' }]) };
+  const local: RunView = { ...view, branches: [view.branches[0] as Branch, view.branches[1] as Branch, failed] };
+  assert.deepEqual(validationModels(local), [
+    { id: 'c_01', label: humanize('Label c_01'), champion: true },
+    { id: 'c_02', label: humanize('Label c_02'), champion: false },
+  ]);
+});
+
+test('cellText renders nulls, numbers, booleans, strings and other JSON', () => {
+  assert.equal(cellText(null), '—');
+  assert.equal(cellText(3), '3');
+  assert.equal(cellText(0.123456), '0.1235');
+  assert.equal(cellText(true), 'yes');
+  assert.equal(cellText('x'), 'x');
+  assert.equal(cellText([1]), '[1]');
+});
+
+test('validationSummary describes classification and regression pages', () => {
+  const page: ValidationPage = {
+    task: 'classification', total: 4, shownTotal: 4, offset: 0, limit: 50, correct: 3,
+    meanAbsError: null, threshold: 0.4, columns: [], rows: [],
+  };
+  assert.equal(validationSummary(page), '3 of 4 validation rows predicted correctly (75.0%). Classes use the tuned threshold 0.4.');
+  const regression: ValidationPage = { ...page, task: 'regression', total: 2, correct: null, meanAbsError: 1.5, threshold: null };
+  assert.equal(validationSummary(regression), 'Mean absolute error 1.5 over 2 validation rows.');
+  assert.equal(validationSummary({ ...regression, total: 0 }), 'No validation rows.');
 });

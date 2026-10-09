@@ -2187,3 +2187,54 @@ async def test_list_estimators_guards(
     async with McpClient(settings(paths, tmp_path), conn, session=good) as entered:
         with pytest.raises(ToolCallError):
             await entered.list_estimators()
+
+
+@pytest.mark.asyncio
+async def test_validation_rows_dispatches_without_audit(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    session = FakeSession(
+        (
+            served_tool(
+                "validation_rows",
+                {"type": "object", "properties": {}, "additionalProperties": True},
+                allow_in=["*"],
+                phase="artifacts",
+            ),
+        )
+    )
+    session.envelope = ToolSuccess(summary={"total": 2}).model_dump(mode="json")
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        result = await client.validation_rows(
+            project=paths.slug,
+            run=paths.run_id,
+            frame="a_" + "1" * 16,
+            predictions="a_" + "2" * 16,
+            target="y",
+            task="classification",
+            threshold=0.4,
+            worst_first=True,
+            offset=5,
+            limit=10,
+        )
+    assert result.summary == {"total": 2}
+    assert session.calls == [
+        (
+            "validation_rows",
+            {
+                "project": paths.slug,
+                "run": paths.run_id,
+                "frame": "a_" + "1" * 16,
+                "predictions": "a_" + "2" * 16,
+                "target": "y",
+                "task": "classification",
+                "threshold": 0.4,
+                "worst_first": True,
+                "offset": 5,
+                "limit": 10,
+            },
+            60,
+        )
+    ]
+    assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0

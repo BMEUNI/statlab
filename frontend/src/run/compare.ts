@@ -1,5 +1,6 @@
 import { isJsonObject } from '../api/client.ts';
-import type { ArtifactEntry, JsonObject } from '../api/types.ts';
+import type { ArtifactEntry, JsonObject, JsonValue, ValidationPage } from '../api/types.ts';
+import { humanize, latestOutcome } from './model.ts';
 import type { NodeOutcome, RunView } from './model.ts';
 
 export type MetricValue = { value: number; ciLow: number | null; ciHigh: number | null };
@@ -134,4 +135,31 @@ export function artifactSplits(entries: ArtifactEntry[]): string[] {
 
 export function filterArtifacts(entries: ArtifactEntry[], kind: string, split: string): ArtifactEntry[] {
   return entries.filter((entry) => (kind === '' || entry.kind === kind) && (split === '' || entry.split === split));
+}
+
+export type ValidationModel = { id: string; label: string; champion: boolean };
+
+export function validationModels(view: RunView): ValidationModel[] {
+  return candidateRows(view)
+    .filter((row) => latestOutcome(view, 'model_evaluation', row.id)?.status === 'completed')
+    .map((row) => ({ id: row.id, label: humanize(row.label), champion: row.champion }));
+}
+
+export function cellText(value: JsonValue): string {
+  if (value === null) return '—';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+export function validationSummary(page: ValidationPage): string {
+  if (page.total === 0) return 'No validation rows.';
+  if (page.task === 'regression') {
+    return `Mean absolute error ${cellText(page.meanAbsError)} over ${page.total} validation rows.`;
+  }
+  const correct = page.correct ?? 0;
+  const percent = ((correct / page.total) * 100).toFixed(1);
+  const threshold = page.threshold !== null ? ` Classes use the tuned threshold ${page.threshold}.` : '';
+  return `${correct} of ${page.total} validation rows predicted correctly (${percent}%).${threshold}`;
 }

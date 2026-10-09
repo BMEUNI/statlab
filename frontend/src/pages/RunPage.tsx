@@ -1,4 +1,4 @@
-import { FileText, FolderOpen, ListChecks, Table2, type LucideIcon } from 'lucide-react';
+import { FileText, FolderOpen, ListChecks, ScanSearch, Table2, type LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getExecutions, getRun, listRunArtifacts } from '../api/client.ts';
@@ -12,6 +12,7 @@ import { champion } from '../report/champion.ts';
 import { foldEvents, forkNote, humanize, nowLine, parseGateQuestion, parseRunView, switchedToAutomatic } from '../run/model.ts';
 import NodeInspector from '../run/NodeInspector.tsx';
 import ReportView from '../report/ReportView.tsx';
+import ValidationView from '../run/ValidationView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
 import RunHeader from '../run/RunHeader.tsx';
 import { errorText } from '../ui/format.ts';
@@ -21,7 +22,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
   const snapshot = useQuery({ queryKey: ['run', runId], queryFn: ({ signal }) => getRun(runId, signal) });
   const executions = useQuery({ queryKey: ['executions', runId], queryFn: ({ signal }) => getExecutions(runId, signal) });
   const artifacts = useQuery({ queryKey: ['artifacts', runId], queryFn: ({ signal }) => listRunArtifacts(runId, signal) });
-  const [tab, setTab] = useState<'progress' | 'candidates' | 'files' | 'report'>('progress');
+  const [tab, setTab] = useState<'progress' | 'candidates' | 'files' | 'report' | 'validation'>('progress');
   const subscribedId = snapshot.data?.run.id === runId ? runId : null;
   const stream = useRunEvents(subscribedId);
   const [pane, setPane] = useState<'chat' | 'side'>('chat');
@@ -63,6 +64,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
     { id: 'candidates' as const, label: `Candidates (${rows.length})`, Icon: Table2 as LucideIcon },
     { id: 'files' as const, label: `Files (${artifacts.data?.length ?? 0})`, Icon: FolderOpen as LucideIcon },
     { id: 'report' as const, label: 'Report', Icon: FileText as LucideIcon },
+    { id: 'validation' as const, label: 'Validation', Icon: ScanSearch as LucideIcon },
   ];
 
   return (
@@ -147,6 +149,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
                         : <ArtifactBrowser entries={artifacts.data} />
                   )}
                   {tab === 'report' && <ReportView run={data.run} view={view} />}
+                  {tab === 'validation' && <ValidationView runId={runId} view={view} />}
                 </div>
               </>
             )}

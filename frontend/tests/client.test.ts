@@ -8,6 +8,8 @@ import {
   parseArtifactEntries,
   parseArtifactPreview,
   previewArtifact,
+  getValidation,
+  parseValidationPage,
   answerGate,
   checkGateEdits,
   createProject,
@@ -477,4 +479,26 @@ test('assistantTurn POSTs messages and state', async () => {
     assert.equal(requests[0]?.input, '/api/assistant/turn');
     assert.equal(requests[0]?.init?.body, JSON.stringify({ messages, state }));
   });
+});
+
+test('getValidation builds the validation query and returns the parsed camelCase page', async () => {
+  const body = {
+    task: 'classification', total: 2, shown_total: 2, offset: 50, limit: 50, correct: 1,
+    mean_abs_error: null, threshold: 0.4, columns: ['x'],
+    rows: [{ row: 3, actual: 'a', predicted: 'b', confidence: 0.75, error: null, correct: false, values: { x: 1 } }],
+  };
+  await withFetch(body, async (requests) => {
+    const page = await getValidation('r1', { candidate: 'c_01', worstFirst: true, offset: 50, limit: 50 });
+    assert.equal(requests[0]?.input, '/api/runs/r1/validation?candidate=c_01&worst_first=true&offset=50&limit=50');
+    assert.equal(page.shownTotal, 2);
+    assert.equal(page.meanAbsError, null);
+    assert.deepEqual(page.rows[0], { row: 3, actual: 'a', predicted: 'b', confidence: 0.75, error: null, correct: false, values: { x: 1 } });
+  });
+});
+
+test('parseValidationPage rejects a bad task and a row whose values are not an object', () => {
+  const page = { task: 'regression', total: 0, shown_total: 0, offset: 0, limit: 50, rows: [], columns: [] };
+  assert.equal(parseValidationPage(page).task, 'regression');
+  assert.throws(() => parseValidationPage({ ...page, task: 'other' }), ApiError);
+  assert.throws(() => parseValidationPage({ ...page, rows: [{ row: 1, actual: 1, predicted: 1, confidence: null, error: 0, correct: null, values: 'x' }] }), ApiError);
 });

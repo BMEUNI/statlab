@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from types import TracebackType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import httpx2
 from jsonschema import Draft202012Validator, SchemaError
@@ -324,6 +324,30 @@ class McpClient:
             )
         return validated
 
+    async def _read_only(
+        self, tool: str, project: str, arguments: dict[str, JsonValue]
+    ) -> ToolSuccess:
+        if self._session is None:
+            raise EngineError("MCP client is not entered")
+        if get_project_by_slug(self.conn, project) is None:
+            raise EngineError(f"{tool} project does not exist")
+        spec = self.tools.get(tool)
+        if (
+            spec is None
+            or spec.phase != "artifacts"
+            or spec.allow_in != ("*",)
+            or spec.heavy
+            or spec.transform_only
+        ):
+            raise EngineError(f"{tool} registry metadata is invalid")
+        validated = await self._dispatch_direct(spec, arguments, read_timeout_seconds=60)
+        if validated.artifacts:
+            raise ToolCallError(
+                tool,
+                Failure(error_class="bug", message="read-only tool returned unexpected artifacts"),
+            )
+        return validated
+
     async def describe_artifact(
         self,
         *,
@@ -334,33 +358,49 @@ class McpClient:
         head_rows: int = 20,
     ) -> ToolSuccess:
         """Dispatch the read-only describe tool for a UI preview without run-scoped accounting."""
-        if self._session is None:
-            raise EngineError("MCP client is not entered")
-        if get_project_by_slug(self.conn, project) is None:
-            raise EngineError("describe project does not exist")
-        spec = self.tools.get("describe_artifact")
-        if (
-            spec is None
-            or spec.phase != "artifacts"
-            or spec.allow_in != ("*",)
-            or spec.heavy
-            or spec.transform_only
-        ):
-            raise EngineError("describe_artifact registry metadata is invalid")
-        arguments: dict[str, JsonValue] = {
-            "project": project,
-            "run": run,
-            "artifact": artifact,
-            "kind": kind,
-            "head_rows": head_rows,
-        }
-        validated = await self._dispatch_direct(spec, arguments, read_timeout_seconds=60)
-        if validated.artifacts:
-            raise ToolCallError(
-                "describe_artifact",
-                Failure(error_class="bug", message="describe tool returned unexpected artifacts"),
-            )
-        return validated
+        return await self._read_only(
+            "describe_artifact",
+            project,
+            {
+                "project": project,
+                "run": run,
+                "artifact": artifact,
+                "kind": kind,
+                "head_rows": head_rows,
+            },
+        )
+
+    async def validation_rows(
+        self,
+        *,
+        project: str,
+        run: str,
+        frame: str,
+        predictions: str,
+        target: str,
+        task: Literal["classification", "regression"],
+        threshold: float | None,
+        worst_first: bool,
+        offset: int,
+        limit: int,
+    ) -> ToolSuccess:
+        """Dispatch the read-only validation rows tool for the UI without run-scoped accounting."""
+        return await self._read_only(
+            "validation_rows",
+            project,
+            {
+                "project": project,
+                "run": run,
+                "frame": frame,
+                "predictions": predictions,
+                "target": target,
+                "task": task,
+                "threshold": threshold,
+                "worst_first": worst_first,
+                "offset": offset,
+                "limit": limit,
+            },
+        )
 
     async def call(
         self,

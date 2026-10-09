@@ -5,14 +5,17 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, JsonValue
 from statlab_contracts.artifacts import ArtifactKind, parse_artifact_ref
 from statlab_contracts.layout import RunPaths
 
 from statlab.api.projects import APIResources, ProjectsService
+from statlab.domains.candidate_pipeline import candidate_result
+from statlab.domains.foundation import problem_from_state, shared_result
 from statlab.errors import EngineError
 from statlab.graph.state import RunState
 from statlab.persistence.models import (
@@ -68,6 +71,7 @@ ARTIFACT_MEDIA: dict[ArtifactKind, str] = {
     "report": "text/markdown; charset=utf-8",
 }
 PLOT_NAME = re.compile(r"^a_[0-9a-f]{16}\.(?:png|chart\.json)\Z")
+NO_VALIDATION = "this model has no validation predictions yet"
 
 
 def _locked(artifact: ArtifactRow, run: RunRow) -> bool:
@@ -141,6 +145,49 @@ def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
             raise HTTPException(422, "preview supports dataframe and predictions artifacts")
         result = await resource.mcp.describe_artifact(
             project=paths.slug, run=row.run_id, artifact=row.id, kind=row.kind, head_rows=20
+        )
+        return result.summary
+
+    @router.get("/api/runs/{run_id}/validation")
+    async def validation(
+        run_id: str,
+        candidate: str,
+        worst_first: bool = False,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> dict[str, JsonValue]:
+        resource = resources()
+        run, paths = _run(resource, run_id)
+        state = _checkpoint(paths)
+        if state is None:
+            raise HTTPException(404, NO_VALIDATION)
+        branch = next((item for item in state.branches if item.public_id == candidate), None)
+        if branch is None:
+            raise HTTPException(404, "model not found")
+        try:
+            split = shared_result(state, "data_splitting").summary
+            evaluation = candidate_result(branch, "model_evaluation").summary
+            problem = problem_from_state(state)
+        except EngineError:
+            raise HTTPException(404, NO_VALIDATION) from None
+        source = evaluation.get(
+            "probabilities" if problem.task == "classification" else "predictions"
+        )
+        frame = split.get("valid")
+        if not isinstance(source, str) or not isinstance(frame, str):
+            raise HTTPException(404, NO_VALIDATION)
+        threshold = evaluation.get("threshold")
+        result = await resource.mcp.validation_rows(
+            project=paths.slug,
+            run=run.id,
+            frame=frame,
+            predictions=source,
+            target=problem.target,
+            task=problem.task,
+            threshold=threshold if isinstance(threshold, float) else None,
+            worst_first=worst_first,
+            offset=offset,
+            limit=limit,
         )
         return result.summary
 

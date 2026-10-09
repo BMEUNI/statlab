@@ -175,3 +175,24 @@ export type SetupState = {
 };
 export type ChatTurn = { role: 'user' | 'assistant'; text: string };
 export type AssistantReply = { reply: string; state: SetupState; start: boolean; issues: string[] };
+export type ValidationRow = {
+  row: JsonValue;
+  actual: JsonValue;
+  predicted: JsonValue;
+  confidence: number | null;
+  error: number | null;
+  correct: boolean | null;
+  values: JsonObject;
+};
+export type ValidationPage = {
+  task: 'classification' | 'regression';
+  total: number;
+  shownTotal: number;
+  offset: number;
+  limit: number;
+  correct: number | null;
+  meanAbsError: number | null;
+  threshold: number | null;
+  columns: string[];
+  rows: ValidationRow[];
+};

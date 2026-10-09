@@ -397,3 +397,9 @@ input[type="text"], input[type="number"], select, textarea { min-width: 0; }
 .messages.tail { margin-top: 14px; }
 .messages.tail:empty { display: none; }
 @media (max-width: 40rem) { .side-scroll { padding: 16px; } }
+
+.validation-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.chip[aria-pressed="true"] { border-color: var(--signal); color: var(--signal); }
+table.validation-table tr.miss td { background: var(--fault-soft); }
+table.validation-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pager { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

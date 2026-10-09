@@ -460,6 +460,133 @@ def score_classification(
     return ToolSuccess(summary=payload, artifacts=(meta,))
 
 
+@tool(phase="artifacts", allow_in=["*"])
+def validation_rows(
+    paths: RunPaths,
+    frame: Annotated[
+        ArtifactRef, Field(description="The validation split frame with the original columns.")
+    ],
+    predictions: Annotated[
+        ArtifactRef,
+        Field(
+            description="Class probabilities (classification) or predictions (regression) on the "
+            "validation split."
+        ),
+    ],
+    target: Annotated[str, Field(min_length=1, description="The target column.")],
+    task: Annotated[Literal["classification", "regression"], Field(description="The run's task.")],
+    threshold: Annotated[
+        float | None, Field(gt=0, lt=1, description="Binary p(positive)>=threshold, as scored.")
+    ] = None,
+    worst_first: Annotated[
+        bool,
+        Field(
+            description="Classification: only mistakes, most confident first; regression: largest "
+            "absolute error first."
+        ),
+    ] = False,
+    offset: Annotated[int, Field(ge=0, description="Rows to skip.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=200, description="Rows to return.")] = 50,
+) -> ToolSuccess:
+    """One page of validation rows joined to a model's predictions by label: actual, predicted,
+    confidence (classification) or error (regression) and the original columns. Hard classes
+    follow `score_classification` (argmax, or binary p(positive) >= threshold). Read-only;
+    validation split only (D32).
+    """
+    data = load_dataframe(paths.artifact(frame, "dataframe"))
+    if target not in data.columns:
+        raise ToolParamError(
+            "target is not a column of the frame",
+            field_errors={"target": "not in the validation frame"},
+        )
+    preds = load_dataframe(paths.artifact(predictions, "predictions"))
+    keep = preds.index[preds.index.isin(data.index)]
+    preds = preds.loc[keep]
+    data = data.loc[keep]
+    n = len(keep)
+    truth = data[target]
+    features = [str(c) for c in data.columns if c != target]
+
+    actual: list[str] = []
+    predicted: list[str] = []
+    if task == "classification":
+        cols = proba_columns(preds)
+        classes = class_labels(cols)
+        if threshold is not None and len(classes) != 2:
+            raise ToolParamError(
+                "threshold is binary only; this target has more than two classes",
+                field_errors={"threshold": "not applicable to a multiclass target"},
+            )
+        positive, _ = _positive_class(snapshot(paths), classes)
+        proba = preds[cols].to_numpy(dtype="float64")
+        codes = _hard_codes(proba, classes.index(positive), threshold)
+        predicted = [classes[int(c)] for c in codes]
+        confidence = proba[np.arange(n), codes]
+        actual = as_str(truth).tolist()
+        correct = np.array([a == p for a, p in zip(actual, predicted, strict=True)], dtype=bool)
+        actual_out: list[JsonValue] = list(actual)
+        predicted_out: list[JsonValue] = list(predicted)
+        confidence_out: list[JsonValue] = [round(float(v), 4) for v in confidence]
+        error_out: list[JsonValue] = [None] * n
+        correct_out: list[JsonValue] = [bool(v) for v in correct]
+        eligible = ~correct
+        badness: np.ndarray = confidence
+        correct_count: int | None = int(correct.sum())
+        mean_abs_error: float | None = None
+    else:
+        if "prediction" not in preds.columns:
+            raise ToolParamError(
+                "predictions need a prediction column",
+                field_errors={"predictions": "no prediction column"},
+            )
+        predicted_num = preds["prediction"].to_numpy(dtype="float64")
+        actual_num = pd.to_numeric(truth, errors="coerce").to_numpy(dtype="float64")
+        error = predicted_num - actual_num
+        actual_out = [json_scalar(v) for v in truth]
+        predicted_out = [json_scalar(float(v)) for v in predicted_num]
+        confidence_out = [None] * n
+        error_out = [json_scalar(float(v)) for v in error]
+        correct_out = [None] * n
+        eligible = np.ones(n, dtype=bool)
+        badness = np.abs(error)
+        correct_count = None
+        finite = np.abs(error[np.isfinite(error)])
+        mean_abs_error = float(finite.mean()) if finite.size else None
+
+    order = np.arange(n)
+    if worst_first:
+        chosen = np.flatnonzero(eligible)
+        order = chosen[np.argsort(-badness[chosen], kind="stable")]
+    page = order[offset : offset + limit]
+
+    rows: list[JsonValue] = []
+    for i in page:
+        row: dict[str, JsonValue] = {
+            "row": json_scalar(keep[i]),
+            "actual": actual_out[i],
+            "predicted": predicted_out[i],
+            "confidence": confidence_out[i],
+            "error": error_out[i],
+            "correct": correct_out[i],
+            "values": {c: json_scalar(data[c].iloc[i]) for c in features},
+        }
+        rows.append(row)
+
+    summary: dict[str, JsonValue] = {
+        "task": task,
+        "total": n,
+        "shown_total": len(order),
+        "offset": offset,
+        "limit": limit,
+        "correct": correct_count,
+        "mean_abs_error": mean_abs_error,
+        "threshold": threshold,
+        "columns": list(features),
+        "rows": rows,
+    }
+    return ToolSuccess(summary=summary)
+
+
 # --- 3.1 score_regression --------------------------------------------------------------------
 
 
