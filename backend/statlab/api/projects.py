@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    ValidationError,
+)
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
@@ -50,6 +57,7 @@ from statlab.persistence.repository import (
     list_datasets,
     list_projects,
     list_runs,
+    rename_project,
     runs_switched_to_autonomous,
 )
 
@@ -74,18 +82,26 @@ def _profile(summary: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: summary.get(key) for key in _PROFILE_KEYS}
 
 
+def _not_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("name must not be whitespace only")
+    return value
+
+
+ProjectName = Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_not_blank)]
+
+
 class ProjectCreate(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     slug: str = Field(pattern=PROJECT_SLUG_PATTERN)
-    name: str = Field(min_length=1, max_length=200)
+    name: ProjectName
 
-    @field_validator("name")
-    @classmethod
-    def _name_not_whitespace(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("name must not be whitespace only")
-        return value
+
+class ProjectRename(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: ProjectName
 
 
 class ProjectDetail(BaseModel):
@@ -479,6 +495,27 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
             switched_runs=runs_switched_to_autonomous(resource.conn, project.id),
             memory=read_memory(resource.conn, project.id),
         )
+
+    @router.patch("/api/projects/{project_id}", response_model=ProjectRow)
+    async def rename(project_id: str, body: ProjectRename) -> ProjectRow:
+        resource = resources()
+        service = ProjectsService(resource)
+        project = service.project(project_id)
+        paths = service.paths(project)
+        row = rename_project(resource.conn, project.id, body.name)
+        try:
+            fd, tmp_name = tempfile.mkstemp(dir=paths.root)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(row.model_dump_json().encode("utf-8"))
+                Path(tmp_name).replace(paths.project_json)
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
+        except OSError:
+            raise HTTPException(
+                500, "project was renamed but metadata could not be written"
+            ) from None
+        return row
 
     @router.get("/api/projects/{project_id}/datasets", response_model=tuple[DatasetRow, ...])
     async def datasets(project_id: str) -> tuple[DatasetRow, ...]:

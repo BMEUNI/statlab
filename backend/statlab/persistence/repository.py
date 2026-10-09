@@ -196,6 +196,12 @@ def list_projects(conn: sqlite3.Connection) -> tuple[ProjectRow, ...]:
     return tuple(ProjectRow.model_validate(dict(row)) for row in rows)
 
 
+def rename_project(conn: sqlite3.Connection, project_id: str, name: str) -> ProjectRow:
+    with transaction(conn):
+        conn.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+    return require_project(conn, project_id)
+
+
 # --- datasets ------------------------------------------------------------------------------
 
 

@@ -1063,6 +1063,66 @@ async def test_project_creation_conflicts_and_metadata_write_failure(
 
 
 @pytest.mark.asyncio
+async def test_rename_project_updates_row_list_and_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        root = ProjectPaths(settings.data_dir, "demo").root
+        names_before = {item.name for item in root.iterdir()}
+        renamed = await client.patch(f"/api/projects/{project['id']}", json={"name": "Churn study"})
+        assert renamed.status_code == 200
+        body = renamed.json()
+        assert body["name"] == "Churn study"
+        assert body["slug"] == "demo"
+        assert body["id"] == project["id"]
+        assert body["created_at"] == project["created_at"]
+        listed = await client.get("/api/projects")
+        assert [item["name"] for item in listed.json()] == ["Churn study"]
+        metadata = json.loads(ProjectPaths(settings.data_dir, "demo").project_json.read_text())
+        assert metadata["name"] == "Churn study"
+        assert {item.name for item in root.iterdir()} == names_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["blank", "long", "slug", "missing"])
+async def test_rename_project_rejects_bad_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, _, _, project):
+        if case == "missing":
+            missing = await client.patch("/api/projects/p_doesnotexist", json={"name": "A"})
+            assert missing.status_code == 404
+            return
+        bodies: dict[str, dict[str, str]] = {
+            "blank": {"name": "   "},
+            "long": {"name": "x" * 201},
+            "slug": {"name": "A", "slug": "other"},
+        }
+        project_path = f"/api/projects/{project['id']}"
+        rejected = await client.patch(project_path, json=bodies[case])
+        assert rejected.status_code == 422
+        detail = await client.get(project_path)
+        assert detail.json()["project"]["name"] == "Demo"
+
+
+@pytest.mark.asyncio
+async def test_rename_project_metadata_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        root = ProjectPaths(settings.data_dir, "demo").root
+        root.chmod(0o500)
+        try:
+            failed = await client.patch(
+                f"/api/projects/{project['id']}", json={"name": "Churn study"}
+            )
+        finally:
+            root.chmod(0o700)
+        assert failed.status_code == 500
+        assert failed.json()["detail"] == "project was renamed but metadata could not be written"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["slug", "escape"])
 async def test_stored_project_path_corruption_returns_500(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str

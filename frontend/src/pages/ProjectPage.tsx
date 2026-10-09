@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { getProject, listContracts, listDatasets } from '../api/client.ts';
+import { useState, type FormEvent } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Pencil } from 'lucide-react';
+import { getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
 import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
 import RunComparison from '../project/RunComparison.tsx';
@@ -26,13 +27,74 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
 
   const [selected, setSelected] = useState<string[]>([]);
   const [comparing, setComparing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const queryClient = useQueryClient();
+
+  const rename = useMutation({
+    mutationFn: (name: string) => renameProject(projectId, name),
+    onSuccess: async () => {
+      setRenaming(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+      ]);
+    },
+  });
+
+  function submitRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    rename.mutate(draftName.trim());
+  }
 
   return (
     <>
       {project.isSuccess && (
         <div className="page-head">
           <div>
-            <h1>{project.data.project.name}</h1>
+            {renaming ? (
+              <>
+                <form className="rename-form" onSubmit={submitRename}>
+                  <input
+                    type="text"
+                    aria-label="Project name"
+                    value={draftName}
+                    maxLength={200}
+                    autoFocus
+                    onChange={(e) => setDraftName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setRenaming(false);
+                    }}
+                  />
+                  <button
+                    type="submit"
+                    className="primary"
+                    disabled={rename.isPending || draftName.trim() === '' || draftName.trim() === project.data.project.name}
+                  >
+                    Save
+                  </button>
+                  <button type="button" onClick={() => setRenaming(false)}>Cancel</button>
+                </form>
+                {rename.isError && <p role="alert">{errorText(rename.error)}</p>}
+              </>
+            ) : (
+              <div className="title-row">
+                <h1>{project.data.project.name}</h1>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Rename project"
+                  title="Rename project"
+                  onClick={() => {
+                    setDraftName(project.data.project.name);
+                    rename.reset();
+                    setRenaming(true);
+                  }}
+                >
+                  <Pencil size={18} aria-hidden="true" />
+                </button>
+              </div>
+            )}
             <p className="secondary-line">{project.data.project.slug}</p>
           </div>
           <button type="button" className="primary" onClick={() => navigate({ name: 'setup', projectId })}>New run</button>

@@ -18,6 +18,7 @@ import {
   runFileUrl,
   isJsonValue,
   listProjects,
+  renameProject,
   parseContractCheck,
   parseControlReply,
   parseExecutions,
@@ -187,6 +188,16 @@ test('createProject POSTs JSON', async () => {
     assert.equal(requests[0]?.input, '/api/projects');
     assert.equal(requests[0]?.init?.method, 'POST');
     assert.equal(requests[0]?.init?.body, JSON.stringify({ slug: 'sample', name: 'Sample' }));
+    assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), 'application/json');
+  });
+});
+
+test('renameProject PATCHes the name', async () => {
+  await withFetch(project, async (requests) => {
+    assert.deepEqual(await renameProject('p1', 'Sample'), project);
+    assert.equal(requests[0]?.input, '/api/projects/p1');
+    assert.equal(requests[0]?.init?.method, 'PATCH');
+    assert.equal(requests[0]?.init?.body, JSON.stringify({ name: 'Sample' }));
     assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), 'application/json');
   });
 });

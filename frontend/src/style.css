@@ -59,6 +59,10 @@ html, body, #root { height: 100%; }
 .page { max-width: 72rem; margin: 0 auto; padding: 24px; }
 .secondary-line { color: var(--graphite); }
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.title-row { display: flex; align-items: center; gap: 8px; }
+.title-row h1 { margin: 0; }
+.rename-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rename-form input { font-size: 1.25rem; min-width: min(20rem, 100%); }
 
 .panel { padding: 16px; margin: 16px 0; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--surface); }
