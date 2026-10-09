@@ -230,6 +230,13 @@ def rename_project(
     return require_project(conn, project_id)
 
 
+def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
+    """Delete a project; its datasets, contracts, runs, sessions and memory go with it
+    (ON DELETE CASCADE, chunk 66)."""
+    with transaction(conn):
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+
 def has_open_runs(conn: sqlite3.Connection, project_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM runs WHERE project_id = ? AND status IN ('pending', 'running', "

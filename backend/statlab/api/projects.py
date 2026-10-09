@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
@@ -49,6 +50,7 @@ from statlab.persistence.repository import (
     create_contract,
     create_dataset,
     create_project,
+    delete_project,
     find_dataset_by_hash,
     get_dataset,
     get_project,
@@ -563,6 +565,20 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
                 500, "project was renamed but metadata could not be written"
             ) from None
         return row
+
+    @router.delete("/api/projects/{project_id}", status_code=204)
+    async def delete(project_id: str) -> Response:
+        resource = resources()
+        service = ProjectsService(resource)
+        project = service.project(project_id)
+        paths = service.paths(project)
+        if has_open_runs(resource.conn, project.id):
+            raise HTTPException(409, "stop or finish this project's open runs before deleting it")
+        delete_project(resource.conn, project.id)
+        shutil.rmtree(paths.root, ignore_errors=True)
+        if os.path.lexists(paths.root):
+            raise HTTPException(500, "project was deleted but its folder could not be removed")
+        return Response(status_code=204)
 
     @router.get("/api/projects/{project_id}/datasets", response_model=tuple[DatasetRow, ...])
     async def datasets(project_id: str) -> tuple[DatasetRow, ...]:

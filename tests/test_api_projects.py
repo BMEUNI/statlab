@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from collections import deque
@@ -1221,6 +1222,101 @@ async def test_rename_project_db_failure_moves_folder_back(
         assert ProjectPaths(settings.data_dir, "demo").root.is_dir()
         if case == "moved":
             assert not ProjectPaths(settings.data_dir, "churn-study").root.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_project_removes_rows_and_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        assert uploaded.status_code == 201
+        root = ProjectPaths(settings.data_dir, "demo").root
+        _seed_run(settings.db_path, str(project["id"]), root, "completed")
+        _write(
+            settings.db_path,
+            "INSERT INTO memory (id, project_id, key, value_json, source_run_id, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("m_seed", str(project["id"]), "k", "{}", "r_seed", "2026-01-01T00:00:00Z"),
+        )
+        created = await client.post("/api/projects", json={"slug": "other", "name": "Other"})
+        assert created.status_code == 201
+        deleted = await client.delete(f"/api/projects/{project['id']}")
+        assert deleted.status_code == 204
+        assert deleted.content == b""
+        assert not root.exists()
+        assert ProjectPaths(settings.data_dir, "other").root.is_dir()
+        missing = await client.get(f"/api/projects/{project['id']}")
+        assert missing.status_code == 404
+        listed = await client.get("/api/projects")
+        assert [item["name"] for item in listed.json()] == ["Other"]
+        connection = sqlite3.connect(settings.db_path)
+        try:
+            counts = connection.execute(
+                "SELECT (SELECT count(*) FROM datasets), (SELECT count(*) FROM contracts), "
+                "(SELECT count(*) FROM runs), (SELECT count(*) FROM artifacts), "
+                "(SELECT count(*) FROM memory)"
+            ).fetchone()
+            assert tuple(counts) == (0, 0, 0, 0, 0)
+        finally:
+            connection.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_project_refused_with_open_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        root = ProjectPaths(settings.data_dir, "demo").root
+        _seed_run(settings.db_path, str(project["id"]), root, "running")
+        refused = await client.delete(f"/api/projects/{project['id']}")
+        assert refused.status_code == 409
+        assert (
+            refused.json()["detail"] == "stop or finish this project's open runs before deleting it"
+        )
+        assert root.is_dir()
+        kept = await client.get(f"/api/projects/{project['id']}")
+        assert kept.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_delete_missing_project_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, _, _, _):
+        missing = await client.delete("/api/projects/p_doesnotexist")
+        assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_project_with_missing_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        shutil.rmtree(ProjectPaths(settings.data_dir, "demo").root)
+        deleted = await client.delete(f"/api/projects/{project['id']}")
+        assert deleted.status_code == 204
+        missing = await client.get(f"/api/projects/{project['id']}")
+        assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_project_folder_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, _, project):
+        settings.data_dir.chmod(0o500)
+        try:
+            failed = await client.delete(f"/api/projects/{project['id']}")
+        finally:
+            settings.data_dir.chmod(0o700)
+        assert failed.status_code == 500
+        assert failed.json()["detail"] == "project was deleted but its folder could not be removed"
+        missing = await client.get(f"/api/projects/{project['id']}")
+        assert missing.status_code == 404
 
 
 @pytest.mark.asyncio

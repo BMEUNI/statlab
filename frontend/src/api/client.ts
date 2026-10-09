@@ -406,7 +406,7 @@ function abortError(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError');
 }
 
-type RequestOptions = { method: 'GET' | 'POST' | 'PATCH'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined; text?: boolean };
+type RequestOptions = { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined; text?: boolean };
 
 async function request(path: string, options: RequestOptions): Promise<unknown> {
   const { method, json, form, signal, text } = options;
@@ -481,6 +481,10 @@ export async function getProject(projectId: string, signal?: AbortSignal): Promi
 
 export async function renameProject(projectId: string, name: string): Promise<ProjectSummary> {
   return parseProjectRow(await request(projectPath(projectId), { method: 'PATCH', json: { name } }));
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await request(projectPath(projectId), { method: 'DELETE', text: true });
 }
 
 export async function listDatasets(projectId: string, signal?: AbortSignal): Promise<DatasetRecord[]> {

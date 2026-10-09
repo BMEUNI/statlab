@@ -13,6 +13,7 @@ import {
   createProject,
   createRun,
   datasetQuery,
+  deleteProject,
   getRun,
   getRunFile,
   runFileUrl,
@@ -193,6 +194,22 @@ test('createProject POSTs JSON', async () => {
     assert.equal(requests[0]?.init?.body, JSON.stringify({ slug: 'sample', name: 'Sample' }));
     assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), 'application/json');
   });
+});
+
+test('deleteProject sends DELETE', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Recorded[] = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ input, init });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal(await deleteProject('p1'), undefined);
+    assert.equal(requests[0]?.input, '/api/projects/p1');
+    assert.equal(requests[0]?.init?.method, 'DELETE');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('renameProject PATCHes the name', async () => {

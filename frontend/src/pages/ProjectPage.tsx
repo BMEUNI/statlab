@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pencil } from 'lucide-react';
-import { ApiError, getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
+import { Pencil, Trash } from 'lucide-react';
+import { ApiError, deleteProject, getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
 import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
 import RunComparison from '../project/RunComparison.tsx';
@@ -39,6 +39,15 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
         queryClient.invalidateQueries({ queryKey: ['project', projectId] }),
         queryClient.invalidateQueries({ queryKey: ['projects'] }),
       ]);
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => deleteProject(projectId),
+    onSuccess: async () => {
+      queryClient.removeQueries({ queryKey: ['project', projectId] });
+      await queryClient.invalidateQueries({ queryKey: ['projects'] });
+      navigate({ name: 'projects' });
     },
   });
 
@@ -100,9 +109,28 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
                 >
                   <Pencil size={18} aria-hidden="true" />
                 </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Delete project"
+                  title="Delete project"
+                  disabled={remove.isPending}
+                  onClick={() => {
+                    if (window.confirm(`Delete "${project.data.project.name}" with all its runs, datasets and files? This cannot be undone.`)) remove.mutate();
+                  }}
+                >
+                  <Trash size={18} aria-hidden="true" />
+                </button>
               </div>
             )}
             <p className="secondary-line">{project.data.project.slug}</p>
+            {remove.isError && (
+              <p role="alert">
+                {remove.error instanceof ApiError && remove.error.status === 409
+                  ? 'Stop or finish this project’s open runs before deleting it.'
+                  : errorText(remove.error)}
+              </p>
+            )}
           </div>
           <button type="button" className="primary" onClick={() => navigate({ name: 'setup', projectId })}>New run</button>
         </div>
