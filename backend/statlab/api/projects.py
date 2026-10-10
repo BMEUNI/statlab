@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -32,6 +33,7 @@ from statlab_contracts.contract import DataContract, DatasetOptions, TargetSpec
 from statlab_contracts.layout import ProjectPaths
 
 from statlab.api.access import CurrentUser, manages
+from statlab.budgets import person_block
 from statlab.config import Settings
 from statlab.errors import EngineError, PersistenceError
 from statlab.llm.client import DecisionRejectedError, LlmClient
@@ -716,7 +718,12 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         response_model=ContractProposal,
         response_model_exclude_unset=True,
     )
-    async def propose_contract(project_id: str, body: ContractProposalRequest) -> ContractProposal:
+    async def propose_contract(
+        project_id: str, body: ContractProposalRequest, user: CurrentUser
+    ) -> ContractProposal:
+        blocked = person_block(resources().conn, user, datetime.now(UTC))
+        if blocked is not None:
+            raise HTTPException(402, blocked)
         return await ProjectsService(resources()).propose(project_id, body)
 
     @router.get("/api/projects/{project_id}/datasets/{dataset_id}/profile")

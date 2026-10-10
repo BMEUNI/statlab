@@ -15,9 +15,12 @@ from statlab.persistence.accounts import (
     get_user_by_email,
     list_member_projects,
     list_members,
+    list_users,
     member_role,
     remove_member,
     session_user,
+    set_owner,
+    update_user,
 )
 from statlab.persistence.repository import create_contract, create_project, create_run
 from statlab_contracts.contract import DataContract, TargetSpec
@@ -152,3 +155,39 @@ def test_auth_sessions_expire_and_respect_disabled(migrated_db: sqlite3.Connecti
     assert count[0] == 0
     migrated_db.execute("UPDATE users SET disabled = 1 WHERE id = ?", (user.id,))
     assert session_user(migrated_db, "t1") is None
+
+
+def test_admin_account_updates(migrated_db: sqlite3.Connection) -> None:
+    a = create_user(migrated_db, email="a@example.test", name="A", password_hash="h")  # noqa: S106 -- test value, not a real credential
+    b = create_user(migrated_db, email="b@example.test", name="B", password_hash="h")  # noqa: S106 -- test value, not a real credential
+    assert a is not None
+    assert b is not None
+    assert [u.id for u in list_users(migrated_db)] == [a.id, b.id]
+    create_auth_session(
+        migrated_db,
+        token_hash="tb",  # noqa: S106 -- test value, not a real credential
+        user_id=b.id,
+        expires_at="2999-01-01T00:00:00+00:00",
+    )
+    update_user(migrated_db, b.id, is_admin=True, disabled=False, monthly_limit_usd=2.5)
+    updated = get_user(migrated_db, b.id)
+    assert updated is not None
+    assert updated.is_admin
+    assert updated.monthly_limit_usd == 2.5
+    assert session_user(migrated_db, "tb") is not None
+    update_user(migrated_db, b.id, is_admin=True, disabled=True, monthly_limit_usd=2.5)
+    count = migrated_db.execute(
+        "SELECT count(*) FROM auth_sessions WHERE user_id = ?", (b.id,)
+    ).fetchone()
+    assert count[0] == 0
+    project = create_project(migrated_db, slug="owned", name="Owned", owner_id=a.id)
+    set_owner(migrated_db, project.id, b.id)
+    assert {m.user_id: m.role for m in list_members(migrated_db, project.id)} == {
+        a.id: "member",
+        b.id: "owner",
+    }
+    set_owner(migrated_db, project.id, a.id)
+    assert {m.user_id: m.role for m in list_members(migrated_db, project.id)} == {
+        a.id: "owner",
+        b.id: "member",
+    }

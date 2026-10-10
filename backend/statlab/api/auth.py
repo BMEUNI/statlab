@@ -21,6 +21,7 @@ from statlab.auth import (
     token_digest,
     verify_password,
 )
+from statlab.budgets import Meter, month_start, person_meter, read_settings
 from statlab.persistence.accounts import (
     MemberRow,
     UserRow,
@@ -135,6 +136,8 @@ def auth_router(resources: Callable[[], APIResources]) -> APIRouter:
     @router.post("/api/auth/register", status_code=201, response_model=AuthUser)
     async def register(body: RegisterRequest, response: Response) -> AuthUser:
         resource = resources()
+        if not read_settings(resource.conn).signup_open and count_users(resource.conn) > 0:
+            raise HTTPException(403, "sign-up is closed; ask an admin for an account")
         encoded = await asyncio.to_thread(hash_password, body.password)
         user = create_user(resource.conn, email=body.email, name=body.name, password_hash=encoded)
         if user is None:
@@ -181,7 +184,15 @@ def auth_router(resources: Callable[[], APIResources]) -> APIRouter:
 
     @router.get("/api/auth/config", response_model=AuthConfig)
     async def config() -> AuthConfig:
-        return AuthConfig(signup_open=True, has_users=count_users(resources().conn) > 0)
+        conn = resources().conn
+        return AuthConfig(
+            signup_open=read_settings(conn).signup_open, has_users=count_users(conn) > 0
+        )
+
+    @router.get("/api/auth/budget", response_model=Meter)
+    async def my_budget(user: CurrentUser) -> Meter:
+        conn = resources().conn
+        return person_meter(conn, user, read_settings(conn), month_start(datetime.now(UTC)))
 
     return router
 

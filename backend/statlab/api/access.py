@@ -48,6 +48,8 @@ def authorize(request: Request, conn: sqlite3.Connection) -> None:
     if user is None:
         raise HTTPException(401, "sign in first")
     request.state.user = user
+    if path.startswith("/api/admin/") and not user.is_admin:
+        raise HTTPException(403, "admins only")
     if user.is_admin:
         return
     params = request.path_params

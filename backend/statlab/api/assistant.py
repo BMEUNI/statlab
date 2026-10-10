@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -26,6 +27,7 @@ from statlab.api.projects import (
     unique_slug,
     validation_issues,
 )
+from statlab.budgets import person_block
 from statlab.errors import LlmOutputError
 from statlab.llm.client import DecisionRejectedError
 from statlab.persistence.accounts import UserRow, list_member_projects
@@ -353,6 +355,9 @@ def assistant_router(resources: Callable[[], APIResources]) -> APIRouter:
 
     @router.post("/api/assistant/turn", response_model=AssistantReply)
     async def turn(body: AssistantRequest, user: CurrentUser) -> AssistantReply:
+        blocked = person_block(resources().conn, user, datetime.now(UTC))
+        if blocked is not None:
+            raise HTTPException(402, blocked)
         return await SetupAssistant(resources(), user).turn(body)
 
     return router

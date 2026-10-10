@@ -180,3 +180,40 @@ def list_member_projects(conn: sqlite3.Connection, user_id: str) -> tuple[Projec
         (user_id,),
     ).fetchall()
     return tuple(ProjectRow.model_validate(dict(row)) for row in rows)
+
+
+def list_users(conn: sqlite3.Connection) -> tuple[UserRow, ...]:
+    rows = conn.execute("SELECT * FROM users ORDER BY created_at, email").fetchall()
+    return tuple(UserRow.model_validate(dict(row)) for row in rows)
+
+
+def update_user(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    is_admin: bool,
+    disabled: bool,
+    monthly_limit_usd: float | None,
+) -> None:
+    with transaction(conn):
+        conn.execute(
+            "UPDATE users SET is_admin = ?, disabled = ?, monthly_limit_usd = ? WHERE id = ?",
+            (1 if is_admin else 0, 1 if disabled else 0, monthly_limit_usd, user_id),
+        )
+        if disabled:
+            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+
+
+def set_owner(conn: sqlite3.Connection, project_id: str, user_id: str) -> None:
+    """The previous owner stays as a member."""
+    with transaction(conn):
+        conn.execute(
+            "UPDATE project_members SET role = 'member' WHERE project_id = ? AND role = 'owner'",
+            (project_id,),
+        )
+        conn.execute(
+            "INSERT INTO project_members (id, project_id, user_id, role, added_at) "
+            "VALUES (?, ?, ?, 'owner', ?) ON CONFLICT(project_id, user_id) DO "
+            "UPDATE SET role = 'owner'",
+            (new_id("pm"), project_id, user_id, utc_now()),
+        )

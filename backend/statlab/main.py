@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from statlab.api.access import authorize
+from statlab.api.admin import admin_router
 from statlab.api.assistant import assistant_router
 from statlab.api.auth import auth_router, members_router
 from statlab.api.inspect import inspect_router
@@ -126,6 +127,7 @@ def create_app(
     app.include_router(projects_router(resources))
     app.include_router(auth_router(resources))
     app.include_router(members_router(resources))
+    app.include_router(admin_router(resources))
     app.include_router(assistant_router(resources))
     app.include_router(inspect_router(resources))
     app.include_router(runs_router(registry))

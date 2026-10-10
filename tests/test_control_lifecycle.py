@@ -425,3 +425,32 @@ async def test_anchor_after_all_candidates_failed_uses_failed_branch(
     anchor = await service.audit_anchor()
     assert anchor.node_name == "fit"
     assert anchor.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_budget_guard_pauses_at_next_check(engine_world: World) -> None:
+    nodes = (node(), node("beta"))
+    blocked = [False]
+    control = RunControl()
+    control.guard = lambda: blocked[0]
+    calls = 0
+
+    async def work(invocation: NodeInvocation) -> NodeResult:
+        nonlocal calls
+        calls += 1
+        control.check()
+        if calls == 1:
+            blocked[0] = True
+        return NodeResult(status="completed")
+
+    loop = engine_world.loop(nodes, work)
+    loop.control = control
+    service = RunLifecycle(loop, engine_world.initial(nodes))
+    paused = await service.start()
+    assert paused.status == "paused"
+    assert paused.cursor == 1
+    assert control.status == "paused"
+    blocked[0] = False
+    resumed = await service.resume()
+    assert resumed.status == "completed"
+    assert calls == 3

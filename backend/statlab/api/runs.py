@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
@@ -34,6 +35,7 @@ from statlab.api.projects import (
     require_complete,
     validation_issues,
 )
+from statlab.budgets import RunBudget, run_budget, start_block
 from statlab.domains.base import NodeSpec
 from statlab.domains.binding import RunBinding, bind_tabular
 from statlab.domains.tabular import SETTING_OWNERS, TABULAR_DOMAIN
@@ -58,6 +60,7 @@ from statlab.graph.state import RunState, SpineEntry
 from statlab.llm.routing import check_provider_environment
 from statlab.llm.skills import load_run_skill, snapshot_skill
 from statlab.memory import read_memory
+from statlab.persistence.accounts import UserRow
 from statlab.persistence.models import ContractRow, GateRow, MemoryRow, RunMode, RunRow
 from statlab.persistence.repository import (
     create_message,
@@ -374,6 +377,10 @@ class RunRegistry:
             resolver=resolver,
             lockfile_path=lockfile,
         )
+        run_id = row.id
+        result.loop.control.guard = lambda: (
+            run_budget(self.resources.conn, run_id, datetime.now(UTC)).blocked is not None
+        )
         self.bindings[row.id] = result
         return result
 
@@ -385,6 +392,16 @@ class RunRegistry:
             return self.binding(row)
         except ViewOnlyRunError:
             raise HTTPException(409, VIEW_ONLY) from None
+
+    def _budget_gate(self, run_id: str) -> None:
+        blocked = run_budget(self.resources.conn, run_id, datetime.now(UTC)).blocked
+        if blocked is not None:
+            raise HTTPException(402, blocked)
+
+    def budget(self, run_id: str) -> RunBudget:
+        if get_run(self.resources.conn, run_id) is None:
+            raise HTTPException(404, "run not found")
+        return run_budget(self.resources.conn, run_id, datetime.now(UTC))
 
     def events(self, run_id: str) -> EventBus:
         """The run's event log; a view-only run's log is read without binding it (chunk 63)."""
@@ -521,9 +538,12 @@ class RunRegistry:
         ):
             await asyncio.shield(task)
 
-    async def create(self, project_id: str, body: RunCreate, *, started_by: str) -> RunAccepted:
+    async def create(self, project_id: str, body: RunCreate, *, user: UserRow) -> RunAccepted:
         async with self.mutation():
             project = self.projects.project(project_id)
+            blocked = start_block(self.resources.conn, project.id, user, datetime.now(UTC))
+            if blocked is not None:
+                raise HTTPException(402, blocked)
             contract_row = get_contract(self.resources.conn, body.contract_id)
             if contract_row is None or contract_row.project_id != project.id:
                 raise HTTPException(404, "contract not found")
@@ -566,7 +586,7 @@ class RunRegistry:
                 mode=body.mode,
                 config_json=config.model_dump_json(),
                 status="cancelled",
-                started_by=started_by,
+                started_by=user.id,
             )
             paths = RunPaths(self.resources.settings.data_dir, project.slug, row.id)
             paths.root.mkdir(parents=True, exist_ok=False)
@@ -634,6 +654,8 @@ class RunRegistry:
     async def control(self, run_id: str, body: ControlRequest) -> ControlResponse | ForkAccepted:
         async with self.mutation():
             binding = self.run(run_id)
+            if body.action in ("resume", "rewind"):
+                self._budget_gate(run_id)
             await binding.lifecycle.audit_anchor()
             try:
                 if body.action == "resume":
@@ -661,6 +683,7 @@ class RunRegistry:
     async def answer(self, run_id: str, gate_id: str, body: GateSubmission) -> ControlResponse:
         async with self.mutation():
             binding = self.run(run_id)
+            self._budget_gate(run_id)
             gate = get_gate(self.resources.conn, gate_id)
             if gate is None or gate.run_id != run_id:
                 raise HTTPException(404, "gate not found")
@@ -737,6 +760,7 @@ class RunRegistry:
     async def message(self, run_id: str, body: ControlText) -> ControlResponse:
         async with self.mutation():
             binding = self.run(run_id)
+            self._budget_gate(run_id)
             await self._settle_gate_task(binding)
             run_row = require_run(self.resources.conn, run_id)
             config = RunConfig.model_validate_json(run_row.config_json)
@@ -865,7 +889,11 @@ def runs_router(registry: Callable[[], RunRegistry]) -> APIRouter:
     async def create_run_endpoint(
         project_id: str, body: RunCreate, user: CurrentUser
     ) -> RunAccepted:
-        return await registry().create(project_id, body, started_by=user.id)
+        return await registry().create(project_id, body, user=user)
+
+    @router.get("/api/runs/{run_id}/budget", response_model=RunBudget)
+    async def budget_endpoint(run_id: str) -> RunBudget:
+        return registry().budget(run_id)
 
     @router.get("/api/runs/{run_id}", response_model=RunSnapshot)
     async def snapshot_endpoint(run_id: str) -> RunSnapshot:

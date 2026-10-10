@@ -600,3 +600,419 @@ mypy on the 21 owned Python files exit 0; no type ignores or `Any`. Deviations a
 diff against sections 1-14 (guard order: CSRF, public path, session, admin bypass, membership
 404 mirroring the missing-entity texts). `make check` (`check71a.log`, temporary) exit 0:
 coverage 100 % (TOTAL 13048 stmts, 0 missed), mypy 208 files, Ruff clean.
+
+## Stage 71b (detailed spec) — budgets, enforcement, admin API, change owner
+
+Prerequisite: stage 71a accepted (`5460ebd`). Owned files (new): `backend/statlab/budgets.py`,
+`backend/statlab/api/admin.py`, `tests/test_budgets.py`, `tests/test_api_admin.py`. Owned
+files (edit): `backend/statlab/persistence/accounts.py`, `backend/statlab/graph/candidates.py`,
+`backend/statlab/api/access.py`, `backend/statlab/api/auth.py`,
+`backend/statlab/api/runs.py`, `backend/statlab/api/projects.py`,
+`backend/statlab/api/assistant.py`, `backend/statlab/main.py`, `tests/test_accounts.py`,
+`tests/test_control_lifecycle.py`, `tests/test_api_auth.py`, `integration/driver.py`,
+`integration/run_scenarios.py`. Not alone: preserve others' edits.
+
+### 1. `persistence/accounts.py` additions
+
+- `def list_users(conn) -> tuple[UserRow, ...]` — `SELECT * FROM users ORDER BY created_at, email`.
+- `def update_user(conn, user_id: str, *, is_admin: bool, disabled: bool, monthly_limit_usd:
+  float | None) -> None` — one transaction: `UPDATE users SET is_admin = ?, disabled = ?,
+  monthly_limit_usd = ? WHERE id = ?` (bools as `1 if x else 0`); if `disabled`: `DELETE FROM
+  auth_sessions WHERE user_id = ?`.
+- `def set_owner(conn, project_id: str, user_id: str) -> None` — docstring "The previous owner
+  stays as a member." One transaction: `UPDATE project_members SET role = 'member' WHERE
+  project_id = ? AND role = 'owner'`; then `INSERT INTO project_members (id, project_id,
+  user_id, role, added_at) VALUES (?, ?, ?, 'owner', ?) ON CONFLICT(project_id, user_id) DO
+  UPDATE SET role = 'owner'` with `new_id("pm")`, `utc_now()`.
+
+### 2. `budgets.py` (new, `backend/statlab/budgets.py`)
+
+Docstring: "Spend and budget limits (chunk 71). Spend is llm_calls.cost_usd; a run counts
+against the person who started it." Imports `sqlite3`, `datetime`, pydantic `BaseModel`,
+`ConfigDict`, `Field`; `transaction`; accounts `UserRow`, `get_user`; repository
+`require_run`; models `RunRow`.
+
+Models (`ConfigDict(frozen=True, extra="forbid")`):
+- `AdminSettings`: `default_monthly_limit_usd: float | None = Field(default=None, ge=0,
+  le=1_000_000)`, `default_project_limit_usd` and `default_run_limit_usd` the same,
+  `signup_open: bool = True`.
+- `Meter`: `spent_usd: float`, `limit_usd: float | None`.
+- `RunBudget`: `run: Meter`, `project: Meter`, `person: Meter`, `started_by: str | None` (the
+  starter's name), `blocked: str | None`.
+
+Functions:
+- `read_settings(conn) -> AdminSettings` — `SELECT value_json FROM app_settings WHERE id =
+  'admin'`; no row -> `AdminSettings()`; else `AdminSettings.model_validate_json(row[0])`.
+- `write_settings(conn, settings: AdminSettings) -> None` — one transaction: `INSERT INTO
+  app_settings (id, value_json) VALUES ('admin', ?) ON CONFLICT(id) DO UPDATE SET value_json =
+  excluded.value_json` with `settings.model_dump_json()`.
+- `month_start(now: datetime) -> str` — `f"{now:%Y-%m}-01"` (stored timestamps are ISO text,
+  so `ts >= "YYYY-MM-01"` selects the month).
+- `spend_since(conn, since: str) -> float` — `SELECT COALESCE(SUM(cost_usd), 0.0) FROM llm_calls
+  WHERE ts >= ?`; wrap in `float(...)`. `""` means all time.
+- `run_spend(conn, run_id) -> float` — `... FROM llm_calls WHERE run_id = ?`.
+- `project_spend(conn, project_id) -> float` — `SELECT COALESCE(SUM(l.cost_usd), 0.0) FROM
+  llm_calls l JOIN runs r ON r.id = l.run_id WHERE r.project_id = ?`.
+- `person_spend(conn, user_id, since: str) -> float` — `SELECT COALESCE(SUM(l.cost_usd), 0.0)
+  FROM llm_calls l JOIN run_budgets b ON b.id = l.run_id WHERE b.started_by = ? AND l.ts >= ?`.
+- `project_limits(conn, project_id) -> tuple[float | None, float | None]` — `SELECT limit_usd,
+  run_limit_usd FROM project_budgets WHERE id = ?`; no row -> `(None, None)`.
+- `run_limit(conn, run_id) -> float | None` — `SELECT limit_usd FROM run_budgets WHERE id =
+  ?`; no row -> None.
+- `set_project_limits(conn, project_id, *, limit_usd: float | None, run_limit_usd: float |
+  None) -> None` — one transaction: `INSERT INTO project_budgets (id, limit_usd, run_limit_usd)
+  VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET limit_usd = excluded.limit_usd, run_limit_usd
+  = excluded.run_limit_usd`.
+- `set_run_limit(conn, run_id, limit_usd: float | None) -> None` — one transaction: `INSERT
+  INTO run_budgets (id, started_by, limit_usd) VALUES (?, NULL, ?) ON CONFLICT(id) DO UPDATE
+  SET limit_usd = excluded.limit_usd`.
+- `recent_runs(conn, limit: int) -> tuple[RunRow, ...]` — `SELECT * FROM runs ORDER BY
+  started_at DESC, id LIMIT ?`.
+- `_first(*values: float | None) -> float | None` — `next((v for v in values if v is not
+  None), None)`.
+- `_usd(value: float) -> str` — `f"${value:,.2f}"`.
+- `_block(meter: Meter, subject: str) -> str | None` — `limit = meter.limit_usd`; if `limit is
+  None or meter.spent_usd < limit`: return None; return `f"{subject} ({_usd(meter.spent_usd)}
+  of {_usd(limit)})."`.
+- `person_meter(conn, user: UserRow, settings: AdminSettings, since: str) -> Meter` —
+  `Meter(spent_usd=person_spend(conn, user.id, since), limit_usd=_first(user.monthly_limit_usd,
+  settings.default_monthly_limit_usd))`.
+- `project_meter(conn, project_id, settings) -> Meter` — `limit, _ = project_limits(...)`;
+  `Meter(spent_usd=project_spend(...), limit_usd=_first(limit,
+  settings.default_project_limit_usd))`.
+- `run_budget(conn, run_id: str, now: datetime) -> RunBudget` — `run = require_run(conn,
+  run_id)`; `settings = read_settings(conn)`; `row = conn.execute("SELECT started_by FROM
+  run_budgets WHERE id = ?", (run_id,)).fetchone()`; `starter = get_user(conn,
+  row["started_by"]) if row is not None and row["started_by"] is not None else None`; `_,
+  project_run_limit = project_limits(conn, run.project_id)`; `run_meter =
+  Meter(spent_usd=run_spend(conn, run_id), limit_usd=_first(run_limit(conn, run_id),
+  project_run_limit, settings.default_run_limit_usd))`; `project = project_meter(conn,
+  run.project_id, settings)`; `person = person_meter(conn, starter, settings,
+  month_start(now)) if starter is not None else Meter(spent_usd=0.0, limit_usd=None)`;
+  `blocked = _block(run_meter, "This run has used its budget") or _block(project, "This
+  project has used its budget") or _block(person, "The person who started this run has used
+  this month's budget")`; return `RunBudget(run=run_meter, project=project, person=person,
+  started_by=starter.name if starter is not None else None, blocked=blocked)`.
+- `start_block(conn, project_id: str, user: UserRow, now: datetime) -> str | None` —
+  `settings`; `_, project_run_limit = project_limits(...)`; return `_block(Meter(spent_usd=0.0,
+  limit_usd=_first(project_run_limit, settings.default_run_limit_usd)), "New runs here have no
+  budget") or _block(project_meter(conn, project_id, settings), "This project has used its
+  budget") or person_block(conn, user, now)`.
+- `person_block(conn, user: UserRow, now: datetime) -> str | None` — `_block(person_meter(conn,
+  user, read_settings(conn), month_start(now)), "You have used this month's budget")`.
+
+### 3. `graph/candidates.py` `RunControl`
+
+- `__init__`: add `self.guard: Callable[[], bool] | None = None` with a comment "Budget guard
+  (chunk 71): True pauses the run at this check." (`Callable` is already imported in this
+  module; if not, add it to the existing `collections.abc` import.)
+- `check`: before the existing `if`, add `if self.status is None and self.guard is not None and
+  self.guard(): self._pause = True`. The existing raise stays.
+
+### 4. `api/access.py`
+
+In `authorize`, directly after `request.state.user = user`: if `path.startswith("/api/admin/")
+and not user.is_admin`: raise `HTTPException(403, "admins only")`.
+
+### 5. `api/runs.py`
+
+- Imports: `datetime`, `UTC`; `run_budget`, `start_block`, `RunBudget` from
+  `statlab.budgets`; `UserRow` from accounts.
+- `RunRegistry.binding`: directly after `result = bind_tabular(...)` and before
+  `self.bindings[row.id] = result`: `run_id = row.id`; `result.loop.control.guard = lambda:
+  run_budget(self.resources.conn, run_id, datetime.now(UTC)).blocked is not None`.
+- New method `def _budget_gate(self, run_id: str) -> None` — `blocked =
+  run_budget(self.resources.conn, run_id, datetime.now(UTC)).blocked`; if not None: raise
+  `HTTPException(402, blocked)`.
+- `create(self, project_id, body, *, user: UserRow)`: after `project =
+  self.projects.project(project_id)`: `blocked = start_block(self.resources.conn, project.id,
+  user, datetime.now(UTC))`; if not None: raise `HTTPException(402, blocked)`; pass
+  `started_by=user.id` to `create_run`. Route passes `user=user`.
+- `message`: directly after `binding = self.run(run_id)`: `self._budget_gate(run_id)`.
+- `answer`: directly after `binding = self.run(run_id)`: `self._budget_gate(run_id)`.
+- `control`: directly after `binding = self.run(run_id)`: if `body.action in ("resume",
+  "rewind")`: `self._budget_gate(run_id)`.
+- New method `def budget(self, run_id: str) -> RunBudget` — `get_run` None -> 404 "run not
+  found"; return `run_budget(self.resources.conn, run_id, datetime.now(UTC))`. Route
+  `@router.get("/api/runs/{run_id}/budget", response_model=RunBudget)` `async def
+  budget_endpoint(run_id: str) -> RunBudget: return registry().budget(run_id)`.
+
+### 6. `api/projects.py` and `api/assistant.py`
+
+- `propose_contract(project_id, body, user: CurrentUser)`: first `blocked =
+  person_block(resources().conn, user, datetime.now(UTC))`; if not None: raise
+  `HTTPException(402, blocked)`.
+- Assistant route `turn(body, user)`: same check before `SetupAssistant(...)`.
+
+### 7. `api/auth.py`
+
+- `register`: first statements: `resource = resources()`; if `not
+  read_settings(resource.conn).signup_open and count_users(resource.conn) > 0`: raise
+  `HTTPException(403, "sign-up is closed; ask an admin for an account")`. Then as before.
+- `config`: `conn = resources().conn`; `AuthConfig(signup_open=read_settings(conn).signup_open,
+  has_users=count_users(conn) > 0)`.
+- New `@router.get("/api/auth/budget", response_model=Meter)` `async def my_budget(user:
+  CurrentUser) -> Meter`: `conn = resources().conn`; return `person_meter(conn, user,
+  read_settings(conn), month_start(datetime.now(UTC)))`.
+
+### 8. `api/admin.py` (new)
+
+Docstring: "Admin panel API: people, projects, runs, budgets and defaults (chunk 71). The
+access guard admits admins only." Models (`frozen`, `extra="forbid"`):
+- `AdminUser`: `id`, `email`, `name`, `is_admin: bool`, `disabled: bool`, `created_at`,
+  `last_login_at: str | None`, `monthly_limit_usd: float | None` (override), `month: Meter`,
+  `total_spent_usd: float`, `projects: int`, `runs: int`.
+- `AdminProject`: `id`, `name`, `slug`, `created_at`, `owner_id: str | None`, `owner_name: str |
+  None`, `owner_email: str | None`, `members: int`, `runs: int`, `budget: Meter`, `limit_usd:
+  float | None`, `run_limit_usd: float | None`, `effective_run_limit_usd: float | None`.
+- `AdminRun`: `id`, `project_id`, `project_name`, `status: RunStatus`, `started_at`,
+  `limit_usd: float | None` (override), `budget: RunBudget`.
+- `AdminOverview`: `month: str`, `month_spent_usd: float`, `total_spent_usd: float`, `users:
+  int`, `admins: int`, `disabled_users: int`, `projects: int`, `runs: int`, `open_runs: int`,
+  `blocked_runs: tuple[AdminRun, ...]`, `settings: AdminSettings`.
+- `_LIMIT = Field(default=None, ge=0, le=1_000_000)` style per field:
+  `UserPatch`: `is_admin: bool = False`, `disabled: bool = False`, `monthly_limit_usd: float |
+  None = Field(default=None, ge=0, le=1_000_000)`. `ProjectPatch`: `limit_usd`,
+  `run_limit_usd` (same Field). `RunPatch`: `limit_usd: float | None = Field(ge=0,
+  le=1_000_000)` (required, null clears). `OwnerChange`: `email: str = Field(max_length=254)`
+  with a validator returning `value.strip().lower()`.
+- `_OPEN = ("pending", "running", "awaiting_user", "paused")`.
+
+Helpers (`conn` first argument):
+- `_count(conn, sql: str, params: tuple[str, ...] = ()) -> int` — `int(conn.execute(sql,
+  params).fetchone()[0])`.
+- `_admin_user(conn, user, settings, since) -> AdminUser` — `month=person_meter(...)`,
+  `total_spent_usd=person_spend(conn, user.id, "")`, `projects=_count(conn, "SELECT count(*)
+  FROM project_members WHERE user_id = ?", (user.id,))`, `runs=_count(conn, "SELECT count(*)
+  FROM run_budgets WHERE started_by = ?", (user.id,))`, other fields copied.
+- `_admin_project(conn, project: ProjectRow, settings) -> AdminProject` — `owner =
+  conn.execute("SELECT u.id, u.name, u.email FROM project_members pm JOIN users u ON u.id =
+  pm.user_id WHERE pm.project_id = ? AND pm.role = 'owner'", (project.id,)).fetchone()`;
+  `limit, run_limit = project_limits(...)`; `owner_id/owner_name/owner_email = owner[...] if
+  owner is not None else None`; `members=_count(... project_members WHERE project_id = ?)`,
+  `runs=_count(... runs WHERE project_id = ?)`, `budget=project_meter(...)`,
+  `effective_run_limit_usd=_first(run_limit, settings.default_run_limit_usd)` (import `_first`
+  is private: instead compute `run_limit if run_limit is not None else
+  settings.default_run_limit_usd`).
+- `_admin_run(conn, run: RunRow, now) -> AdminRun` — `project_name=require_project(conn,
+  run.project_id).name`, `limit_usd=run_limit(conn, run.id)`, `budget=run_budget(conn, run.id,
+  now)`.
+
+`def admin_router(resources: Callable[[], APIResources]) -> APIRouter`:
+- `GET /api/admin/overview` -> `AdminOverview`: `now = datetime.now(UTC)`; open runs =
+  `recent_runs(conn, 1_000_000)` filtered by `status in _OPEN`; `blocked_runs` = their
+  `_admin_run` where `budget.blocked is not None`; `month=f"{now:%Y-%m}"`;
+  `month_spent_usd=spend_since(conn, month_start(now))`; `total_spent_usd=spend_since(conn,
+  "")`; counts: users, `... WHERE is_admin = 1`, `... WHERE disabled = 1`, projects, runs;
+  `open_runs=len(open)`; `settings=read_settings(conn)`.
+- `GET /api/admin/users` -> `tuple[AdminUser, ...]` over `list_users`.
+- `PATCH /api/admin/users/{user_id}` (`body: UserPatch`, `me: CurrentUser`) -> `AdminUser`:
+  `target = get_user(conn, user_id)`; None -> 404 "user not found"; `fields =
+  body.model_fields_set`; if `target.id == me.id and (("is_admin" in fields and not
+  body.is_admin) or ("disabled" in fields and body.disabled))`: 409 "you cannot remove your own
+  admin rights or disable your own account"; `update_user(conn, target.id,
+  is_admin=body.is_admin if "is_admin" in fields else target.is_admin, disabled=body.disabled
+  if "disabled" in fields else target.disabled, monthly_limit_usd=body.monthly_limit_usd if
+  "monthly_limit_usd" in fields else target.monthly_limit_usd)`; return `_admin_user(conn,
+  get_user(...) re-read, settings, month_start(now))` (re-read with `get_user`; it exists).
+- `GET /api/admin/projects` -> over `list_projects(conn)`.
+- `PATCH /api/admin/projects/{project_id}` (`ProjectPatch`) -> `AdminProject`: `project =
+  ProjectsService(resource).project(project_id)` (404 "project not found"); `limit, run_limit =
+  project_limits(...)`; merge by `model_fields_set` as above; `set_project_limits`; return.
+- `PUT /api/admin/projects/{project_id}/owner` (`OwnerChange`) -> `AdminProject`: project as
+  above; `target = get_user_by_email`; None -> 404 "no account uses this email";
+  `set_owner(conn, project.id, target.id)`; return.
+- `GET /api/admin/runs` with `limit: Annotated[int, Query(ge=1, le=500)] = 100` ->
+  `tuple[AdminRun, ...]` over `recent_runs(conn, limit)`.
+- `PATCH /api/admin/runs/{run_id}` (`RunPatch`) -> `AdminRun`: `run = get_run(...)`; None ->
+  404 "run not found"; `set_run_limit(conn, run.id, body.limit_usd)`; return `_admin_run`.
+- `GET /api/admin/settings` -> `AdminSettings`; `PUT /api/admin/settings` (`body:
+  AdminSettings`) -> `write_settings`; return `read_settings(conn)`.
+
+`main.py`: `app.include_router(admin_router(resources))` after the members router.
+
+### 9. Integration harness
+
+- `integration/driver.py` `Driver`: new `async def sign_in(self) -> None` — sets
+  `self.client.headers["X-Statlab-Csrf"] = "1"`; credentials `HARNESS_EMAIL =
+  "harness@example.test"`, `HARNESS_NAME = "Harness"`, `HARNESS_PASSWORD =
+  "harness-password-0"` (module constants); `response = await self._call("POST",
+  "/api/auth/register", expected={201, 409}, json={"email": ..., "name": ..., "password":
+  ...})`; if `response.status_code == 409`: `await self._call("POST", "/api/auth/login",
+  expected={200}, json={"email": ..., "password": ...})`.
+- `integration/run_scenarios.py`: directly after `driver = Driver(...)`: `await
+  driver.sign_in()`.
+
+### 10. Tests
+
+`tests/test_accounts.py` add `test_admin_account_updates`: users `a` (admin) and `b`;
+`list_users(conn) == (a, b)` by id order of creation (compare ids); session for `b`;
+`update_user(conn, b.id, is_admin=True, disabled=False, monthly_limit_usd=2.5)` -> `get_user`
+shows `is_admin`, limit 2.5, session still resolves; `update_user(..., disabled=True, ...)` ->
+session count for `b` is 0. Project owned by `a` (`create_project(owner_id=a.id)`):
+`set_owner(conn, project.id, b.id)` -> roles `{a.id: "member", b.id: "owner"}`;
+`set_owner(conn, project.id, a.id)` -> `{a.id: "owner", b.id: "member"}`.
+
+`tests/test_control_lifecycle.py` add `test_budget_guard_pauses_at_next_check(engine_world)`:
+`nodes = (node(), node("beta"))`; `blocked = [False]`; `control = RunControl()`;
+`control.guard = lambda: blocked[0]`; `calls = 0`; `work`: `calls += 1`; `control.check()`;
+if `calls == 1`: `blocked[0] = True`; return completed. `loop = engine_world.loop(nodes,
+work)`; `loop.control = control`; `service = RunLifecycle(loop, engine_world.initial(nodes))`;
+`paused = await service.start()`: `status == "paused"`, `cursor == 1`, `control.status ==
+"paused"`; `blocked[0] = False`; `resumed = await service.resume()`: `status ==
+"completed"`; `calls == 3`.
+
+`tests/test_budgets.py` (`migrated_db`; `now = datetime(2026, 10, 10, tzinfo=UTC)`):
+1. `test_settings_round_trip`: default equals `AdminSettings()`; write
+   `AdminSettings(default_monthly_limit_usd=5.0, signup_open=False)` -> read equals; write
+   `AdminSettings()` -> read equals `AdminSettings()`.
+2. `test_run_budget_limits_and_messages`: user `a` (`name="A"`); project with `owner_id`;
+   contract; `run = create_run(..., started_by=a.id)`; `execution =
+   create_node_execution(migrated_db, run_id=run.id, node_name="data_profiling", seq=1)`;
+   `record_llm_call(..., cost_usd=0.5, ts="2026-10-05T00:00:00+00:00")` and
+   `record_llm_call(..., cost_usd=0.25, ts="2026-09-30T23:00:00+00:00")` (signature "s", model
+   "m", tokens 0, duration 1). Assertions in order:
+   - `month_start(now) == "2026-10-01"`; `spend_since(..., "2026-10-01") == 0.5`;
+     `spend_since(..., "") == 0.75`.
+   - `run_budget(conn, run.id, now) == RunBudget(run=Meter(spent_usd=0.75, limit_usd=None),
+     project=Meter(spent_usd=0.75, limit_usd=None), person=Meter(spent_usd=0.5,
+     limit_usd=None), started_by="A", blocked=None)`.
+   - write settings `default_run_limit_usd=0.75` -> `.blocked == "This run has used its
+     budget ($0.75 of $0.75)."`.
+   - `set_project_limits(..., limit_usd=None, run_limit_usd=1.0)` -> `.blocked is None` and
+     `.run.limit_usd == 1.0`.
+   - `set_run_limit(conn, run.id, 0.5)` -> `.blocked == "This run has used its budget ($0.75 of
+     $0.50)."`; `run_limit(conn, run.id) == 0.5`.
+   - `set_run_limit(conn, run.id, None)`; `set_project_limits(..., limit_usd=0.75,
+     run_limit_usd=None)`; write `AdminSettings()` -> `.blocked == "This project has used its
+     budget ($0.75 of $0.75)."`; `project_limits(...) == (0.75, None)`.
+   - `set_project_limits(..., None, None)`; `update_user(conn, a.id, is_admin=True,
+     disabled=False, monthly_limit_usd=0.5)`; `user = get_user(conn, a.id)` -> `.blocked ==
+     "The person who started this run has used this month's budget ($0.50 of $0.50)."`;
+     `person_block(conn, user, now) == "You have used this month's budget ($0.50 of $0.50)."`;
+     `start_block(conn, project.id, user, now)` equals the same "You have..." text.
+   - `update_user(..., monthly_limit_usd=None)`; `start_block(...) is None`;
+     `set_project_limits(..., limit_usd=None, run_limit_usd=0.0)` -> `start_block(...) == "New
+     runs here have no budget ($0.00 of $0.00)."`; `set_project_limits(..., limit_usd=0.75,
+     run_limit_usd=None)` -> `start_block(...) == "This project has used its budget ($0.75 of
+     $0.75)."`.
+   - Raw run `r_raw` (raw INSERT as in test_accounts, started_at `2026-01-01T00:00:00+00:00`,
+     no run_budgets row): `run_budget(conn, "r_raw", now).started_by is None` and `.person ==
+     Meter(spent_usd=0.0, limit_usd=None)`; `run_limit(conn, "r_raw") is None`;
+     `[r.id for r in recent_runs(conn, 10)] == [run.id, "r_raw"]`; `len(recent_runs(conn, 1))
+     == 1`.
+
+New tests go in `tests/test_api_admin.py` (imports `_open_project_api`, `_seed_run`, `_write` from
+`tests.test_api_projects`; `_open_run_api`, `_create_run`, `_gate` from `tests.test_api_runs`;
+`_open_assistant_api` is not needed; `sign_in` from `tests.auth_support`):
+1. `test_admin_routes_need_admin`: `_open_project_api`; `sign_in(client, "bob@example.test",
+   "Bob")`; `GET /api/admin/overview` -> 403 `{"detail": "admins only"}`.
+2. `test_admin_settings_close_signup`: owner: `GET /api/admin/settings` == `{
+   "default_monthly_limit_usd": None, "default_project_limit_usd": None,
+   "default_run_limit_usd": None, "signup_open": True}`; `PUT` with `{"default_monthly_limit_usd":
+   5, "default_project_limit_usd": None, "default_run_limit_usd": 1, "signup_open": False}` ->
+   200, body equals it with floats `5.0`, `1.0`; `GET /api/auth/config` -> `signup_open`
+   False; `PUT` with `default_run_limit_usd: -1` -> 422; `client.cookies.clear()`; register
+   `new@example.test` -> 403 `{"detail": "sign-up is closed; ask an admin for an account"}`.
+3. `test_admin_users_patch`: `bob = await sign_in(client, "bob@example.test", "Bob")`; `owner =
+   await sign_in(client)`; `GET /api/admin/users` -> 2 rows, first `email ==
+   "owner@example.test"` and `is_admin`, Bob row `month == {"spent_usd": 0.0, "limit_usd":
+   None}`, `projects == 0`, `runs == 0`, `total_spent_usd == 0.0`, owner row `projects == 1`.
+   `PATCH /api/admin/users/{bob}` `{"monthly_limit_usd": 2.5}` -> 200, `monthly_limit_usd ==
+   2.5`, `month["limit_usd"] == 2.5`, `is_admin` False; `{"is_admin": True}` -> `is_admin`
+   True and `monthly_limit_usd` still 2.5; `{"disabled": True}` -> `disabled` True and `SELECT
+   count(*) FROM auth_sessions WHERE user_id = ?` (bob, via `sqlite3.connect(settings.db_path)`
+   closed in `finally`) is 0. Self: `{"is_admin": False}` and `{"disabled": True}` -> each 409
+   `{"detail": "you cannot remove your own admin rights or disable your own account"}`;
+   `{"monthly_limit_usd": 1}` -> 200. `PATCH /api/admin/users/u_missing` `{}` -> 404
+   `{"detail": "user not found"}`. `GET /api/auth/budget` -> `{"spent_usd": 0.0, "limit_usd":
+   1.0}`.
+4. `test_admin_projects_and_owner`: `bob = await sign_in(client, "bob@example.test", "Bob")`;
+   `await sign_in(client)`; `GET /api/admin/projects` -> one row: `owner_name == "Owner"`,
+   `owner_email == "owner@example.test"`, `members == 1`, `runs == 0`, `budget ==
+   {"spent_usd": 0.0, "limit_usd": None}`, `limit_usd`, `run_limit_usd`,
+   `effective_run_limit_usd` all None. `PATCH .../{demo}` `{"limit_usd": 3}` -> `limit_usd ==
+   3.0`, `budget["limit_usd"] == 3.0`; `{"run_limit_usd": 0.5}` -> `limit_usd == 3.0`,
+   `run_limit_usd == 0.5`, `effective_run_limit_usd == 0.5`; `{"limit_usd": None}` ->
+   `limit_usd` None, `run_limit_usd == 0.5`. `PUT .../{demo}/owner` `{"email": "
+   BOB@example.test "}` -> `owner_name == "Bob"`, `members == 2`; `GET
+   /api/projects/{demo}/members` roles by email `{"bob@example.test": "owner",
+   "owner@example.test": "member"}`. `PUT .../owner` `{"email": "nobody@example.test"}` -> 404
+   `{"detail": "no account uses this email"}`; `PATCH /api/admin/projects/p_missing` `{}` and
+   `PUT /api/admin/projects/p_missing/owner` -> 404 `{"detail": "project not found"}`.
+5. `test_admin_runs_overview_and_run_budget`: `_seed_run(settings.db_path, demo, root,
+   "completed")`; `ts = datetime.now(UTC).isoformat()`; `_write` `INSERT INTO node_executions
+   (id, run_id, node_name, seq, attempt, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)` with
+   `("ne_seed", "r_seed", "data_profiling", "1", "1", "completed", ts)`; `_write` `INSERT INTO
+   llm_calls (id, run_id, node_execution_id, signature, model, prompt_tokens,
+   completion_tokens, cached_tokens, cost_usd, duration_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+   ?, ?, ?)` with `("lc_seed", "r_seed", "ne_seed", "s", "m", "0", "0", "0", "0.75", "1", ts)`.
+   `GET /api/admin/runs` -> one row: `id == "r_seed"`, `project_name == "Demo"`, `status ==
+   "completed"`, `limit_usd` None, `budget["run"] == {"spent_usd": 0.75, "limit_usd": None}`,
+   `budget["started_by"] is None` (`r_seed` is inserted after sign-in with no run_budgets
+   row),
+   `budget["blocked"]` None. `PATCH /api/admin/runs/r_seed` `{"limit_usd": 0.5}` ->
+   `limit_usd == 0.5`, `budget["blocked"] == "This run has used its budget ($0.75 of
+   $0.50)."`; `GET /api/runs/r_seed/budget` -> same `blocked`; `PATCH
+   /api/admin/runs/r_missing` `{"limit_usd": 1}` -> 404 `{"detail": "run not found"}`; `GET
+   /api/runs/r_0123456789abcdef/budget` -> 404; `GET /api/admin/runs?limit=0` -> 422. `GET
+   /api/admin/overview` -> `users == 1`, `admins == 1`, `disabled_users == 0`, `projects ==
+   1`, `runs == 1`, `open_runs == 0`, `blocked_runs == []`, `month_spent_usd == 0.75`,
+   `total_spent_usd == 0.75`, `month == datetime.now(UTC).strftime("%Y-%m")`, `settings`
+   equals the defaults dict. `_write` `UPDATE runs SET status = ? WHERE id = ?` `("paused",
+   "r_seed")` -> overview `open_runs == 1`, `[r["id"] for r in blocked_runs] == ["r_seed"]`.
+6. `test_budget_refusals` (`_open_run_api(tmp_path, monkeypatch, records=FixtureRecords())` —
+   import `FixtureRecords` from `tests.test_api_runs`): `created = await _create_run(api)`;
+   `run_id = str(created.json()["run_id"])`; `gate = await _gate(api, run_id)`; `PUT
+   /api/admin/settings` `{"default_monthly_limit_usd": None, "default_project_limit_usd":
+   None, "default_run_limit_usd": 0, "signup_open": True}` -> 200;
+   `api.registry.bindings[run_id].loop.control.guard` is not None and returns True. Each of
+   these returns 402 `{"detail": "This run has used its budget ($0.00 of $0.00)."}`: `POST
+   /api/runs/{run_id}/messages` `{"text": "hi"}`; `POST /api/runs/{run_id}/gates/{gate.id}`
+   `{"action": "approve"}`; `POST /api/runs/{run_id}/control` `{"action": "resume"}`; same with
+   `{"action": "rewind", "target": "data_profiling", "request_id": "req-1"}`. `GET
+   /api/runs/{run_id}/budget` -> `blocked` equals that text. `POST
+   /api/projects/{api.project_id}/runs` (same body `_create_run` sends) -> 402 `{"detail":
+   "New runs here have no budget ($0.00 of $0.00)."}`. Then `PUT` settings with
+   `default_run_limit_usd: None, default_monthly_limit_usd: 0` -> `POST /api/assistant/turn`
+   `{"messages": [{"role": "user", "text": "hi"}]}`, `POST
+   /api/projects/{api.project_id}/contracts/propose` `{"dataset_id": api.dataset_id,
+   "contract": {"target": {"column": "b"}}}` and the run POST each -> 402 `{"detail": "You
+   have used this month's budget ($0.00 of $0.00)."}`; `POST /api/runs/{run_id}/messages` ->
+   402 `{"detail": "The person who started this run has used this month's budget ($0.00 of
+   $0.00)."}`.
+
+### Checks (implementer, in order; stop and report on any failure)
+
+1. `make test-fast TESTS="tests/test_budgets.py tests/test_accounts.py tests/test_api_admin.py
+   tests/test_api_auth.py tests/test_control_lifecycle.py"`
+2. `make test-fast TESTS="tests/test_api_runs.py tests/test_api_projects.py
+   tests/test_api_assistant.py tests/test_api_stream.py tests/test_candidate_fanout.py
+   tests/test_control_recovery.py"`
+3. Ruff check, Ruff format --check and mypy on every owned Python file (including
+   `integration/driver.py` and `integration/run_scenarios.py`).
+4. `.venv/bin/python -m integration.run_scenarios --llm offline --only S01 S07` (offline, no
+   cost); report exit, PASS/FAIL rows and the output folder.
+
+Stop conditions as in 71a. Main then: review, `make check`, then stage 71c's spec.
+
+### Addendum 71b-A (no re-read after the user patch)
+
+`PATCH /api/admin/users/{user_id}`: do not re-read with `get_user`. Compute the merged values,
+build `updated = target.model_copy(update={"is_admin": ..., "disabled": ...,
+"monthly_limit_usd": ...})`, call `update_user(conn, target.id, is_admin=updated.is_admin,
+disabled=updated.disabled, monthly_limit_usd=updated.monthly_limit_usd)`, and return
+`_admin_user(conn, updated, settings, month_start(now))`. Accepted placement choices: budget
+route before `GET /api/runs/{run_id}`; `PUT .../p_missing/owner` body `{"email":
+"bob@example.test"}`. Rerun Check 3, then Check 4.
+
+### Stage 71b receipt (2026-10-10)
+
+Implementer (after addendum A): check 1 (budgets, accounts, admin API, auth API, lifecycle)
+exit 0; check 2 (runs, projects, assistant, stream, fan-out, recovery) exit 0, 224 passed;
+Ruff check/format and mypy on the 17 owned files exit 0; offline S01 and S07 exit 0, PASS
+25/25 and 11/11 (`integration/out/20261010T080829Z-offline`, harness signs in). Main reviewed
+the diff (guard in `RunControl.check`, 402 gates on create/message/answer/resume/rewind,
+propose and assistant, admin-only prefix, signup switch, change owner keeps the old owner as a
+member). `make check` (`check71b.log`, temporary) exit 0: coverage 100 % (TOTAL                                               13367      0   3740      0   100%), mypy
+212 files, Ruff clean.

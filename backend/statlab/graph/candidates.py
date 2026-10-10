@@ -81,6 +81,8 @@ class RunControl:
     def __init__(self) -> None:
         self._pause = False
         self._cancel = False
+        # Budget guard (chunk 71): True pauses the run at this check.
+        self.guard: Callable[[], bool] | None = None
 
     def request_pause(self) -> None:
         self._pause = True
@@ -98,6 +100,8 @@ class RunControl:
         return "cancelled" if self._cancel else "paused" if self._pause else None
 
     def check(self) -> None:
+        if self.status is None and self.guard is not None and self.guard():
+            self._pause = True
         if self.status is not None:
             raise BoundaryStopError(self.status)
 

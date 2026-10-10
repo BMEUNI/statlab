@@ -22,6 +22,9 @@ from integration.model import Action, GateRule, Scenario
 
 TERMINAL = {"completed", "failed", "cancelled", "superseded"}
 _ANY_STATUS = set(range(100, 600))
+HARNESS_EMAIL = "harness@example.test"
+HARNESS_NAME = "Harness"
+HARNESS_PASSWORD = "harness-password-0"  # noqa: S105 - harness-only credential
 
 
 class HarnessError(Exception):
@@ -124,6 +127,22 @@ class Driver:
 
     async def close(self) -> None:
         await self.client.aclose()
+
+    async def sign_in(self) -> None:
+        self.client.headers["X-Statlab-Csrf"] = "1"
+        response = await self._call(
+            "POST",
+            "/api/auth/register",
+            expected={201, 409},
+            json={"email": HARNESS_EMAIL, "name": HARNESS_NAME, "password": HARNESS_PASSWORD},
+        )
+        if response.status_code == 409:
+            await self._call(
+                "POST",
+                "/api/auth/login",
+                expected={200},
+                json={"email": HARNESS_EMAIL, "password": HARNESS_PASSWORD},
+            )
 
     async def _call(
         self,
