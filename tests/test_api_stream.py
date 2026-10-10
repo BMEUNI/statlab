@@ -178,6 +178,7 @@ async def _drive_request(
     path: str,
     headers: list[tuple[bytes, bytes]],
     *,
+    session: str,
     query_string: bytes = b"",
 ) -> tuple[asyncio.Task[None], asyncio.Event, asyncio.Queue[Message]]:
     messages: asyncio.Queue[Message] = asyncio.Queue()
@@ -207,7 +208,7 @@ async def _drive_request(
         "path": path,
         "raw_path": path.encode(),
         "query_string": query_string,
-        "headers": headers,
+        "headers": [*headers, (b"cookie", f"statlab_session={session}".encode())],
     }
 
     async def invoke() -> None:
@@ -237,6 +238,7 @@ async def test_sse_route_replays_and_disconnects(
                 api.app,
                 f"/api/runs/{run_id}/events",
                 [(b"last-event-id", str(latest + header_offset).encode())],
+                session=api.client.cookies["statlab_session"],
                 query_string=query,
             )
             try:
@@ -299,6 +301,7 @@ async def test_stream_shutdown_closes_subscriber_and_drains_admitted_request(
             api.app,
             f"/api/runs/{run_id}/events",
             [(b"last-event-id", str(latest).encode())],
+            session=api.client.cookies["statlab_session"],
         )
         try:
             start = await asyncio.wait_for(messages.get(), timeout=2)

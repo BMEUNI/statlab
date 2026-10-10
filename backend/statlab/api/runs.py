@@ -25,6 +25,7 @@ from statlab_contracts.contract import DataContract
 from statlab_contracts.gates import GateAction, GateAnswer
 from statlab_contracts.layout import RunPaths
 
+from statlab.api.access import CurrentUser
 from statlab.api.projects import (
     APIResources,
     ContractCheck,
@@ -520,7 +521,7 @@ class RunRegistry:
         ):
             await asyncio.shield(task)
 
-    async def create(self, project_id: str, body: RunCreate) -> RunAccepted:
+    async def create(self, project_id: str, body: RunCreate, *, started_by: str) -> RunAccepted:
         async with self.mutation():
             project = self.projects.project(project_id)
             contract_row = get_contract(self.resources.conn, body.contract_id)
@@ -565,6 +566,7 @@ class RunRegistry:
                 mode=body.mode,
                 config_json=config.model_dump_json(),
                 status="cancelled",
+                started_by=started_by,
             )
             paths = RunPaths(self.resources.settings.data_dir, project.slug, row.id)
             paths.root.mkdir(parents=True, exist_ok=False)
@@ -860,8 +862,10 @@ def runs_router(registry: Callable[[], RunRegistry]) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/projects/{project_id}/runs", status_code=201, response_model=RunAccepted)
-    async def create_run_endpoint(project_id: str, body: RunCreate) -> RunAccepted:
-        return await registry().create(project_id, body)
+    async def create_run_endpoint(
+        project_id: str, body: RunCreate, user: CurrentUser
+    ) -> RunAccepted:
+        return await registry().create(project_id, body, started_by=user.id)
 
     @router.get("/api/runs/{run_id}", response_model=RunSnapshot)
     async def snapshot_endpoint(run_id: str) -> RunSnapshot:

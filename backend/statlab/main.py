@@ -14,7 +14,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from statlab.api.access import authorize
 from statlab.api.assistant import assistant_router
+from statlab.api.auth import auth_router, members_router
 from statlab.api.inspect import inspect_router
 from statlab.api.projects import APIResources, projects_router
 from statlab.api.runs import RunRegistry, runs_router
@@ -55,6 +57,11 @@ def create_app(
     async def admitted_request() -> AsyncIterator[None]:
         async with registry().request():
             yield
+
+    async def authenticated(request: Request) -> None:
+        # async on purpose: a sync dependency runs in a thread, and the SQLite connection is
+        # bound to the event-loop thread.
+        authorize(request, resources().conn)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -114,9 +121,11 @@ def create_app(
 
     app = FastAPI(
         lifespan=lifespan,
-        dependencies=[Depends(admitted_request, scope="request")],
+        dependencies=[Depends(admitted_request, scope="request"), Depends(authenticated)],
     )
     app.include_router(projects_router(resources))
+    app.include_router(auth_router(resources))
+    app.include_router(members_router(resources))
     app.include_router(assistant_router(resources))
     app.include_router(inspect_router(resources))
     app.include_router(runs_router(registry))

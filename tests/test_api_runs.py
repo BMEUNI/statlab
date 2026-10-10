@@ -66,6 +66,7 @@ from statlab_contracts.contract import DataContract, TargetSpec
 from statlab_contracts.gates import GateAction, GateAnswer, RewindIntent
 from statlab_contracts.layout import RunPaths
 
+from tests.auth_support import sign_in
 from tests.test_api_projects import (
     SetupSession,
     _complete_contract,
@@ -234,6 +235,7 @@ async def _open_run_api(
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
         app.router.lifespan_context(app),
     ):
+        await sign_in(client)
         if setup:
             created = await client.post("/api/projects", json={"slug": "demo", "name": "Demo"})
             assert created.status_code == 201

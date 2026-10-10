@@ -159,7 +159,9 @@ def _contract_row_from(row: sqlite3.Row) -> ContractRow:
 # --- projects ----------------------------------------------------------------------------------
 
 
-def create_project(conn: sqlite3.Connection, *, slug: str, name: str) -> ProjectRow:
+def create_project(
+    conn: sqlite3.Connection, *, slug: str, name: str, owner_id: str | None = None
+) -> ProjectRow:
     project_id = new_id("p")
     created_at = utc_now()
     try:
@@ -168,6 +170,12 @@ def create_project(conn: sqlite3.Connection, *, slug: str, name: str) -> Project
                 "INSERT INTO projects (id, slug, name, created_at) VALUES (?, ?, ?, ?)",
                 (project_id, slug, name, created_at),
             )
+            if owner_id is not None:
+                conn.execute(
+                    "INSERT INTO project_members (id, project_id, user_id, role, added_at) "
+                    "VALUES (?, ?, ?, 'owner', ?)",
+                    (new_id("pm"), project_id, owner_id, created_at),
+                )
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     except sqlite3.IntegrityError as exc:
         raise _wrap_integrity_error(exc, constraint="projects.slug") from exc
@@ -357,7 +365,9 @@ def create_run(
     config_json: str,
     forked_from_run_id: str | None = None,
     status: RunStatus = "pending",
+    started_by: str | None = None,
 ) -> RunRow:
+    """A fork inherits the parent's starter (chunk 71)."""
     run_id = new_id("r")
     started_at = utc_now()
     try:
@@ -377,6 +387,11 @@ def create_run(
                     started_at,
                     config_json,
                 ),
+            )
+            conn.execute(
+                "INSERT INTO run_budgets (id, started_by) VALUES (?, "
+                "COALESCE(?, (SELECT started_by FROM run_budgets WHERE id = ?)))",
+                (run_id, started_by, forked_from_run_id),
             )
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
     except sqlite3.IntegrityError as exc:

@@ -17,6 +17,7 @@ from pydantic import (
 )
 from statlab_contracts.contract import DataContract, DatasetOptions, TargetSpec
 
+from statlab.api.access import CurrentUser, has_access
 from statlab.api.projects import (
     APIResources,
     ContractProposalRequest,
@@ -27,11 +28,11 @@ from statlab.api.projects import (
 )
 from statlab.errors import LlmOutputError
 from statlab.llm.client import DecisionRejectedError
+from statlab.persistence.accounts import UserRow, list_member_projects
 from statlab.persistence.models import RunMode
 from statlab.persistence.repository import (
     get_contract,
     list_datasets,
-    list_projects,
     list_runs,
 )
 
@@ -142,8 +143,9 @@ def _missing(state: SetupState) -> list[str]:
 
 
 class SetupAssistant:
-    def __init__(self, resources: APIResources) -> None:
+    def __init__(self, resources: APIResources, user: UserRow) -> None:
         self.resources = resources
+        self.user = user
         self.projects = ProjectsService(resources)
 
     async def turn(self, request: AssistantRequest) -> AssistantReply:
@@ -151,6 +153,8 @@ class SetupAssistant:
         conn = self.resources.conn
         if state.project_id is not None:
             self.projects.project(state.project_id)
+            if not has_access(conn, self.user, state.project_id):
+                raise HTTPException(404, "project not found")
         if state.dataset_id is not None:
             if state.project_id is None:
                 raise HTTPException(422, "dataset requires a project")
@@ -166,9 +170,10 @@ class SetupAssistant:
         if state.target is not None and state.dataset_id is None:
             raise HTTPException(422, "target requires a dataset")
 
+        mine = list_member_projects(conn, self.user.id)
         project_facts: list[JsonValue] = [
             {"id": p.id, "name": p.name, "slug": p.slug, "runs": len(list_runs(conn, p.id))}
-            for p in list_projects(conn)
+            for p in mine
         ]
         dataset_facts: list[JsonValue] = (
             [
@@ -204,8 +209,8 @@ class SetupAssistant:
         if state.target is not None and state.target not in column_names:
             raise HTTPException(422, "target is not a dataset column")
         contract: JsonValue = json.loads(contract_json) if contract_json is not None else None
-        project_ids = [p.id for p in list_projects(conn)]
-        current_name = next((p.name for p in list_projects(conn) if p.id == state.project_id), None)
+        project_ids = [p.id for p in mine]
+        current_name = next((p.name for p in mine if p.id == state.project_id), None)
         dataset_ids = (
             [d.id for d in list_datasets(conn, state.project_id)] if state.project_id else []
         )
@@ -293,7 +298,9 @@ class SetupAssistant:
                 state = SetupState(project_id=action.project_id, mode=state.mode)
         elif kind == "create_project":
             name = (action.project_name or "").strip()
-            created = create_project_record(self.resources, unique_slug(self.resources, name), name)
+            created = create_project_record(
+                self.resources, unique_slug(self.resources, name), name, owner_id=self.user.id
+            )
             state = SetupState(project_id=created.id, mode=state.mode)
         elif kind == "select_dataset":
             if action.dataset_id != state.dataset_id:
@@ -345,7 +352,7 @@ def assistant_router(resources: Callable[[], APIResources]) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/assistant/turn", response_model=AssistantReply)
-    async def turn(body: AssistantRequest) -> AssistantReply:
-        return await SetupAssistant(resources()).turn(body)
+    async def turn(body: AssistantRequest, user: CurrentUser) -> AssistantReply:
+        return await SetupAssistant(resources(), user).turn(body)
 
     return router

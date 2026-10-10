@@ -22,6 +22,8 @@ PREFIXES: Final = {
     "gate": "g",
     "llm_call": "lc",
     "memory_entry": "mem",
+    "user": "u",
+    "project_member": "pm",
 }
 """Entity name -> id prefix. Greppable module constant, per §3.4.
 

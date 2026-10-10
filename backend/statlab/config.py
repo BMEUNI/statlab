@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1", alias="STATLAB_API_HOST")
     api_port: int = Field(default=8000, ge=1024, le=65535, alias="STATLAB_API_PORT")
     allow_nonlocal_bind: bool = Field(default=False, alias="STATLAB_ALLOW_NONLOCAL_BIND")
+    cookie_secure: bool = Field(default=False, alias="STATLAB_COOKIE_SECURE")
 
     max_upload_mb: int = Field(default=200, ge=1, le=2048, alias="STATLAB_MAX_UPLOAD_MB")
     keep_intermediates: bool = Field(default=False, alias="STATLAB_KEEP_INTERMEDIATES")
@@ -70,9 +71,10 @@ class Settings(BaseSettings):
         # a `statlab_shared` package if a third process ever needs it.
         if self.api_host not in _LOOPBACK_HOSTS and not self.allow_nonlocal_bind:
             raise ValueError(
-                f"api_host {self.api_host!r} is not loopback. This application has no "
-                f"authentication (D14); binding it publicly exposes an unauthenticated API. "
-                f"Set STATLAB_ALLOW_NONLOCAL_BIND=true only if you understand that."
+                f"api_host {self.api_host!r} is not loopback. Without HTTPS, passwords and "
+                f"session cookies cross the network in clear text. Put the API behind an HTTPS "
+                f"proxy, set STATLAB_COOKIE_SECURE=true, and set STATLAB_ALLOW_NONLOCAL_BIND=true "
+                f"only if you understand that."
             )
         return self
 

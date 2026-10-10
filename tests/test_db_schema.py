@@ -110,6 +110,22 @@ _EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "ts",
     ),
     "memory": ("id", "project_id", "key", "value_json", "source_run_id", "ts"),
+    "users": (
+        "id",
+        "email",
+        "name",
+        "password_hash",
+        "is_admin",
+        "disabled",
+        "monthly_limit_usd",
+        "created_at",
+        "last_login_at",
+    ),
+    "auth_sessions": ("id", "user_id", "created_at", "expires_at"),
+    "project_members": ("id", "project_id", "user_id", "role", "added_at"),
+    "project_budgets": ("id", "limit_usd", "run_limit_usd"),
+    "run_budgets": ("id", "started_by", "limit_usd"),
+    "app_settings": ("id", "value_json"),
 }
 
 
@@ -126,8 +142,8 @@ def test_column_names_and_order_match_plan(migrated_db: sqlite3.Connection, tabl
     assert actual == _EXPECTED_COLUMNS[table]
 
 
-def test_expected_columns_covers_all_fifteen_tables() -> None:
-    assert len(_EXPECTED_COLUMNS) == 15
+def test_expected_columns_covers_all_twenty_one_tables() -> None:
+    assert len(_EXPECTED_COLUMNS) == 21
 
 
 def _all_table_names(conn: sqlite3.Connection) -> tuple[str, ...]:

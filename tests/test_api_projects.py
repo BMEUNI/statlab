@@ -44,6 +44,8 @@ from statlab_contracts.contract import (
 from statlab_contracts.envelope import ToolFailure, ToolSuccess
 from statlab_contracts.layout import ProjectPaths
 
+from tests.auth_support import sign_in
+
 
 class SetupSession:
     def __init__(self) -> None:
@@ -200,6 +202,7 @@ async def _open_project_api(
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
+        await sign_in(client)
         created = await client.post("/api/projects", json={"slug": "demo", "name": "Demo"})
         assert created.status_code == 201
         yield client, settings, fake_session, cast(dict[str, JsonValue], created.json())
@@ -301,6 +304,7 @@ async def test_create_list_detail_and_csv_upload(
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
+        await sign_in(client)
         created = await client.post("/api/projects", json={"slug": "demo", "name": "Demo"})
         assert created.status_code == 201
         project = created.json()

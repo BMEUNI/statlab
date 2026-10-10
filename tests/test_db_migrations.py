@@ -17,15 +17,19 @@ from statlab.persistence.ids import parse_ts
 
 def test_m1_migrate_on_empty_db_returns_one(conn: sqlite3.Connection) -> None:
     """M1."""
-    assert migrate(conn) == (1,)
+    assert migrate(conn) == (1, 2)
 
 
 def test_m2_all_fifteen_tables_exist(migrated_db: sqlite3.Connection) -> None:
-    """M2: query `sqlite_master`, compare against a set derived from the SQL file, not
+    """M2: query `sqlite_master`, compare against a set derived from the SQL files, not
     hand-typed."""
-    sql_path = Path(str(files("statlab.persistence") / "migrations" / "001_initial.sql"))
-    sql_text = sql_path.read_text(encoding="utf-8")
-    declared = {name.split("(")[0].strip() for name in _extract_after(sql_text, "CREATE TABLE ")}
+    declared: set[str] = set()
+    for filename in ("001_initial.sql", "002_accounts.sql"):
+        sql_path = Path(str(files("statlab.persistence") / "migrations" / filename))
+        sql_text = sql_path.read_text(encoding="utf-8")
+        declared |= {
+            name.split("(")[0].strip() for name in _extract_after(sql_text, "CREATE TABLE ")
+        }
     actual = {
         row["name"]
         for row in migrated_db.execute(
@@ -33,7 +37,7 @@ def test_m2_all_fifteen_tables_exist(migrated_db: sqlite3.Connection) -> None:
         ).fetchall()
     }
     assert actual == declared
-    assert len(declared) == 15
+    assert len(declared) == 21
 
 
 def _extract_after(text: str, marker: str) -> list[str]:
@@ -53,11 +57,14 @@ def _extract_after(text: str, marker: str) -> list[str]:
 
 def test_m3_schema_migrations_has_one_parseable_row(migrated_db: sqlite3.Connection) -> None:
     """M3."""
-    rows = migrated_db.execute("SELECT * FROM schema_migrations").fetchall()
-    assert len(rows) == 1
+    rows = migrated_db.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+    assert len(rows) == 2
     assert rows[0]["version"] == 1
     assert rows[0]["name"] == "initial"
     parse_ts(rows[0]["applied_at"])  # raises PersistenceError if not parseable
+    assert rows[1]["version"] == 2
+    assert rows[1]["name"] == "accounts"
+    parse_ts(rows[1]["applied_at"])
 
 
 def test_m4_second_migrate_returns_empty(migrated_db: sqlite3.Connection) -> None:
@@ -242,7 +249,7 @@ def test_m11_migrations_load_via_importlib_resources() -> None:
 def test_m12_initial_sql_is_valid(conn: sqlite3.Connection) -> None:
     """M12: applies with no error."""
     versions = migrate(conn)
-    assert versions == (1,)
+    assert versions == (1, 2)
 
 
 def test_m13_every_fk_is_enforceable(migrated_db: sqlite3.Connection) -> None:
@@ -257,6 +264,7 @@ def test_m13_every_fk_is_enforceable(migrated_db: sqlite3.Connection) -> None:
         "mode": "autonomous",
         "status": "pending",
         "kind": "dataframe",
+        "role": "member",
     }
     tables = [
         row["name"]

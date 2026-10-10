@@ -31,6 +31,7 @@ from starlette.requests import ClientDisconnect
 from statlab_contracts.contract import DataContract, DatasetOptions, TargetSpec
 from statlab_contracts.layout import ProjectPaths
 
+from statlab.api.access import CurrentUser, manages
 from statlab.config import Settings
 from statlab.errors import EngineError, PersistenceError
 from statlab.llm.client import DecisionRejectedError, LlmClient
@@ -38,6 +39,7 @@ from statlab.llm.routing import ModelRouter
 from statlab.llm.skills import SkillPolicy
 from statlab.mcp_client import McpClient
 from statlab.memory import read_memory
+from statlab.persistence.accounts import list_member_projects
 from statlab.persistence.ids import new_id
 from statlab.persistence.models import (
     ContractRow,
@@ -58,7 +60,6 @@ from statlab.persistence.repository import (
     has_open_runs,
     list_contracts,
     list_datasets,
-    list_projects,
     list_runs,
     rename_project,
     runs_switched_to_autonomous,
@@ -472,7 +473,9 @@ def unique_slug(resources: APIResources, name: str, *, own: str | None = None) -
     return f"{base}-{n}"
 
 
-def create_project_record(resources: APIResources, slug: str, name: str) -> ProjectRow:
+def create_project_record(
+    resources: APIResources, slug: str, name: str, *, owner_id: str
+) -> ProjectRow:
     if get_project_by_slug(resources.conn, slug) is not None:
         raise HTTPException(409, "project slug already exists")
     paths = _project_paths(resources.settings, slug)
@@ -481,7 +484,7 @@ def create_project_record(resources: APIResources, slug: str, name: str) -> Proj
     paths.datasets.mkdir(parents=True, exist_ok=True)
     paths.contracts.mkdir(parents=True, exist_ok=True)
     paths.runs.mkdir(parents=True, exist_ok=True)
-    row = create_project(resources.conn, slug=slug, name=name)
+    row = create_project(resources.conn, slug=slug, name=name, owner_id=owner_id)
     try:
         fd, tmp_name = tempfile.mkstemp(dir=paths.root)
         try:
@@ -501,12 +504,12 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/projects", status_code=201, response_model=ProjectRow)
-    async def create(body: ProjectCreate) -> ProjectRow:
-        return create_project_record(resources(), body.slug, body.name)
+    async def create(body: ProjectCreate, user: CurrentUser) -> ProjectRow:
+        return create_project_record(resources(), body.slug, body.name, owner_id=user.id)
 
     @router.get("/api/projects", response_model=tuple[ProjectRow, ...])
-    async def list_all() -> tuple[ProjectRow, ...]:
-        return list_projects(resources().conn)
+    async def list_all(user: CurrentUser) -> tuple[ProjectRow, ...]:
+        return list_member_projects(resources().conn, user.id)
 
     @router.get("/api/projects/{project_id}", response_model=ProjectDetail)
     async def detail(project_id: str) -> ProjectDetail:
@@ -567,10 +570,12 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
         return row
 
     @router.delete("/api/projects/{project_id}", status_code=204)
-    async def delete(project_id: str) -> Response:
+    async def delete(project_id: str, user: CurrentUser) -> Response:
         resource = resources()
         service = ProjectsService(resource)
         project = service.project(project_id)
+        if not manages(resource.conn, user, project.id):
+            raise HTTPException(403, "only the project owner can delete this project")
         paths = service.paths(project)
         if has_open_runs(resource.conn, project.id):
             raise HTTPException(409, "stop or finish this project's open runs before deleting it")

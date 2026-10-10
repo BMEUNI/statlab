@@ -18,6 +18,7 @@ from statlab.llm.client import LlmClient
 from statlab.main import create_app
 from statlab_contracts.envelope import ToolSuccess
 
+from tests.auth_support import sign_in
 from tests.test_api_projects import SetupSession, _model_response
 
 Json = dict[str, JsonValue]
@@ -80,6 +81,7 @@ async def _open_assistant_api(
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
+        await sign_in(client)
         created = await client.post("/api/projects", json={"slug": "demo", "name": "demo"})
         assert created.status_code == 201
         yield client, settings, session, cast(Json, created.json()), calls
