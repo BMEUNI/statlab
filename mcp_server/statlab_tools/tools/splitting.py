@@ -2,6 +2,8 @@
 
 Four tools -- `split_random`, `split_stratified`, `split_temporal` (chunk 77), `verify_split` --
 are the only place rows are assigned to train/valid/test (D26: every candidate shares one split).
+`add_lag_features` (chunk 77) adds contract lags to the whole frame before the split; it shares
+the time ordering.
 The split tools set
 `ArtifactMeta.split` so the D32a lineage lock has a typed fact, return a content fingerprint of
 `test` so cross-run exposure can be counted (D32c, via D-c's formula), and refuse an undersized
@@ -33,6 +35,7 @@ import numpy as np
 import pandas as pd
 from pydantic import Field, JsonValue
 from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
+from statlab_contracts.contract import lag_column
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
@@ -42,8 +45,10 @@ from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamEr
 from statlab_tools.tools._frame import (
     is_class_target,
     is_numeric_column,
+    json_list,
     json_scalar,
     observed_counts,
+    save_frame,
 )
 
 MIN_SPLIT_ROWS: Final = 30
@@ -475,6 +480,79 @@ def split_temporal(
     }
     return _finish(
         paths, splits, target, dropped, extra={"time_column": time_column, "time_ranges": ranges}
+    )
+
+
+@tool(phase="splitting", allow_in=["data_splitting"])
+def add_lag_features(
+    paths: RunPaths,
+    frame: Annotated[
+        ArtifactRef,
+        Field(description="The whole frame before the split, including rows without a target."),
+    ],
+    time_column: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Column that orders rows in time (numbers or dates).",
+        ),
+    ],
+    lags: Annotated[
+        dict[str, tuple[Annotated[int, Field(ge=1)], ...]],
+        Field(
+            min_length=1,
+            description="Numeric column -> row lags. Adds <column>_lag<k>: the value k rows "
+            "earlier in time order.",
+        ),
+    ],
+) -> ToolSuccess:
+    """Add earlier values of numeric columns as new columns, in time order. Runs on the whole
+    frame before the split so rows without a target still give history and an excluded column
+    or the target can be a source. The first k rows in time order get a missing value. Rows keep
+    their order and labels.
+    """
+    data = load_dataframe(paths.artifact(frame, "dataframe"))
+    if time_column not in data.columns:
+        raise ToolParamError(
+            f"time_column {time_column!r} is not a column in the data",
+            field_errors={"time_column": "unknown"},
+        )
+    unknown = [c for c in lags if c not in data.columns]
+    if unknown:
+        raise ToolParamError(
+            f"lag columns not in the data: {unknown!r}",
+            field_errors={"lags": "unknown columns"},
+        )
+    text = [c for c in lags if not is_numeric_column(data[c])]
+    if text:
+        raise ToolParamError(
+            f"lag columns must be numeric: {text!r}",
+            field_errors={"lags": "non-numeric columns"},
+        )
+    names = [lag_column(c, k) for c, ks in lags.items() for k in ks]
+    taken = [name for name in names if name in data.columns]
+    if taken:
+        raise ToolParamError(
+            f"lag columns already exist: {taken!r}",
+            field_errors={"lags": "name collision"},
+        )
+    key = _time_key(data[time_column], time_column)
+    order = np.argsort(key, kind="stable")
+    inverse = np.argsort(order)
+    out = data.copy()
+    for c, ks in lags.items():
+        ordered = data[c].iloc[order].reset_index(drop=True)
+        for k in ks:
+            out[lag_column(c, k)] = ordered.shift(k).to_numpy(dtype="float64", na_value=np.nan)[
+                inverse
+            ]
+    return ToolSuccess(
+        summary={
+            "time_column": time_column,
+            "added": json_list(names),
+            "rows": json_scalar(len(out)),
+        },
+        artifacts=(save_frame(paths, out, "lagged"),),
     )
 
 

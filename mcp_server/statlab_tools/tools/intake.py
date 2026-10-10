@@ -512,6 +512,7 @@ def _check_columns_exist(
     named.extend(("features.id_columns", c) for c in contract.features.id_columns)
     named.extend((f"features.roles.{c}", c) for c in contract.features.roles)
     named.extend((f"features.ordinal_levels.{c}", c) for c in contract.features.ordinal_levels)
+    named.extend((f"features.lags.{c}", c) for c in contract.features.lags)
     for i, goal in enumerate(contract.objective.inference_goals):
         named.extend((f"objective.inference_goals.{i}.predictors", c) for c in goal.predictors)
     if contract.split.time_column is not None:

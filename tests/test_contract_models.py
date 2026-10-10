@@ -508,3 +508,26 @@ def test_invalid_enum_value_rejected(
         base = {}
     with pytest.raises(ValidationError, match=r"permitted|Input should be"):
         model_cls.model_validate({**base, field: bad_value})
+
+
+# --- Chunk 77: lag features ----------------------------------------------------------------------
+
+
+def test_lags_need_temporal_split_and_positive_distinct_lags() -> None:
+    base: dict[str, Any] = {
+        "target": {"column": "y"},
+        "split": {"strategy": "temporal", "time_column": "t"},
+    }
+    contract = DataContract.model_validate({**base, "features": {"lags": {"x": [1, 96]}}})
+    assert contract.features.lag_columns() == ("x_lag1", "x_lag96")
+
+    coerced = DataContract.model_validate({**base, "features": {"lags": {"x": ["96"]}}})
+    assert coerced.features.lags == {"x": (96,)}
+
+    with pytest.raises(ValidationError, match=r"features.lags needs split.strategy 'temporal'"):
+        DataContract.model_validate({"target": {"column": "y"}, "features": {"lags": {"x": [1]}}})
+
+    bad_lags: tuple[dict[str, list[int]], ...] = ({"x": []}, {"x": [0]}, {"x": [2, 2]})
+    for lags in bad_lags:
+        with pytest.raises(ValidationError, match="distinct row lags of at least 1"):
+            DataContract.model_validate({**base, "features": {"lags": lags}})

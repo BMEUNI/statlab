@@ -53,7 +53,12 @@ from statlab_contracts.candidate import (
     FeatureSpec,
     PreprocessingSpec,
 )
-from statlab_contracts.contract import DataContract, FeatureRules, PreprocessingRules
+from statlab_contracts.contract import (
+    DataContract,
+    FeatureRules,
+    PreprocessingRules,
+    SplitRules,
+)
 from statlab_contracts.envelope import Failure, ToolSuccess
 from statlab_contracts.vocabulary import TargetType
 
@@ -1043,3 +1048,27 @@ async def test_decision_recovery_retries_transient_llm_failure(
     assert llm.attempts == 2
     if sleeping:
         assert slept == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_lag_columns_are_inputs_and_survive_include(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, _ = await candidate_harness(migrated_db, project, tmp_path)
+    contract = h.runtime.contract
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=contract.target,
+            objective=contract.objective,
+            features=FeatureRules(include=("x",), id_columns=("id",), lags={"x": (1,)}),
+            split=SplitRules(strategy="temporal", time_column="id"),
+        ),
+    )
+    await prepare_candidate(h)
+    pipeline = pipeline_from_state(h.state, h.state.branches[0])
+    assert pipeline.feature_manifest["input_features"] == ["x", "x_lag1"]
+    drop = next(step.parameters for step in pipeline.replay if step.tool == "drop_columns")
+    assert drop == {"columns": ["id", "excluded"]}

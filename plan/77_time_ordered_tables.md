@@ -316,3 +316,220 @@ Main reviewed the diff against the recipe. First `make check` failed only on cov
 (`splitting.py` 310, `_tie_end`'s end-of-data branch) → addendum C. Final `make check`
 (`check77a2.log`, temporary) exit 0: coverage 100 % (TOTAL 13462 stmts, 0 missed), mypy 212
 files, Ruff clean.
+
+## Stage 77b (detailed spec): lag features
+
+Goal: the contract can ask for earlier values of a column as model inputs, e.g.
+`features.lags: {"target_reg": [96], "ke": [96]}` (96 rows = one day of 15-minute rows). Lags
+are computed once, in the split node, on the whole frame in `split.time_column` order, before
+any row or excluded column is dropped. So an excluded column or the target can be a lag source,
+and rows without a target still provide history. A lag column is named `<column>_lag<k>`. Its
+value is the source column `k` rows earlier in time order (NaN for the first `k` rows), and it
+is filled later by the candidate imputer. Non-goals: rolling windows, lags by time offset, lags
+inside a candidate's feature step, UI changes (the contract form already renders a column →
+list map as `list-map`, `frontend/src/contract/schema.ts` ~64; typed `"96"` coerces to `96`
+because the contract is not strict).
+
+Leakage note (for the skill text and the user, not a guard): a lag `k` uses the value known `k`
+rows earlier. Lags of the target or of measured-afterwards columns are only honest when `k`
+covers the gap between measuring and predicting (one day ahead → `k` ≥ 96 for 15-minute rows).
+
+Owned: `contracts/statlab_contracts/contract.py`, `mcp_server/statlab_tools/tools/splitting.py`,
+`mcp_server/statlab_tools/tools/intake.py`, `backend/statlab/domains/foundation.py`,
+`backend/statlab/domains/candidate_pipeline.py`, `skills/modelling.md`,
+`tests/test_contract_models.py`, `tests/test_tools_splitting.py`,
+`tests/test_tools_intake_validate.py`, `tests/test_nodes_foundation.py`,
+`tests/test_nodes_candidate_pipeline.py`. Not alone: preserve others' edits.
+
+### 1. `contract.py`
+
+- Module-level function before `class FeatureRules`: `def lag_column(column: str, lag: int) ->
+  str:` docstring "Name of the lag feature for `column` `lag` rows earlier (chunk 77)." returns
+  `f"{column}_lag{lag}"`.
+- `FeatureRules`: new field after `ordinal_levels`: `lags: dict[str, tuple[int, ...]] =
+  Field(default_factory=dict, description="Earlier values of a column as extra inputs: column ->
+  row lags in time order (e.g. 96 = one day earlier for 15-minute rows). Needs a temporal
+  split. The column may be excluded or the target; choose lags at least as large as the gap
+  between measuring a value and predicting.")`.
+- New validator in `FeatureRules` after the existing ones: `@model_validator(mode="after") def
+  _lags_are_positive_and_distinct(self) -> FeatureRules:` docstring "V13 (chunk 77): every
+  `lags` entry lists distinct row lags of at least 1." For each `column, lags` in
+  `self.lags.items()`: if `not lags or any(lag < 1 for lag in lags) or len(set(lags)) !=
+  len(lags)`: raise `ValueError(f"features.lags.{column} must list distinct row lags of at
+  least 1, got {list(lags)!r}")`. Return `self`.
+- New method in `FeatureRules`: `def lag_columns(self) -> tuple[str, ...]:` docstring "Names of
+  the lag features the contract adds, in `lags` order." returns `tuple(lag_column(column, lag)
+  for column, lags in self.lags.items() for lag in lags)`.
+- `DataContract`: new validator after `_stratified_requires_classification_target`:
+  `@model_validator(mode="after") def _lags_require_temporal_split(self) -> DataContract:`
+  docstring "X5 (chunk 77): `features.lags` needs `split.strategy == "temporal"`; lags follow
+  its `time_column` order." If `self.features.lags and self.split.strategy != "temporal"`: raise
+  `ValueError("features.lags needs split.strategy 'temporal' with split.time_column: lags follow
+  the time order")`. Return `self`.
+
+### 2. `splitting.py`
+
+- Imports: add `Field` usage as needed (already imported), `from statlab_contracts.contract
+  import lag_column`, and `json_list`, `save_frame` to the `_frame` import.
+- Module docstring: after the sentence naming the four tools add "`add_lag_features` (chunk 77)
+  adds contract lags to the whole frame before the split; it shares the time ordering."
+- New tool after `split_temporal`:
+  `@tool(phase="splitting", allow_in=["data_splitting"])`
+  `def add_lag_features(paths: RunPaths, frame: Annotated[ArtifactRef, Field(description="The
+  whole frame before the split, including rows without a target.")], time_column:
+  Annotated[str, Field(min_length=1, description="Column that orders rows in time (numbers or
+  dates).")], lags: Annotated[dict[str, tuple[Annotated[int, Field(ge=1)], ...]],
+  Field(min_length=1, description="Numeric column -> row lags. Adds <column>_lag<k>: the value
+  k rows earlier in time order.")]) -> ToolSuccess:`
+  Docstring: "Add earlier values of numeric columns as new columns, in time order. Runs on the
+  whole frame before the split so rows without a target still give history and an excluded
+  column or the target can be a source. The first k rows in time order get a missing value.
+  Rows keep their order and labels."
+  Body, in order:
+  1. `data = load_dataframe(paths.artifact(frame, "dataframe"))`.
+  2. `time_column` not in columns → `ToolParamError(f"time_column {time_column!r} is not a
+     column in the data", field_errors={"time_column": "unknown"})`.
+  3. `unknown = [c for c in lags if c not in data.columns]`; if any →
+     `ToolParamError(f"lag columns not in the data: {unknown!r}", field_errors={"lags":
+     "unknown columns"})`.
+  4. `text = [c for c in lags if not is_numeric_column(data[c])]`; if any →
+     `ToolParamError(f"lag columns must be numeric: {text!r}", field_errors={"lags":
+     "non-numeric columns"})`.
+  5. `names = [lag_column(c, k) for c, ks in lags.items() for k in ks]`; `taken = [name for
+     name in names if name in data.columns]`; if any → `ToolParamError(f"lag columns already
+     exist: {taken!r}", field_errors={"lags": "name collision"})`.
+  6. `key = _time_key(data[time_column], time_column)`; `order = np.argsort(key,
+     kind="stable")`; `inverse = np.argsort(order)`; `out = data.copy()`.
+  7. For `c, ks` in `lags.items()`: `ordered = data[c].iloc[order].reset_index(drop=True)`; for
+     `k` in `ks`: `out[lag_column(c, k)] = ordered.shift(k).to_numpy(dtype="float64",
+     na_value=np.nan)[inverse]`.
+  8. Return `ToolSuccess(summary={"time_column": time_column, "added": json_list(names), "rows":
+     json_scalar(len(out))}, artifacts=(save_frame(paths, out, "lagged"),))`.
+
+### 3. `intake.py` C1 (`named` list, ~512-524)
+
+After the `ordinal_levels` line add `named.extend((f"features.lags.{c}", c) for c in
+contract.features.lags)`.
+
+### 4. `foundation.py` `_split`
+
+Directly after the `if profiled is None and contract.features.roles:` cast block and before
+`protected = {...}`: if `contract.features.lags`: `frame = _frame(await self._call(invocation,
+evidence, "add_lag_features", {"frame": str(frame), "time_column": rules.time_column, "lags":
+{column: list(lags) for column, lags in contract.features.lags.items()}}))`. (X5 guarantees a
+temporal contract, so `rules.time_column` is set.) Nothing else changes; the existing
+dedupe/drop/split steps then run on the lagged frame.
+
+### 5. `candidate_pipeline.py` (~262-292)
+
+After `features = self.runtime.contract.features` add `lag_names = features.lag_columns()`. The
+`present` line iterates `(*columns, *lag_names)` instead of `columns`. In the `drop` condition the
+include clause becomes `(features.include is not None and column not in features.include and
+column not in lag_names)`. Nothing else changes (lag columns then appear in
+`feature_manifest["input_features"]` and are never dropped by `include`).
+
+### 6. `skills/modelling.md` `## data_splitting`
+
+Heuristics: append "- Contract lags (features.lags) are added from the whole time-ordered frame
+before any row is dropped; a lag of the target or of a column measured afterwards is honest only
+when it covers the gap to the prediction." Tools: add `add_lag_features` on its own line after
+`drop_columns`.
+
+### 7. Tests
+
+`tests/test_contract_models.py` (uses `DataContract.model_validate` and `pytest.raises(
+ValidationError, match=...)`):
+- `test_lags_need_temporal_split_and_positive_distinct_lags`: base dict `{"target": {"column":
+  "y"}, "split": {"strategy": "temporal", "time_column": "t"}}`. With `"features": {"lags": {"x":
+  [1, 96]}}` → `features.lag_columns() == ("x_lag1", "x_lag96")`. With `{"x": ["96"]}` →
+  `features.lags == {"x": (96,)}`. Without the `split` key and with lags `{"x": [1]}` → raises
+  matching "features.lags needs split.strategy 'temporal'". With the split and each of `{"x":
+  []}`, `{"x": [0]}`, `{"x": [2, 2]}` → raises matching "distinct row lags of at least 1".
+`tests/test_tools_splitting.py` (import `add_lag_features`):
+- `test_add_lag_features_follow_time_order(run_paths)`: frame `{"t": [3, 1, 2, 0, 4], "x":
+  [30.0, 10.0, 20.0, 0.0, 40.0], "y": [1.0, None, 0.0, 1.0, 0.0]}`; `res =
+  add_lag_features(run_paths, ref, time_column="t", lags={"x": (1, 2), "y": (1,)})`; `out =
+  load_dataframe(run_paths.artifact(res.artifacts[0].ref, "dataframe"))`; `out.columns.tolist()
+  == ["t", "x", "y", "x_lag1", "x_lag2", "y_lag1"]`; `out.index.tolist() == [0, 1, 2, 3, 4]`;
+  `out["x_lag1"].fillna(-1.0).tolist() == [20.0, 0.0, 10.0, -1.0, 30.0]`;
+  `out["x_lag2"].fillna(-1.0).tolist() == [10.0, -1.0, 0.0, -1.0, 20.0]`;
+  `out["y_lag1"].fillna(-1.0).tolist() == [0.0, 1.0, -1.0, -1.0, 1.0]`; `res.summary ==
+  {"time_column": "t", "added": ["x_lag1", "x_lag2", "y_lag1"], "rows": 5}`.
+- `test_add_lag_features_rejects_bad_input(run_paths)`: on the frame above plus a text column
+  `"s": ["a", "b", "c", "d", "e"]` and a column `"x_lag1": [0.0] * 5` saved as a second frame
+  where needed: `time_column="nope"` → `ToolParamError`; `lags={"zz": (1,)}` → `ToolParamError`
+  matching "not in the data"; `lags={"s": (1,)}` → `ToolParamError` matching "must be numeric";
+  frame with existing `x_lag1` and `lags={"x": (1,)}` → `ToolParamError` matching "already
+  exist".
+`tests/test_tools_intake_validate.py`: `test_c1_lag_columns_must_exist(seeded_run,
+write_snapshot)`: contract `{"target": {"column": "y"}, "features": {"lags": {"zz": [1]}},
+"split": {"strategy": "temporal", "time_column": "d"}}`; frame `{"y": [0, 1], "d": [1, 2]}`;
+`"features.lags.zz" in _fields(result.summary["mismatches"])`.
+`tests/test_nodes_foundation.py`:
+- `OfflineTools.call`: add `"add_lag_features"` to the frame-returning tuple `("cast_dtypes",
+  "drop_duplicate_rows", "drop_high_missing_rows", "drop_columns")`; add `"add_lag_features"`
+  to the harness allow-list set.
+- New `test_contract_lags_run_before_rows_and_columns_drop(migrated_db, project, tmp_path)`:
+  contract `DataContract(target=TargetSpec(column="y", type="binary"),
+  features=FeatureRules(exclude=("excluded",), lags={"excluded": (1, 2), "y": (3,)}),
+  split=SplitRules(strategy="temporal", time_column="x"))`; `env.llm.responses[SplitDecision] =
+  SplitDecision(rationale="time order", dependence="temporal")`; `await env.advance(4)`;
+  `names = [tool for _, tool, _ in env.tools.calls]`; `names.index("add_lag_features") <
+  names.index("drop_duplicate_rows") < names.index("drop_columns") <
+  names.index("split_temporal")`; the `add_lag_features` params minus `frame` equal
+  `{"time_column": "x", "lags": {"excluded": [1, 2], "y": [3]}}`; the `drop_columns` params'
+  `columns == ["excluded"]`.
+`tests/test_nodes_candidate_pipeline.py`: new
+`test_lag_columns_are_inputs_and_survive_include(migrated_db, project, tmp_path)`: `h, _ = await
+candidate_harness(migrated_db, project, tmp_path)`; `contract = h.runtime.contract`;
+`h.runtime = replace(h.runtime, contract=DataContract(target=contract.target,
+objective=contract.objective, features=FeatureRules(include=("x",), id_columns=("id",),
+lags={"x": (1,)}), split=SplitRules(strategy="temporal", time_column="id")))`; `await
+prepare_candidate(h)`; `pipeline = pipeline_from_state(h.state, h.state.branches[0])`;
+`pipeline.feature_manifest["input_features"] == ["x", "x_lag1"]`; `[step.parameters for step in
+pipeline.replay if step.tool == "drop_columns"][0] == {"columns": ["id", "excluded"]}`.
+
+### 8. Checks
+
+`make test-fast TESTS="tests/test_contract_models.py tests/test_contract_consistency.py
+tests/test_tools_splitting.py tests/test_tools_intake_validate.py tests/test_nodes_foundation.py
+tests/test_nodes_candidate_pipeline.py tests/test_skills.py tests/test_tools_reproducibility.py"`;
+Ruff check, Ruff format --check and mypy on every owned Python file;
+`.venv/bin/python -m integration.run_scenarios --llm offline --only S01 S07`.
+
+Required probe (outside the repository, temporary directory deleted afterwards): save the
+user's `public_data.csv` (path as in 77a's probe) as a dataframe artifact; `add_lag_features(
+paths, ref, time_column="rowID", lags={"ke": (96,), "target_reg": (96,)})`; on the result report
+`summary`, and for rows whose `target_flag` is null: the share of non-null `ke_lag96` and of
+`target_reg_lag96`. Then `split_temporal(paths, <lagged ref>, target="target_flag",
+time_column="rowID")` and report `rows`.
+
+Stop and report on any failure, unexpected value or spec gap. Main then: review, `make check`,
+commit, then write 77c.
+
+### Addendum 77b-A (validator labels; typed test loop)
+
+1. Labels V13 and X5 are already taken (`ModellingRules` V13, `DataContract` X5). In
+   `contract.py` the lag docstrings become "V14 (chunk 77): ..." for
+   `_lags_are_positive_and_distinct` and "X15 (chunk 77): ..." for
+   `_lags_require_temporal_split`. Text otherwise unchanged; no code change.
+2. `tests/test_contract_models.py` invalid-lags loop: bind the cases first,
+   `bad_lags: tuple[dict[str, list[int]], ...] = ({"x": []}, {"x": [0]}, {"x": [2, 2]})`, then
+   `for lags in bad_lags:`.
+Then rerun every check of subsection 8 (all, since lint edits followed the pytest run), the
+offline S01 S07 run, and the probe.
+
+## Stage 77b acceptance receipt (2026-10-10)
+
+Implementer (after addendum A): focused selectors (contract models, contract consistency, tools
+splitting, intake validate, nodes foundation, nodes candidate pipeline, skills, reproducibility)
+exit 0; Ruff check/format and mypy on the owned Python files exit 0; offline S01 and S07 PASS
+(`integration/out/20261010T115040Z-offline`). Probe (the implementer read
+`~/Documents/Egyetem/BSc/5.semester/Python/Verseny/data/public_data.csv`; main confirmed its
+sha256 `46b569a7…` equals the project dataset, so the evidence holds):
+`add_lag_features(time_column="rowID", lags={"ke": (96,), "target_reg": (96,)})` added
+`ke_lag96`, `target_reg_lag96` on 89,760 rows; on the 17,952 rows without a target both lag
+columns are 100 % filled; `split_temporal` on the lagged frame: train 43,084 / valid 14,362 /
+test 14,362 (balance-drift warning, as in 77a). Main reviewed the diff (matches the recipe and
+addendum). `make check` (`check77b.log`, temporary) exit 0: coverage 100 % (TOTAL 13507 stmts,
+0 missed), mypy 212 files, Ruff clean.

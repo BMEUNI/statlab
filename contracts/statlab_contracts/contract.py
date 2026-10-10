@@ -97,6 +97,11 @@ class TargetSpec(BaseModel):
 # --- Features ------------------------------------------------------------------------------------
 
 
+def lag_column(column: str, lag: int) -> str:
+    """Name of the lag feature for `column` `lag` rows earlier (chunk 77)."""
+    return f"{column}_lag{lag}"
+
+
 class FeatureRules(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -105,6 +110,17 @@ class FeatureRules(BaseModel):
     id_columns: tuple[str, ...] = ()
     roles: dict[str, ColumnRole] = Field(default_factory=dict)
     ordinal_levels: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    lags: dict[str, tuple[int, ...]] = Field(
+        default_factory=dict,
+        description="Earlier values of a column as extra inputs: column -> row lags in time "
+        "order (e.g. 96 = one day earlier for 15-minute rows). Needs a temporal split. The "
+        "column may be excluded or the target; choose lags at least as large as the gap "
+        "between measuring a value and predicting.",
+    )
+
+    def lag_columns(self) -> tuple[str, ...]:
+        """Names of the lag features the contract adds, in `lags` order."""
+        return tuple(lag_column(column, lag) for column, lags in self.lags.items() for lag in lags)
 
     @model_validator(mode="after")
     def _include_exclude_disjoint(self) -> FeatureRules:
@@ -151,6 +167,17 @@ class FeatureRules(BaseModel):
                 raise ValueError(
                     f"features.ordinal_levels[{column!r}] must have at least 2 unique "
                     f"entries, got {levels!r}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _lags_are_positive_and_distinct(self) -> FeatureRules:
+        """V14 (chunk 77): every `lags` entry lists distinct row lags of at least 1."""
+        for column, lags in self.lags.items():
+            if not lags or any(lag < 1 for lag in lags) or len(set(lags)) != len(lags):
+                raise ValueError(
+                    f"features.lags.{column} must list distinct row lags of at least 1, "
+                    f"got {list(lags)!r}"
                 )
         return self
 
@@ -416,6 +443,17 @@ class DataContract(BaseModel):
                 f"{{'binary', 'multiclass'}}, got target.type={self.target.type!r} "
                 f"(stratifying a continuous or count target is a type error, not a "
                 f"strategy choice)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _lags_require_temporal_split(self) -> DataContract:
+        """X15 (chunk 77): `features.lags` needs `split.strategy == "temporal"`; lags follow
+        its `time_column` order."""
+        if self.features.lags and self.split.strategy != "temporal":
+            raise ValueError(
+                "features.lags needs split.strategy 'temporal' with split.time_column: lags "
+                "follow the time order"
             )
         return self
 

@@ -20,6 +20,7 @@ from statlab_tools.artifacts import load_dataframe, save_dataframe
 from statlab_tools.tool import ToolDataError, ToolParamError
 from statlab_tools.tools.splitting import (
     MIN_SPLIT_ROWS,
+    add_lag_features,
     split_random,
     split_stratified,
     split_temporal,
@@ -738,3 +739,48 @@ def test_temporal_split_with_empty_test_is_refused(run_paths: RunPaths) -> None:
     with pytest.raises(ToolDataError, match="MIN_SPLIT_ROWS"):
         split_temporal(run_paths, ref, target="y", time_column="t", test_size=0.01)
     assert _artifact_files(run_paths) == before
+
+
+def test_add_lag_features_follow_time_order(run_paths: RunPaths) -> None:
+    frame = pd.DataFrame(
+        {
+            "t": [3, 1, 2, 0, 4],
+            "x": [30.0, 10.0, 20.0, 0.0, 40.0],
+            "y": [1.0, None, 0.0, 1.0, 0.0],
+        }
+    )
+    ref = _save(run_paths, frame)
+    res = add_lag_features(run_paths, ref, time_column="t", lags={"x": (1, 2), "y": (1,)})
+    out = load_dataframe(run_paths.artifact(res.artifacts[0].ref, "dataframe"))
+    assert out.columns.tolist() == ["t", "x", "y", "x_lag1", "x_lag2", "y_lag1"]
+    assert out.index.tolist() == [0, 1, 2, 3, 4]
+    assert out["x_lag1"].fillna(-1.0).tolist() == [20.0, 0.0, 10.0, -1.0, 30.0]
+    assert out["x_lag2"].fillna(-1.0).tolist() == [10.0, -1.0, 0.0, -1.0, 20.0]
+    assert out["y_lag1"].fillna(-1.0).tolist() == [0.0, 1.0, -1.0, -1.0, 1.0]
+    assert res.summary == {"time_column": "t", "added": ["x_lag1", "x_lag2", "y_lag1"], "rows": 5}
+
+
+def test_add_lag_features_rejects_bad_input(run_paths: RunPaths) -> None:
+    frame = pd.DataFrame(
+        {
+            "t": [3, 1, 2, 0, 4],
+            "x": [30.0, 10.0, 20.0, 0.0, 40.0],
+            "y": [1.0, None, 0.0, 1.0, 0.0],
+        }
+    )
+    ref = _save(run_paths, frame)
+    with pytest.raises(ToolParamError) as exc:
+        add_lag_features(run_paths, ref, time_column="nope", lags={"x": (1,)})
+    assert "time_column" in exc.value.field_errors
+
+    with pytest.raises(ToolParamError, match="not in the data"):
+        add_lag_features(run_paths, ref, time_column="t", lags={"zz": (1,)})
+
+    text_frame = frame.assign(s=["a", "b", "c", "d", "e"])
+    text_ref = _save(run_paths, text_frame)
+    with pytest.raises(ToolParamError, match="must be numeric"):
+        add_lag_features(run_paths, text_ref, time_column="t", lags={"s": (1,)})
+
+    collide_ref = _save(run_paths, frame.assign(x_lag1=[0.0] * 5))
+    with pytest.raises(ToolParamError, match="already exist"):
+        add_lag_features(run_paths, collide_ref, time_column="t", lags={"x": (1,)})

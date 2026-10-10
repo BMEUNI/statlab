@@ -709,6 +709,21 @@ class FoundationExecutor:
                     },
                 )
             )
+        if contract.features.lags:
+            frame = _frame(
+                await self._call(
+                    invocation,
+                    evidence,
+                    "add_lag_features",
+                    {
+                        "frame": str(frame),
+                        "time_column": rules.time_column,
+                        "lags": {
+                            column: list(lags) for column, lags in contract.features.lags.items()
+                        },
+                    },
+                )
+            )
         protected = {
             problem.target,
             *contract.features.id_columns,

@@ -165,7 +165,13 @@ class OfflineTools(ToolBoundary):
                     "minority_share": self.minority,
                 }
             )
-        if tool in ("cast_dtypes", "drop_duplicate_rows", "drop_high_missing_rows", "drop_columns"):
+        if tool in (
+            "cast_dtypes",
+            "drop_duplicate_rows",
+            "drop_high_missing_rows",
+            "drop_columns",
+            "add_lag_features",
+        ):
             return ToolSuccess(
                 summary={"rows_before": 240, "rows_dropped": self.rows_dropped},
                 artifacts=(ArtifactMeta(ref=FRAME, kind="dataframe"),),
@@ -271,6 +277,7 @@ def policy() -> SkillPolicy:
             "drop_duplicate_rows",
             "drop_high_missing_rows",
             "drop_columns",
+            "add_lag_features",
             "split_random",
             "split_stratified",
             "split_temporal",
@@ -908,6 +915,36 @@ async def test_temporal_contract_splits_by_time_column(
     }
     assert not any(tool in ("split_random", "split_stratified") for _, tool, _ in env.tools.calls)
     assert shared_result(env.state, "data_splitting").summary["train"] == TRAIN
+
+
+@pytest.mark.asyncio
+async def test_contract_lags_run_before_rows_and_columns_drop(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    contract = DataContract(
+        target=TargetSpec(column="y", type="binary"),
+        features=FeatureRules(exclude=("excluded",), lags={"excluded": (1, 2), "y": (3,)}),
+        split=SplitRules(strategy="temporal", time_column="x"),
+    )
+    env = harness(migrated_db, project, tmp_path, contract=contract)
+    env.llm.responses[SplitDecision] = SplitDecision(rationale="time order", dependence="temporal")
+    await env.advance(4)
+    names = [tool for _, tool, _ in env.tools.calls]
+    assert (
+        names.index("add_lag_features")
+        < names.index("drop_duplicate_rows")
+        < names.index("drop_columns")
+        < names.index("split_temporal")
+    )
+    lag = next(params for _, tool, params in env.tools.calls if tool == "add_lag_features")
+    assert {k: v for k, v in lag.items() if k != "frame"} == {
+        "time_column": "x",
+        "lags": {"excluded": [1, 2], "y": [3]},
+    }
+    drop = next(params for _, tool, params in env.tools.calls if tool == "drop_columns")
+    assert drop["columns"] == ["excluded"]
 
 
 @pytest.mark.asyncio

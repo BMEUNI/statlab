@@ -260,6 +260,7 @@ class CandidatePipelineExecutor:
             raise _RefusalError("constant drop conflicts with explicit contract")
         columns = _strings(_tool_summary(intake, "load_csv").get("columns"), "source columns")
         features = self.runtime.contract.features
+        lag_names = features.lag_columns()
         # Node 4 already drops exclusions except structurally protected columns.
         split_excluded = set(features.exclude) - {
             problem.target,
@@ -267,7 +268,7 @@ class CandidatePipelineExecutor:
             self.runtime.contract.split.time_column,
             self.runtime.contract.split.group_column,
         }
-        present = tuple(column for column in columns if column not in split_excluded)
+        present = tuple(column for column in (*columns, *lag_names) if column not in split_excluded)
         drop = tuple(
             column
             for column in present
@@ -275,7 +276,11 @@ class CandidatePipelineExecutor:
             and (
                 column in features.exclude
                 or column in features.id_columns
-                or (features.include is not None and column not in features.include)
+                or (
+                    features.include is not None
+                    and column not in features.include
+                    and column not in lag_names
+                )
             )
         )
         if drop:

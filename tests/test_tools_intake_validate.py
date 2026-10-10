@@ -295,6 +295,23 @@ def test_c1_missing_named_column_fails(
     assert "features.exclude" in fields
 
 
+def test_c1_lag_columns_must_exist(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    contract = DataContract.model_validate(
+        {
+            "target": {"column": "y"},
+            "features": {"lags": {"zz": [1]}},
+            "split": {"strategy": "temporal", "time_column": "d"},
+        }
+    )
+    write_snapshot(contract)
+    frame = pd.DataFrame({"y": [0, 1], "d": [1, 2]})
+    ref = _save(seeded_run, frame)
+    result = validate_contract(seeded_run, ref)
+    assert "features.lags.zz" in _fields(result.summary["mismatches"])
+
+
 # --- C2: target not entirely null ----------------------------------------------------------------
 
 

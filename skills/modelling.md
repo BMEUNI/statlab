@@ -111,12 +111,14 @@ Prepare one shared train, validation and locked test split.
 - Use random splitting only for independent rows. Time-ordered rows need split.strategy temporal with split.time_column in the contract; flag temporal dependence when the contract has no such split. Grouped rows have no split yet: escalate.
 - Remove only contract-approved, target-independent exact duplicates or high-missing rows before splitting; account for missing targets.
 - Verify counts, overlap and duplicates; require at least 30 validation and test rows and 5 per class for classification.
+- Contract lags (features.lags) are added from the whole time-ordered frame before any row is dropped; a lag of the target or of a column measured afterwards is honest only when it covers the gap to the prediction.
 
 ### Tools
 drop_duplicate_rows
 drop_high_missing_rows
 cast_dtypes
 drop_columns
+add_lag_features
 split_random
 split_stratified
 split_temporal
