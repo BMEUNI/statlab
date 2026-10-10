@@ -260,7 +260,13 @@ class ProjectsService:
         return row
 
     def persist_contract(self, project_id: str, contract: DataContract) -> ContractRow:
+        """An identical contract already saved in the project is returned
+        instead of saving a copy (chunk 75)."""
         project = self.project(project_id)
+        wanted = json.loads(contract.model_dump_json(exclude_unset=True))
+        for row in list_contracts(self.resources.conn, project.id):
+            if json.loads(row.contract_json) == wanted:
+                return row
         paths = self.paths(project)
         paths.root.mkdir(parents=True, exist_ok=True)
         paths.contracts.mkdir(parents=True, exist_ok=True)

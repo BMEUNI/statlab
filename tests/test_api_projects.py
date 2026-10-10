@@ -665,14 +665,21 @@ async def test_contract_upload_versions_validation_findings_and_no_runs(
         first_bytes = Path(first_row["path"]).read_bytes()
         second = await client.post(path, files={"file": ("partial.json", body, "application/json")})
         assert first.status_code == second.status_code == 201
-        assert first_row["version"] == 1 and second.json()["version"] == 2
+        assert first_row["version"] == 1 and second.json() == first_row
         assert Path(first_row["path"]).read_bytes() == first_bytes
         sparse = await client.post(
             path,
             files={"file": ("sparse.json", b'{"target": {"column": "a"}}', "application/json")},
         )
         assert sparse.status_code == 201
+        assert sparse.json()["version"] == 2
         assert Path(sparse.json()["path"]).read_bytes() == b'{"target":{"column":"a"}}'
+        again = await client.post(
+            path,
+            files={"file": ("reordered.json", b'{"target": {"column": "a"}}', "application/json")},
+        )
+        assert again.status_code == 201 and again.json() == sparse.json()
+        assert len((await client.get(path)).json()) == 2
 
         session.responses.append(
             _validation_profile(
