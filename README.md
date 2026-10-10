@@ -91,6 +91,32 @@ STATLAB_API_ORIGIN=http://127.0.0.1:8001 make ui
 Keep the development services on loopback. Never put secrets in `VITE_`
 variables; those can be exposed to browser code.
 
+## Share with other people (Tailscale Funnel)
+
+`make share` builds the frontend and starts MCP, the API and `vite preview` on
+http://127.0.0.1:4173 with Secure session cookies. Everything stays on loopback;
+a Tailscale Funnel publishes port 4173 over HTTPS.
+
+One-time setup: install Tailscale for macOS, sign in, install its command-line
+tool, and turn on MagicDNS and HTTPS certificates in the Tailscale admin console.
+
+```sh
+# Terminal 1
+make share
+```
+
+```sh
+# Terminal 2: prints the public https://<machine>.<tailnet>.ts.net address.
+tailscale funnel 4173
+```
+
+Anyone with the address can create an account, and their runs spend your LLM
+credit. Before sharing, set a low monthly budget for new people in Admin →
+Defaults, then raise it per person in Admin → People. Sign in through the
+`ts.net` address yourself too: Secure cookies may not stick on plain
+`http://127.0.0.1:4173` in every browser. The address works only while this
+machine is awake and both commands run. Stop with Ctrl-C in both terminals.
+
 ## Data and component guides
 
 By default, local data persists in `projects/` and `statlab.db` at the repository

@@ -183,9 +183,54 @@ def test_check_configuration_order_errors_usage_and_interrupt(
     assert "SECRET" not in error
     monkeypatch.setattr(dev, "load_settings", lambda: settings)
     assert dev.main(["unknown"]) == 2
-    assert capsys.readouterr().err == "Usage: dev.py check|dev\n"
+    assert capsys.readouterr().err == "Usage: dev.py check|dev|share\n"
     monkeypatch.setattr(dev, "load_settings", lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
     assert dev.main(["check"]) == 130
+
+
+def test_share_runs_vite_preview_with_secure_cookies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings, tools = configuration(tmp_path)
+    mcp, api, ui = FakeProcess("mcp"), FakeProcess("api"), FakeProcess("ui")
+    commands, _, _ = install_runtime(monkeypatch, [mcp, api, ui])
+
+    def sleep(seconds: float) -> None:
+        del seconds
+        api.code = 3
+
+    monkeypatch.setattr(time, "sleep", sleep)
+    assert dev.run_dev(settings, tools, ("preview",)) == 3
+    assert list(commands[2][0]) == [
+        "/usr/bin/node",
+        str(dev._ROOT / "frontend/node_modules/vite/bin/vite.js"),
+        "preview",
+    ]
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_dev(settings: Settings, tools: ToolSettings, ui_args: tuple[str, ...] = ()) -> int:
+        del settings, tools
+        calls.append(ui_args)
+        return 0
+
+    monkeypatch.setattr(dev, "run_dev", fake_run_dev)
+    monkeypatch.setattr(dev, "load_tool_settings", lambda: tools)
+    monkeypatch.setattr(dev, "check_startup_environment", lambda: None)
+    monkeypatch.setattr(dev, "load_settings", lambda: settings)
+    assert dev.main(["share"]) == 2
+    assert capsys.readouterr().err == "make share needs STATLAB_COOKIE_SECURE=true.\n"
+    assert calls == []
+
+    monkeypatch.setattr(
+        dev, "load_settings", lambda: settings.model_copy(update={"cookie_secure": True})
+    )
+    assert dev.main(["share"]) == 0
+    assert calls == [("preview",)]
+    assert dev.main(["dev"]) == 0
+    assert calls == [("preview",), ()]
 
 
 @pytest.mark.parametrize(

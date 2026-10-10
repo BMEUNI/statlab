@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 SHELL := /bin/bash
 
-.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev db-reset
+.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev share db-reset
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -44,6 +44,10 @@ ui: ## Run the Vite dev server alone (chunk 36+)
 
 dev: ## Run all three processes; one Ctrl-C stops everything
 	$(PY) scripts/dev.py dev
+
+share: ## Serve a built UI on 4173 for a Tailscale Funnel (Secure cookies)
+	cd frontend && node node_modules/vite/bin/vite.js build
+	STATLAB_COOKIE_SECURE=true $(PY) scripts/dev.py share
 
 db-reset: ## Delete the database (chunk 05+)
 	rm -f statlab.db statlab.db-wal statlab.db-shm

@@ -26,5 +26,6 @@ export default defineConfig({
     strictPort: true,
     proxy: { '/api': { target: origin, changeOrigin: true } },
   },
+  preview: { allowedHosts: ['.ts.net'] },
   build: { target: 'es2022' },
 });

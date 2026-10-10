@@ -98,7 +98,7 @@ def _stop(process: subprocess.Popen[bytes] | None) -> None:
     process.wait()
 
 
-def run_dev(settings: Settings, tools: ToolSettings) -> int:
+def run_dev(settings: Settings, tools: ToolSettings, ui_args: tuple[str, ...] = ()) -> int:
     api_origin, health_url = local_endpoints(settings, tools)
     node = shutil.which("node")
     vite = _ROOT / "frontend" / "node_modules" / "vite" / "bin" / "vite.js"
@@ -161,7 +161,7 @@ def run_dev(settings: Settings, tools: ToolSettings) -> int:
         environment = os.environ.copy()
         environment["STATLAB_API_ORIGIN"] = api_origin
         ui = subprocess.Popen(  # noqa: S603 - fixed executable and module arguments; no shell
-            [str(node_path), str(vite)],
+            [str(node_path), str(vite), *ui_args],
             cwd=_ROOT / "frontend",
             start_new_session=True,
             env=environment,
@@ -191,14 +191,19 @@ def run_dev(settings: Settings, tools: ToolSettings) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if list(arguments) not in (["check"], ["dev"]):
-        print("Usage: dev.py check|dev", file=sys.stderr)
+    if list(arguments) not in (["check"], ["dev"], ["share"]):
+        print("Usage: dev.py check|dev|share", file=sys.stderr)
         return 2
     try:
         settings, tools = check_configuration()
         if arguments[0] == "check":
             print("Configuration OK")
             return 0
+        if arguments[0] == "share":
+            if not settings.cookie_secure:
+                print("make share needs STATLAB_COOKIE_SECURE=true.", file=sys.stderr)
+                return 2
+            return run_dev(settings, tools, ("preview",))
         return run_dev(settings, tools)
     except ConfigError as exc:
         print("Configuration is invalid. Check .env and configuration values.", file=sys.stderr)
