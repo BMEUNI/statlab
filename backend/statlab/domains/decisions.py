@@ -39,6 +39,18 @@ class Decision(BaseModel):
         ),
     )
 
+    @field_validator("user_summary", mode="before")
+    @classmethod
+    def _shorten_summary(cls, value: object) -> object:
+        """Shorten an over-long chat summary at a sentence end
+        instead of failing the step (chunk 79)."""
+        if not isinstance(value, str) or len(value) <= 600:
+            return value
+        end = value[:601].rfind(". ")
+        if end >= 0:
+            return value[: end + 1]
+        return value[:599].rstrip() + "…"
+
 
 class ChampionChoice(Decision):
     candidate_id: str = Field(pattern=r"^c_[0-9]{2,}\z")
