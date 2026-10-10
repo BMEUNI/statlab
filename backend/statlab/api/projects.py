@@ -715,8 +715,21 @@ def projects_router(resources: Callable[[], APIResources]) -> APIRouter:
     async def validate_contract(
         project_id: str, body: ContractValidationRequest
     ) -> SetupValidation:
-        return await ProjectsService(resources()).validate(
+        """The wizard's check: data mismatches plus the fields a run needs
+        before it can start (chunk 78)."""
+        validation = await ProjectsService(resources()).validate(
             project_id, body.dataset_id, body.contract
+        )
+        missing = missing_setup_fields(body.contract)
+        if not missing:
+            return validation
+        required: list[dict[str, JsonValue]] = [
+            {"field": name, "message": "is required to start a run"} for name in missing
+        ]
+        return SetupValidation(
+            valid=False,
+            mismatches=(*validation.mismatches, *required),
+            warnings=validation.warnings,
         )
 
     @router.post(

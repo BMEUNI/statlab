@@ -642,3 +642,19 @@ test('predictUpload POSTs the file as multipart', async () => {
     assert.equal(preview.file, 'uploaded_predictions.csv');
   });
 });
+
+test('opted-in requests show the backend reason for 409 and 422', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'this run has no champion model yet' }), { status: 409 });
+    await assert.rejects(predictUnlabelled('r1'), (error: unknown) => error instanceof ApiError && error.message === 'This run has no champion model yet.');
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'contract is missing required setup fields.' }), { status: 422 });
+    await assert.rejects(createRun('p1', 'guided', 'd1', 'c1'), (error: unknown) => error instanceof ApiError && error.message === 'Contract is missing required setup fields.');
+    globalThis.fetch = async () => new Response('not json', { status: 422 });
+    await assert.rejects(predictUpload('r1', new Blob(['a']), 'x.csv'), (error: unknown) => error instanceof ApiError && error.message === 'Invalid request.');
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'hidden' }), { status: 422 });
+    await assert.rejects(createProject('s', 'S'), (error: unknown) => error instanceof ApiError && error.message === 'Invalid request.');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

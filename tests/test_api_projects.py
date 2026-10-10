@@ -712,6 +712,41 @@ async def test_contract_upload_versions_validation_findings_and_no_runs(
 
 
 @pytest.mark.asyncio
+async def test_validate_reports_fields_a_run_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, _, _, project):
+        dataset = await client.post(
+            f"/api/projects/{project['id']}/datasets",
+            files={"file": ("data.csv", b"a,b\n1,2\n3,4\n", "text/csv")},
+        )
+        row = dataset.json()
+        incomplete = await client.post(
+            f"/api/projects/{project['id']}/contracts/validate",
+            json={"dataset_id": row["id"], "contract": {"target": {"column": "a"}}},
+        )
+        assert incomplete.status_code == 200
+        assert incomplete.json() == {
+            "valid": False,
+            "mismatches": [
+                {"field": name, "message": "is required to start a run"}
+                for name in (
+                    "target.type",
+                    "objective.task",
+                    "objective.primary_metric",
+                    "split.strategy",
+                )
+            ],
+            "warnings": [],
+        }
+        complete = await client.post(
+            f"/api/projects/{project['id']}/contracts/validate",
+            json={"dataset_id": row["id"], "contract": _contract().model_dump(mode="json")},
+        )
+        assert complete.status_code == 200 and complete.json()["valid"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed_field", ["seed", "include", "exclude", "target"])
 async def test_proposal_rejects_changed_supplied_contract_fields(
     changed_field: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

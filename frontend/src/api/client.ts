@@ -596,7 +596,12 @@ type RequestOptions = {
   signal?: AbortSignal | undefined;
   text?: boolean;
   messages?: Partial<Record<number, string>>;
+  detail?: boolean;
 };
+
+function sentence(text: string): string {
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}${text.endsWith('.') ? '' : '.'}`;
+}
 
 async function request(path: string, options: RequestOptions): Promise<unknown> {
   const { method, json, form, signal, text } = options;
@@ -617,7 +622,16 @@ async function request(path: string, options: RequestOptions): Promise<unknown> 
   }
   if (!response.ok) {
     if (response.status === 401) for (const listener of signedOutListeners) listener();
-    const message = options.messages?.[response.status] ?? (response.status === 403 ? 'Locked until the test score is recorded.' :
+    let reason: string | null = null;
+    if (options.detail === true && (response.status === 409 || response.status === 422)) {
+      try {
+        const body: unknown = await response.json();
+        if (isJsonObject(body) && typeof body.detail === 'string' && body.detail.trim() !== '') reason = sentence(body.detail);
+      } catch {
+        /* keep the generic message */
+      }
+    }
+    const message = options.messages?.[response.status] ?? reason ?? (response.status === 403 ? 'Locked until the test score is recorded.' :
       response.status === 404 ? 'Resource not found.' :
       response.status === 409 ? 'Run transition rejected.' :
       response.status === 410 ? 'Artifact was pruned.' :
@@ -770,6 +784,7 @@ export async function createRun(
     await request(`${projectPath(projectId)}/runs`, {
       method: 'POST',
       json: { mode, dataset_ids: [datasetId], contract_id: contractId },
+      detail: true,
     }),
   );
 }
@@ -972,13 +987,13 @@ export function parsePredictionPreview(value: unknown): PredictionPreview {
 }
 
 export async function predictUnlabelled(runId: string, signal?: AbortSignal): Promise<PredictionPreview> {
-  return parsePredictionPreview(await request(`${runPath(runId)}/predictions`, { method: 'POST', signal }));
+  return parsePredictionPreview(await request(`${runPath(runId)}/predictions`, { method: 'POST', signal, detail: true }));
 }
 
 export async function predictUpload(runId: string, file: Blob, filename: string, signal?: AbortSignal): Promise<PredictionPreview> {
   const form = new FormData();
   form.append('file', file, filename);
-  return parsePredictionPreview(await request(`${runPath(runId)}/predictions/upload`, { method: 'POST', form, signal }));
+  return parsePredictionPreview(await request(`${runPath(runId)}/predictions/upload`, { method: 'POST', form, signal, detail: true }));
 }
 
 export function artifactUrl(id: string): string {

@@ -41,8 +41,8 @@ export default function StartStep({ projectId, datasetId, datasetName, draft, na
       <dl className="facts">
         <dt>Dataset</dt><dd>{datasetName}</dd>
         <dt>Target</dt><dd>{text(getAt(draft, ['target', 'column']), '—')}</dd>
-        <dt>Task</dt><dd>{text(getAt(draft, ['objective', 'task']), 'The agent decides')}</dd>
-        <dt>Primary metric</dt><dd>{text(getAt(draft, ['objective', 'primary_metric']), 'The agent decides')}</dd>
+        <dt>Task</dt><dd>{text(getAt(draft, ['objective', 'task']), '—')}</dd>
+        <dt>Primary metric</dt><dd>{text(getAt(draft, ['objective', 'primary_metric']), '—')}</dd>
       </dl>
       <fieldset>
         <legend>How should the run proceed?</legend>
