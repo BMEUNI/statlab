@@ -37,6 +37,7 @@ from statlab_tools.tools._frame import (
     is_numeric_column,
     iso8601_parse_share,
     json_scalar,
+    save_frame,
 )
 
 _OPTS: Final = DatasetOptions()
@@ -308,6 +309,56 @@ def load_csv(
         artifacts=(meta,),
         warnings=tuple(warnings),
     )
+
+
+UPLOAD_PATTERN: Final = r"^[0-9a-f]{32}\z"
+"""The token of an uploaded prediction file: its name in the run folder is `upload_<token>.csv`."""
+
+
+@tool(phase="artifacts", allow_in=["*"])
+def append_upload_rows(
+    paths: RunPaths,
+    raw: Annotated[ArtifactRef, Field(description="The run's raw table from load_csv.")],
+    upload: Annotated[
+        str,
+        Field(
+            pattern=UPLOAD_PATTERN,
+            description="The uploaded file's token; the file is upload_<token>.csv in the run "
+            "folder.",
+        ),
+    ],
+    target: Annotated[str, Field(min_length=1, description="The target column.")],
+    options: Annotated[DatasetOptions, Field(description="The run's CSV parsing options.")] = _OPTS,
+) -> ToolSuccess:
+    """Append an uploaded file's rows after the raw table's rows, with an empty target,
+    so the run's preparation can be replayed on them (chunk 77). Columns the file lacks become
+    empty; extra columns and a target column in the file are ignored."""
+    data = load_dataframe(paths.artifact(raw, "dataframe"))
+    new = _read_csv(paths.root / f"upload_{upload}.csv", options)
+    columns = [column for column in data.columns if column != target]
+    missing = [str(column) for column in columns if column not in new.columns]
+    ignored = [str(column) for column in new.columns if column not in columns]
+    if len(missing) == len(columns):
+        raise ToolDataError(
+            "the uploaded file shares no columns with the dataset; check its delimiter"
+        )
+    start = int(data.index.max()) + 1
+    rows = new.reindex(columns=columns)
+    rows.index = pd.RangeIndex(start, start + len(rows))
+    combined = pd.concat([data, rows])
+    for column in data.columns:
+        if (
+            isinstance(data[column].dtype, pd.StringDtype)
+            and combined[column].dtype != data[column].dtype
+        ):
+            combined[column] = combined[column].astype(data[column].dtype)
+    summary: dict[str, JsonValue] = {
+        "rows": len(rows),
+        "first_row": start,
+        "missing": list(missing),
+        "ignored": list(ignored),
+    }
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, combined, "with_upload"),))
 
 
 @tool(phase="setup", allow_in=["setup"], needs_run=False, heavy=False)

@@ -25,7 +25,7 @@ from statlab.errors import (
     ToolCallError,
     ToolNotAllowedError,
 )
-from statlab.mcp_client import CallContext, McpClient, logged_calls
+from statlab.mcp_client import CallContext, McpClient, PredictionUpload, logged_calls
 from statlab.persistence.db import connect
 from statlab.persistence.models import RunRow
 from statlab.persistence.repository import (
@@ -2219,6 +2219,9 @@ def _prediction_tools() -> tuple[object, ...]:
             transform_only=True,
         ),
         served_tool("drop_columns", _OPEN, allow_in=["*"], phase="cleaning"),
+        served_tool("append_upload_rows", _OPEN, allow_in=["*"], phase="artifacts"),
+        served_tool("cast_dtypes", _OPEN, allow_in=["data_profiling"], phase="cleaning"),
+        served_tool("split_random", _OPEN, allow_in=["data_splitting"], phase="splitting"),
         served_tool("write_predictions", _OPEN, allow_in=["*"], phase="artifacts"),
     )
 
@@ -2358,6 +2361,144 @@ async def test_predict_unlabelled_replays_and_deletes_unregistered_frames(
     assert paths.artifact(scaled.ref, "dataframe").exists()
     assert not paths.artifact(predicted.ref, "predictions").exists()
     assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_predict_unlabelled_upload_prepares_and_reports(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    combined = _made(paths, "dataframe")
+    typed = _made(paths, "dataframe")
+    rows = _made(paths, "dataframe")
+    predicted = _made(paths, "predictions")
+    session = FakeSession(_prediction_tools())
+    session.envelopes = [
+        ToolSuccess(
+            summary={"first_row": 5, "missing": ["m"], "ignored": ["i"]},
+            artifacts=(combined,),
+        ).model_dump(mode="json"),
+        ToolSuccess(artifacts=(typed,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(rows,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(predicted,)).model_dump(mode="json"),
+        ToolSuccess(summary={"rows": 1}).model_dump(mode="json"),
+    ]
+    upload = PredictionUpload(
+        token="0" * 32,
+        raw="a_" + "4" * 16,
+        options={"delimiter": ";"},
+        steps=(("cast_dtypes", {"target": "y"}),),
+    )
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        result = await client.predict_unlabelled(
+            project=paths.slug,
+            run=paths.run_id,
+            frame="a_" + "1" * 16,
+            target="y",
+            task="regression",
+            model="a_" + "2" * 16,
+            threshold=None,
+            replay=(),
+            upload=upload,
+        )
+    assert result.summary == {"rows": 1, "missing": ["m"], "ignored": ["i"]}
+    assert [name for name, _, _ in session.calls] == [
+        "append_upload_rows",
+        "cast_dtypes",
+        "unlabelled_rows",
+        "predict",
+        "write_predictions",
+    ]
+    assert session.calls[0][1] == {
+        "project": paths.slug,
+        "run": paths.run_id,
+        "raw": "a_" + "4" * 16,
+        "upload": "0" * 32,
+        "target": "y",
+        "options": {"delimiter": ";"},
+    }
+    assert session.calls[1][1] == {
+        "target": "y",
+        "project": paths.slug,
+        "run": paths.run_id,
+        "frame": str(combined.ref),
+    }
+    assert session.calls[2][1] == {
+        "project": paths.slug,
+        "run": paths.run_id,
+        "frame": str(typed.ref),
+        "target": "y",
+        "from_row": 5,
+    }
+    assert session.calls[4][1]["file"] == "uploaded_predictions.csv"
+    assert session.calls[4][1]["frame"] == str(rows.ref)
+    for made in (combined, typed, rows, predicted):
+        assert not paths.artifact(made.ref, made.kind).exists()
+
+    no_first_row = FakeSession(_prediction_tools())
+    no_first_row.envelopes = [
+        ToolSuccess(summary={}, artifacts=(_made(paths, "dataframe"),)).model_dump(mode="json")
+    ]
+    async with McpClient(settings(paths, tmp_path), conn, session=no_first_row) as client:
+        with pytest.raises(ToolCallError):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+                upload=upload,
+            )
+
+    bool_first_row = FakeSession(_prediction_tools())
+    bool_first_row.envelopes = [
+        ToolSuccess(summary={"first_row": True}, artifacts=(_made(paths, "dataframe"),)).model_dump(
+            mode="json"
+        )
+    ]
+    async with McpClient(settings(paths, tmp_path), conn, session=bool_first_row) as client:
+        with pytest.raises(ToolCallError):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+                upload=upload,
+            )
+
+    split_steps = FakeSession(_prediction_tools())
+    split_steps.envelopes = [
+        ToolSuccess(
+            summary={"first_row": 5, "missing": [], "ignored": []},
+            artifacts=(_made(paths, "dataframe"),),
+        ).model_dump(mode="json")
+    ]
+    split_upload = PredictionUpload(
+        token="0" * 32,
+        raw="a_" + "4" * 16,
+        options={"delimiter": ";"},
+        steps=(("split_random", {}),),
+    )
+    async with McpClient(settings(paths, tmp_path), conn, session=split_steps) as client:
+        with pytest.raises(EngineError, match="cannot prepare uploaded rows"):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+                upload=split_upload,
+            )
 
 
 @pytest.mark.asyncio

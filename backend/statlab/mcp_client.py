@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from types import TracebackType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import httpx2
 from jsonschema import Draft202012Validator, SchemaError
@@ -74,6 +74,19 @@ class CallContext:
     contract: DataContract
     dataset: str
     champion_selected: bool = False
+
+
+PREPARATION_TOOLS: Final = frozenset({"cast_dtypes", "add_lag_features", "drop_columns"})
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionUpload:
+    """An uploaded file and the run's preparation to replay on it before predicting (chunk 77)."""
+
+    token: str
+    raw: str
+    options: dict[str, JsonValue]
+    steps: tuple[tuple[str, dict[str, JsonValue]], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,11 +415,16 @@ class McpClient:
             },
         )
 
-    def _prediction_spec(self, tool: str, *, replayed: bool) -> ToolSpec:
+    def _prediction_spec(
+        self, tool: str, *, kind: Literal["fixed", "replayed", "prepared"]
+    ) -> ToolSpec:
         spec = self.tools.get(tool)
-        if replayed:
+        if kind == "replayed":
             if spec is None or not spec.transform_only:
                 raise EngineError(f"{tool} cannot be replayed for predictions")
+        elif kind == "prepared":
+            if spec is None or tool not in PREPARATION_TOOLS or spec.heavy:
+                raise EngineError(f"{tool} cannot prepare uploaded rows")
         elif (
             spec is None
             or spec.phase != "artifacts"
@@ -423,9 +441,9 @@ class McpClient:
         arguments: dict[str, JsonValue],
         made: list[ArtifactMeta],
         *,
-        replayed: bool,
-    ) -> str:
-        spec = self._prediction_spec(tool, replayed=replayed)
+        kind: Literal["fixed", "replayed", "prepared"],
+    ) -> tuple[str, dict[str, JsonValue]]:
+        spec = self._prediction_spec(tool, kind=kind)
         result = await self._dispatch_direct(spec, arguments, read_timeout_seconds=900)
         made.extend(result.artifacts)
         if len(result.artifacts) != 1:
@@ -433,7 +451,7 @@ class McpClient:
                 tool,
                 Failure(error_class="bug", message=f"{tool} must return exactly one artifact"),
             )
-        return str(result.artifacts[0].ref)
+        return (str(result.artifacts[0].ref), result.summary)
 
     async def predict_unlabelled(
         self,
@@ -446,9 +464,11 @@ class McpClient:
         model: str,
         threshold: float | None,
         replay: tuple[tuple[str, dict[str, JsonValue]], ...],
+        upload: PredictionUpload | None = None,
     ) -> ToolSuccess:
         """Predict the dataset's rows without a target with the champion and write predictions.csv,
-        without run-scoped accounting (chunk 77). Frames made on the way are deleted afterwards."""
+        without run-scoped accounting (chunk 77). Frames made on the way are deleted afterwards.
+        With upload, the uploaded rows instead (written to uploaded_predictions.csv)."""
         if self._session is None:
             raise EngineError("MCP client is not entered")
         if get_project_by_slug(self.conn, project) is None:
@@ -456,25 +476,64 @@ class McpClient:
         paths = RunPaths(self.settings.data_dir, project, run)
         made: list[ArtifactMeta] = []
         try:
-            rows = await self._prediction_step(
-                "unlabelled_rows",
-                {"project": project, "run": run, "frame": frame, "target": target},
-                made,
-                replayed=False,
+            source = frame
+            rows_arguments: dict[str, JsonValue] = {
+                "project": project,
+                "run": run,
+                "frame": frame,
+                "target": target,
+            }
+            notes: dict[str, JsonValue] = {}
+            if upload is not None:
+                source, appended = await self._prediction_step(
+                    "append_upload_rows",
+                    {
+                        "project": project,
+                        "run": run,
+                        "raw": upload.raw,
+                        "upload": upload.token,
+                        "target": target,
+                        "options": upload.options,
+                    },
+                    made,
+                    kind="fixed",
+                )
+                first_row = appended.get("first_row")
+                if isinstance(first_row, bool) or not isinstance(first_row, int):
+                    raise ToolCallError(
+                        "append_upload_rows",
+                        Failure(
+                            error_class="bug", message="append_upload_rows returned no first_row"
+                        ),
+                    )
+                for tool, parameters in upload.steps:
+                    source, _ = await self._prediction_step(
+                        tool,
+                        {**parameters, "project": project, "run": run, "frame": source},
+                        made,
+                        kind="prepared",
+                    )
+                rows_arguments.update(frame=source, from_row=first_row)
+                notes = {
+                    "missing": appended.get("missing", []),
+                    "ignored": appended.get("ignored", []),
+                }
+            rows, _ = await self._prediction_step(
+                "unlabelled_rows", rows_arguments, made, kind="fixed"
             )
             current = rows
             for tool, parameters in replay:
-                current = await self._prediction_step(
+                current, _ = await self._prediction_step(
                     tool,
                     {**parameters, "project": project, "run": run, "frame": current},
                     made,
-                    replayed=True,
+                    kind="replayed",
                 )
-            predicted = await self._prediction_step(
+            predicted, _ = await self._prediction_step(
                 "predict_proba" if task == "classification" else "predict",
                 {"project": project, "run": run, "model": model, "frame": current},
                 made,
-                replayed=True,
+                kind="replayed",
             )
             arguments: dict[str, JsonValue] = {
                 "project": project,
@@ -485,8 +544,10 @@ class McpClient:
             }
             if threshold is not None:
                 arguments["threshold"] = threshold
+            if upload is not None:
+                arguments["file"] = "uploaded_predictions.csv"
             written = await self._dispatch_direct(
-                self._prediction_spec("write_predictions", replayed=False),
+                self._prediction_spec("write_predictions", kind="fixed"),
                 arguments,
                 read_timeout_seconds=900,
             )
@@ -497,7 +558,7 @@ class McpClient:
                         error_class="bug", message="write_predictions returned unexpected artifacts"
                     ),
                 )
-            return written
+            return written.model_copy(update={"summary": {**written.summary, **notes}})
         finally:
             for meta in made:
                 if ARTIFACT_ID_PATTERN.match(str(meta.ref)) and (

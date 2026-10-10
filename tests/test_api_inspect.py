@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from pydantic import JsonValue
+from statlab.api.inspect import _preparation
 from statlab.config import Settings
 from statlab.domains.base import NodeResult
 from statlab.domains.decisions import ProblemSpec
@@ -499,7 +501,9 @@ async def test_predictions_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
                 node_execution_id=seed.execution_id,
                 tool_name="split_random",
                 args_json=json.dumps({"frame": seed.frame}),
-                result_json=ToolFailure(error_class="data", message="m").model_dump_json(),
+                result_json=ToolFailure(
+                    error_class="data", message=f"split failed near {seed.test_frame}"
+                ).model_dump_json(),
                 duration_ms=5,
             )
             record_tool_call(
@@ -581,3 +585,240 @@ async def test_predictions_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         assert served.status_code == 200
         assert served.headers["content-type"].startswith("text/csv")
         assert served.content == b"a,b\n"
+
+
+@pytest.mark.asyncio
+async def test_predictions_upload_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, session, project):
+        seed = _seed(settings, str(project["id"]))
+        paths = RunPaths(settings.data_dir, "demo", seed.run_id)
+        url = f"/api/runs/{seed.run_id}/predictions/upload"
+        model = str(new_artifact_ref())
+        imputer = str(new_artifact_ref())
+        upload = {"file": ("new.csv", b"b\n1\n", "text/csv")}
+        paths.state_json.write_text(
+            _prediction_state(
+                seed,
+                champion={
+                    "model": model,
+                    "threshold": 0.4,
+                    "replay": [{"tool": "apply_imputer", "parameters": {"imputer": imputer}}],
+                },
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+
+        def record(tool: str, arguments: dict[str, JsonValue], outputs: list[str]) -> None:
+            conn = connect(settings.db_path)
+            try:
+                record_tool_call(
+                    conn,
+                    run_id=seed.run_id,
+                    node_execution_id=seed.execution_id,
+                    tool_name=tool,
+                    args_json=json.dumps(arguments),
+                    result_json=ToolSuccess(
+                        artifacts=tuple(
+                            ArtifactMeta(ref=parse_artifact_ref(ref), kind="dataframe")
+                            for ref in outputs
+                        )
+                    ).model_dump_json(),
+                    duration_ms=5,
+                )
+            finally:
+                conn.close()
+
+        unrecorded = await client.post(url, files=upload)
+        assert unrecorded.status_code == 409
+        assert unrecorded.json() == {
+            "detail": "the rows before the split are not recorded for this run"
+        }
+        raw = new_artifact_ref()
+        typed = new_artifact_ref()
+        combined = new_artifact_ref()
+        typed2 = new_artifact_ref()
+        rows = new_artifact_ref()
+        imputed = new_artifact_ref()
+        probas = new_artifact_ref()
+        record("split_random", {"frame": seed.frame}, [seed.test_frame])
+        record("drop_duplicate_rows", {"frame": str(typed), "subset": ["b"]}, [seed.frame])
+        unprepared = await client.post(url, files=upload)
+        assert unprepared.status_code == 409
+        assert unprepared.json() == {
+            "detail": "this run's data preparation cannot be repeated on new rows"
+        }
+        record(
+            "cast_dtypes",
+            {"frame": str(raw), "target": "a", "project": "demo", "run": seed.run_id},
+            [str(typed)],
+        )
+        still_unprepared = await client.post(url, files=upload)
+        assert still_unprepared.status_code == 409
+        assert still_unprepared.json() == {
+            "detail": "this run's data preparation cannot be repeated on new rows"
+        }
+        record(
+            "load_csv",
+            {"delimiter": ";", "dataset": "x", "project": "demo", "run": seed.run_id},
+            [str(raw)],
+        )
+        session.responses.append(
+            ToolSuccess(
+                summary={"first_row": 7, "missing": [], "ignored": []},
+                artifacts=(ArtifactMeta(ref=combined, kind="dataframe"),),
+            )
+        )
+        session.responses.append(
+            ToolSuccess(artifacts=(ArtifactMeta(ref=typed2, kind="dataframe"),))
+        )
+        session.responses.append(ToolSuccess(artifacts=(ArtifactMeta(ref=rows, kind="dataframe"),)))
+        session.responses.append(
+            ToolSuccess(artifacts=(ArtifactMeta(ref=imputed, kind="dataframe"),))
+        )
+        session.responses.append(
+            ToolSuccess(artifacts=(ArtifactMeta(ref=probas, kind="predictions"),))
+        )
+        session.responses.append(
+            ToolSuccess(summary={"rows": 1, "file": "uploaded_predictions.csv"})
+        )
+        ok = await client.post(url, files=upload)
+        assert ok.status_code == 200
+        assert ok.json() == {
+            "rows": 1,
+            "file": "uploaded_predictions.csv",
+            "missing": [],
+            "ignored": [],
+        }
+        assert [name for name, _, _ in session.calls[-6:]] == [
+            "append_upload_rows",
+            "cast_dtypes",
+            "unlabelled_rows",
+            "apply_imputer",
+            "predict_proba",
+            "write_predictions",
+        ]
+        append_arguments = session.calls[-6][1]
+        assert append_arguments["options"] == {"delimiter": ";"}
+        assert append_arguments["raw"] == str(raw)
+        token = append_arguments["upload"]
+        assert isinstance(token, str)
+        assert re.fullmatch(r"[0-9a-f]{32}", token) is not None
+        assert not paths.root.joinpath(f"upload_{token}.csv").exists()
+        assert session.calls[-5][1] == {
+            "target": "a",
+            "project": "demo",
+            "run": seed.run_id,
+            "frame": str(combined),
+        }
+        assert not paths.artifact(rows, "dataframe").exists()
+
+        empty_name = await client.post(url, files={"file": ("new.txt", b"b\n1\n", "text/plain")})
+        assert empty_name.status_code == 422
+        empty = await client.post(url, files={"file": ("new.csv", b"", "text/csv")})
+        assert empty.status_code == 422
+        assert empty.json() == {"detail": "uploaded file is empty"}
+        assert list(paths.root.glob("upload_*.csv")) == []
+
+        paths.root.joinpath("uploaded_predictions.csv").write_bytes(b"r\n")
+        served = await client.get(f"/api/runs/{seed.run_id}/files/uploaded_predictions.csv")
+        assert served.status_code == 200
+        assert served.headers["content-type"].startswith("text/csv")
+
+
+@pytest.mark.asyncio
+async def test_preparation_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (_client, settings, _session, project):
+        seed = _seed(settings, str(project["id"]))
+        conn = connect(settings.db_path)
+        try:
+            other = str(new_artifact_ref())
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="detect_outliers",
+                args_json=json.dumps({"frame": other}),
+                result_json=ToolSuccess(
+                    artifacts=(ArtifactMeta(ref=parse_artifact_ref(seed.frame), kind="dataframe"),)
+                ).model_dump_json(),
+                duration_ms=5,
+            )
+            assert _preparation(conn, seed.run_id, seed.frame) is None
+            loop = str(new_artifact_ref())
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="drop_columns",
+                args_json=json.dumps({"frame": loop, "columns": ["b"]}),
+                result_json=ToolSuccess(
+                    artifacts=(ArtifactMeta(ref=parse_artifact_ref(loop), kind="dataframe"),)
+                ).model_dump_json(),
+                duration_ms=5,
+            )
+            assert _preparation(conn, seed.run_id, loop) is None
+        finally:
+            conn.close()
+
+
+@pytest.mark.asyncio
+async def test_predictions_upload_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _open_project_api(tmp_path, monkeypatch, max_upload_mb=1) as (
+        client,
+        settings,
+        _session,
+        project,
+    ):
+        seed = _seed(settings, str(project["id"]))
+        paths = RunPaths(settings.data_dir, "demo", seed.run_id)
+        url = f"/api/runs/{seed.run_id}/predictions/upload"
+        model = str(new_artifact_ref())
+        imputer = str(new_artifact_ref())
+        paths.state_json.write_text(
+            _prediction_state(
+                seed,
+                champion={
+                    "model": model,
+                    "threshold": 0.4,
+                    "replay": [{"tool": "apply_imputer", "parameters": {"imputer": imputer}}],
+                },
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+        conn = connect(settings.db_path)
+        try:
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="split_random",
+                args_json=json.dumps({"frame": seed.frame}),
+                result_json=ToolSuccess(
+                    artifacts=(
+                        ArtifactMeta(ref=parse_artifact_ref(seed.test_frame), kind="dataframe"),
+                    )
+                ).model_dump_json(),
+                duration_ms=5,
+            )
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="load_csv",
+                args_json=json.dumps({}),
+                result_json=ToolSuccess(
+                    artifacts=(ArtifactMeta(ref=parse_artifact_ref(seed.frame), kind="dataframe"),)
+                ).model_dump_json(),
+                duration_ms=5,
+            )
+        finally:
+            conn.close()
+        oversized = await client.post(
+            url,
+            files={"file": ("big.csv", b"a\n" + b"x" * (1024 * 1024 - 1), "text/csv")},
+        )
+        assert oversized.status_code == 413
+        assert oversized.json() == {"detail": "upload exceeds limit"}
+        assert list(paths.root.glob("upload_*.csv")) == []

@@ -80,7 +80,6 @@ _CI_HIGH_PCT: Final = 97.5
 _SCORE_PHASES = ("model_evaluation", "champion_selection")
 _CURVE_PHASES = ("model_evaluation", "model_interpretation", "champion_selection")
 _CV_PHASES = ("model_evaluation",)
-PREDICTIONS_CSV: Final = "predictions.csv"
 
 _Truth = Annotated[
     ArtifactRef, Field(description="A frame holding the true `target` column; aligned by label.")
@@ -605,18 +604,35 @@ def unlabelled_rows(
         ),
     ],
     target: Annotated[str, Field(min_length=1, description="The target column.")],
+    from_row: Annotated[
+        int | None,
+        Field(
+            ge=0,
+            description="Predict the rows labelled from_row onwards (an uploaded file) instead "
+            "of the rows without a target.",
+        ),
+    ] = None,
 ) -> ToolSuccess:
     """The frame's rows whose target is missing, without the target column, saved as a new frame
-    to predict on (chunk 77). The caller deletes that frame after use."""
+    to predict on (chunk 77). The caller deletes that frame after use. With from_row, the rows
+    labelled from_row onwards instead, relabelled from 0."""
     data = load_dataframe(paths.artifact(frame, "dataframe"))
     if target not in data.columns:
         raise ToolParamError(
             "target is not a column of the frame",
             field_errors={"target": "not in the frame"},
         )
-    rows = data.loc[data[target].isna()].drop(columns=[target])
+    if from_row is None:
+        rows = data.loc[data[target].isna()].drop(columns=[target])
+    else:
+        rows = data.loc[data.index >= from_row].drop(columns=[target])
+        rows.index = rows.index - from_row
     if rows.empty:
-        raise ToolDataError("the dataset has no rows without a target to predict")
+        raise ToolDataError(
+            "the dataset has no rows without a target to predict"
+            if from_row is None
+            else "the uploaded file has no rows to predict"
+        )
     return ToolSuccess(
         summary={"rows": len(rows)}, artifacts=(save_frame(paths, rows, "unlabelled"),)
     )
@@ -639,8 +655,12 @@ def write_predictions(
     threshold: Annotated[
         float | None, Field(gt=0, lt=1, description="Binary p(positive)>=threshold, as scored.")
     ] = None,
+    file: Annotated[
+        Literal["predictions.csv", "uploaded_predictions.csv"],
+        Field(description="The output file in the run folder."),
+    ] = "predictions.csv",
 ) -> ToolSuccess:
-    """Join predictions to their rows by label and write predictions.csv in the run folder: a row
+    """Join predictions to their rows by label and write file in the run folder: a row
     column (the dataset row label), the original columns, prediction and, for classification, one
     probability_{class} column per class. Hard classes follow score_classification. Returns the
     first 20 rows (chunk 77)."""
@@ -677,9 +697,9 @@ def write_predictions(
     out = data.copy()
     for name, values in added.items():
         out[name] = values
-    temporary = paths.root / f".{PREDICTIONS_CSV}.{new_artifact_ref()}.tmp"
+    temporary = paths.root / f".{file}.{new_artifact_ref()}.tmp"
     out.to_csv(temporary, index_label="row")
-    temporary.replace(paths.root / PREDICTIONS_CSV)
+    temporary.replace(paths.root / file)
     head: list[JsonValue] = [
         {
             "row": json_scalar(label),
@@ -695,6 +715,7 @@ def write_predictions(
             "rows": len(out),
             "columns": ["row", *(str(column) for column in out.columns)],
             "head": head,
+            "file": file,
         }
     )
 

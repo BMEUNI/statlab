@@ -2,7 +2,7 @@
 status: in_progress
 dependencies: [76]
 completion_date: null
-implementation_notes: "77a temporal split + time-ordered CV; 77b lag features; 77c backend predictions on unlabelled rows; 77d run-page Predictions tab; 77e predictions on an uploaded file"
+implementation_notes: "77a temporal split + time-ordered CV; 77b lag features; 77c backend predictions on unlabelled rows; 77d run-page Predictions tab; 77e backend predictions on an uploaded file; 77f upload in the Predictions tab"
 ---
 
 # Chunk 77 — time-ordered tables and predictions
@@ -30,8 +30,11 @@ Stages (execution order; each later spec is written after the previous handoff):
   pre-split steps, lags included), replay the champion's chain and model on them and write
   `predictions.csv` in the run folder (works for any finished run, any task and split).
 - **77d** run-page Predictions tab: a button, a preview of the first rows, Download CSV.
-- **77e** predictions for an uploaded file (same columns as the dataset; lags read history from
-  the dataset).
+- **77e** backend predictions for an uploaded file: the file's rows join the dataset's raw rows,
+  the run's own preparation steps (casts, lags, dropped columns; row filters left out) are
+  replayed on the combined table so lags read the dataset's history, then the champion predicts
+  the uploaded rows into `uploaded_predictions.csv`.
+- **77f** Predictions tab: upload a file and download its predictions.
 
 ## Stage 77a (detailed spec)
 
@@ -1022,3 +1025,357 @@ without a target" showed "17952 rows predicted. The first 20 are shown; download
 of them.", the 20-row table and Download CSV (`.playwright-mcp/77d-predictions-tab.png`). Only
 console errors were pre-login (favicon 404, `/api/auth/me` 401). Scratch servers stopped and
 directory deleted. Python is unchanged, so 77c's `make check` evidence holds.
+
+## Stage 77e (detailed spec): backend predictions for an uploaded file
+
+Goal: `POST /api/runs/{run_id}/predictions/upload` (multipart, one `file` part, `.csv`) predicts
+every row of the uploaded file with the champion and writes `<run>/uploaded_predictions.csv`
+(downloadable via the run-file route). Works for any run 77c works for, provided its
+preparation chain is replayable (below).
+
+Design (main):
+- Preparation chain: walk producers back from the split source (77c `_split_source`): each
+  frame was produced by a logged call whose `frame` argument is the previous frame, ending at the
+  `load_csv` output (the raw table). Observed chains (user DB): `load_csv` → [`cast_dtypes`] →
+  [`add_lag_features`] → [`drop_duplicate_rows`] → [`drop_high_missing_rows`] →
+  [`drop_columns`] → `split_*` (`foundation.py` ~680-790). Row filters (`drop_duplicate_rows`,
+  `drop_high_missing_rows`) are skipped so no uploaded row disappears; `cast_dtypes`,
+  `add_lag_features`, `drop_columns` are replayed with their logged arguments. Any other tool in
+  the chain → 409.
+- Combined table: raw rows + uploaded rows (labels continue after the raw labels, target
+  empty), read with the run's logged `load_csv` options. Uploaded columns missing from the
+  dataset become empty (reported); extra columns and an uploaded target column are ignored
+  (reported). String columns keep the dataset's string dtype. Lags over the combined table read
+  the dataset's history for the uploaded rows.
+- The uploaded rows (labels ≥ first uploaded label) are selected by `unlabelled_rows` with a
+  new `from_row`, relabelled from 0 (the file's own row order), then 77c's replay, prediction and
+  write run unchanged except the output file name.
+- The upload is stored as `<run>/upload_<32 hex>.csv` for the request only and deleted
+  afterwards (concurrent uploads never share a file).
+
+Owned files: `mcp_server/statlab_tools/tools/intake.py`,
+`mcp_server/statlab_tools/tools/evaluation.py`, `backend/statlab/mcp_client.py`,
+`backend/statlab/api/inspect.py`, `tests/test_tools_intake_load.py`,
+`tests/test_tools_evaluation.py`, `tests/test_mcp_client.py`, `tests/test_api_inspect.py`. Not
+alone: preserve others' edits.
+
+### 1. `intake.py`: new tool after `load_csv`
+
+`UPLOAD_PATTERN: Final = r"^[0-9a-f]{32}\z"` (module constant next to the tool).
+
+`@tool(phase="artifacts", allow_in=["*"])`
+`def append_upload_rows(paths: RunPaths, raw: Annotated[ArtifactRef, Field(description="The
+run's raw table from load_csv.")], upload: Annotated[str, Field(pattern=UPLOAD_PATTERN,
+description="The uploaded file's token; the file is upload_<token>.csv in the run folder.")],
+target: Annotated[str, Field(min_length=1, description="The target column.")], options:
+Annotated[DatasetOptions, Field(description="The run's CSV parsing options.")] = _OPTS) ->
+ToolSuccess`
+Docstring: `"""Append an uploaded file's rows after the raw table's rows, with an empty target,
+so the run's preparation can be replayed on them (chunk 77). Columns the file lacks become
+empty; extra columns and a target column in the file are ignored."""`
+Body, in order:
+1. `data = load_dataframe(paths.artifact(raw, "dataframe"))`.
+2. `new = _read_csv(paths.root / f"upload_{upload}.csv", options)`.
+3. If `new.empty`: raise `ToolDataError("the uploaded file has no rows")`.
+4. `columns = [column for column in data.columns if column != target]`;
+   `missing = [str(column) for column in columns if column not in new.columns]`;
+   `ignored = [str(column) for column in new.columns if column not in columns]`.
+5. If `len(missing) == len(columns)`: raise `ToolDataError("the uploaded file shares no
+   columns with the dataset; check its delimiter")`.
+6. `start = int(data.index.max()) + 1`; `rows = new.reindex(columns=columns)`;
+   `rows.index = pd.RangeIndex(start, start + len(rows))`.
+7. `combined = pd.concat([data, rows])`. Then for `column in data.columns`: if
+   `isinstance(data[column].dtype, pd.StringDtype) and combined[column].dtype !=
+   data[column].dtype`: `combined[column] = combined[column].astype(data[column].dtype)`.
+8. Return `ToolSuccess(summary={"rows": len(rows), "first_row": start, "missing": missing,
+   "ignored": ignored}, artifacts=(save_frame(paths, combined, "with_upload"),))` (import
+   `save_frame` from `statlab_tools.tools._frame` if not imported yet; `missing`/`ignored` are
+   `list[str]`, annotate `JsonValue` lists as needed for mypy).
+
+### 2. `evaluation.py`
+
+a. `unlabelled_rows` gains, after `target`: `from_row: Annotated[int | None, Field(ge=0,
+   description="Predict the rows labelled from_row onwards (an uploaded file) instead of the
+   rows without a target.")] = None`. Body step 3 becomes: if `from_row is None`: as now;
+   else `rows = data.loc[data.index >= from_row].drop(columns=[target])` and
+   `rows.index = rows.index - from_row`. Step 4's message becomes `"the dataset has no rows
+   without a target to predict" if from_row is None else "the uploaded file has no rows to
+   predict"`. Docstring gains the sentence `With from_row, the rows labelled from_row onwards
+   instead, relabelled from 0.`
+b. `write_predictions` gains, last: `file: Annotated[Literal["predictions.csv",
+   "uploaded_predictions.csv"], Field(description="The output file in the run folder.")] =
+   "predictions.csv"`. Use `file` wherever `PREDICTIONS_CSV` is used (temporary name and
+   target); delete the `PREDICTIONS_CSV` constant. The summary gains `"file": file` (last key).
+   Docstring: replace `write predictions.csv` with `write file`.
+
+### 3. `mcp_client.py`
+
+a. Module level, after `CallContext`:
+   - `PREPARATION_TOOLS: Final = frozenset({"cast_dtypes", "add_lag_features",
+     "drop_columns"})` (add `Final` to the `typing` import).
+   - `@dataclass(frozen=True, slots=True) class PredictionUpload:` docstring `"""An uploaded
+     file and the run's preparation to replay on it before predicting (chunk 77)."""`, fields
+     `token: str`, `raw: str`, `options: dict[str, JsonValue]`, `steps: tuple[tuple[str,
+     dict[str, JsonValue]], ...]`.
+b. `_prediction_spec(self, tool: str, *, kind: Literal["fixed", "replayed", "prepared"])`:
+   `"replayed"` keeps today's `replayed=True` rule; `"fixed"` keeps today's `replayed=False`
+   rule; `"prepared"`: if `spec is None or tool not in PREPARATION_TOOLS or spec.heavy`: raise
+   `EngineError(f"{tool} cannot prepare uploaded rows")`.
+c. `_prediction_step(..., *, kind: Literal["fixed", "replayed", "prepared"]) -> tuple[str,
+   dict[str, JsonValue]]`: same body, passes `kind`, returns
+   `(str(result.artifacts[0].ref), result.summary)`. Update the existing call sites
+   (`replayed=False` → `kind="fixed"`, `replayed=True` → `kind="replayed"`, unpack `ref, _`).
+d. `predict_unlabelled` gains the last keyword parameter `upload: PredictionUpload | None =
+   None`; docstring gains `With upload, the uploaded rows instead (written to
+   uploaded_predictions.csv).` Inside `try`, before the `unlabelled_rows` step:
+   - `source = frame`; `rows_arguments: dict[str, JsonValue] = {"project": project, "run": run,
+     "frame": frame, "target": target}`; `notes: dict[str, JsonValue] = {}`.
+   - If `upload is not None`:
+     1. `source, appended = await self._prediction_step("append_upload_rows", {"project":
+        project, "run": run, "raw": upload.raw, "upload": upload.token, "target": target,
+        "options": upload.options}, made, kind="fixed")`.
+     2. `first_row = appended.get("first_row")`; if `isinstance(first_row, bool) or not
+        isinstance(first_row, int)`: raise `ToolCallError("append_upload_rows",
+        Failure(error_class="bug", message="append_upload_rows returned no first_row"))`.
+     3. For `tool, parameters in upload.steps`: `source, _ = await
+        self._prediction_step(tool, {**parameters, "project": project, "run": run, "frame":
+        source}, made, kind="prepared")`.
+     4. `rows_arguments.update(frame=source, from_row=first_row)`;
+        `notes = {"missing": appended.get("missing", []), "ignored": appended.get("ignored",
+        [])}`.
+   - The `unlabelled_rows` step uses `rows_arguments`.
+   - After `if threshold is not None: ...`: if `upload is not None`:
+     `arguments["file"] = "uploaded_predictions.csv"`.
+   - The final `return written` becomes `return written.model_copy(update={"summary":
+     {**written.summary, **notes}})`.
+
+### 4. `inspect.py`
+
+a. Imports: `secrets`, `tempfile`, `from pathlib import Path`, `from fastapi import Request`
+   (extend the fastapi import), `from statlab.api.projects import bounded_file` (extend),
+   `from statlab.mcp_client import PREPARATION_TOOLS, PredictionUpload`, `from typing import
+   Final` (extend), `dataclass` from `dataclasses`.
+b. `RUN_FILES` gains `"uploaded_predictions.csv": (("uploaded_predictions.csv",), "text/csv;
+   charset=utf-8")` (last). Constants: `NO_PREPARATION = "this run's data preparation cannot
+   be repeated on new rows"`, `ROW_FILTERS: Final = frozenset({"drop_duplicate_rows",
+   "drop_high_missing_rows"})`, `LOAD_OPTIONS: Final = ("delimiter", "encoding", "decimal",
+   "na_values", "header_row")`, `_CHUNK: Final = 64 * 1024`.
+c. Replace `_split_source` with two functions:
+   - `def _producer(conn: sqlite3.Connection, run_id: str, ref: str) -> tuple[str, dict[str,
+     JsonValue]] | None:` docstring `"""The tool and arguments of the logged call that produced
+     ref, in the run or a fork ancestor (chunk 77)."""`. For `ancestor in run_ancestry(conn,
+     run_id)`: for `call in list_tool_calls(conn, ancestor.id)`: `if ref not in
+     call.result_json: continue`; `result = TOOL_RESULT_ADAPTER.validate_json(
+     call.result_json)`; if `isinstance(result, ToolSuccess) and any(str(meta.ref) == ref for
+     meta in result.artifacts)`: `arguments = json.loads(call.args_json)`; return
+     `(call.tool_name, arguments if isinstance(arguments, dict) else {})`. After the loops
+     return `None`.
+   - `def _split_source(conn, run_id, test) -> str | None:` `found = _producer(conn, run_id,
+     test)`; if `found is None or not found[0].startswith("split_")`: return `None`;
+     `source = found[1].get("frame")`; return `source if isinstance(source, str) else None`.
+d. New function `def _preparation(conn: sqlite3.Connection, run_id: str, source: str) ->
+   tuple[str, dict[str, JsonValue], tuple[tuple[str, dict[str, JsonValue]], ...]] | None:`
+   docstring `"""The raw table, its load_csv options and the replayable steps from it to the
+   split source, row filters left out; None when the chain cannot be replayed (chunk 77)."""`.
+   `steps: list[tuple[str, dict[str, JsonValue]]] = []`; `current = source`; loop `for _ in
+   range(20):` `found = _producer(conn, run_id, current)`; if `None`: return `None`;
+   `tool, arguments = found`; if `tool == "load_csv"`: return `(current, {key:
+   arguments[key] for key in LOAD_OPTIONS if key in arguments}, tuple(reversed(steps)))`;
+   `previous = arguments.get("frame")`; if `not isinstance(previous, str) or tool not in
+   PREPARATION_TOOLS | ROW_FILTERS`: return `None`; if `tool in PREPARATION_TOOLS`:
+   `steps.append((tool, {key: value for key, value in arguments.items() if key not in
+   ("project", "run", "frame")}))`; `current = previous`. After the loop return `None`.
+e. Refactor the 77c route body (no behavior change) into:
+   - `@dataclass(frozen=True, slots=True) class _Champion:` fields `target: str`, `task:
+     Literal["classification", "regression"]` (import `Literal`), `model: str`, `threshold:
+     float | None`, `replay: tuple[tuple[str, dict[str, JsonValue]], ...]`, `source: str`.
+   - `def _champion(resource: APIResources, run: RunRow, paths: RunPaths) -> _Champion`: steps
+     1-6 of the 77c route (same HTTP errors, same order), returning the dataclass
+     (`threshold` already narrowed to `float | None`, `replay` as the tuple passed today).
+   - `async def _predict(resource: APIResources, run: RunRow, paths: RunPaths, champion:
+     _Champion, upload: PredictionUpload | None) -> dict[str, JsonValue]`: step 7 (the
+     `predict_unlabelled` call with `upload=upload` and the same `ToolCallError` mapping),
+     returning `result.summary`.
+   - The 77c route becomes: `run, paths = _run(resource, run_id)`; `return await
+     _predict(resource, run, paths, _champion(resource, run, paths), None)`.
+f. New route after it: `@router.post("/api/runs/{run_id}/predictions/upload")` `async def
+   predict_upload(run_id: str, request: Request) -> dict[str, JsonValue]:`
+   1. `resource = resources()`; `run, paths = _run(resource, run_id)`; `champion =
+      _champion(resource, run, paths)`.
+   2. `preparation = _preparation(resource.conn, run.id, champion.source)`; if `None`: raise
+      `HTTPException(409, NO_PREPARATION)`. `raw, options, steps = preparation`.
+   3. `token = secrets.token_hex(16)`; `stored = paths.root / f"upload_{token}.csv"`;
+      `limit = min(resource.settings.max_upload_mb, 200) * 1024 * 1024`; `size = 0`.
+   4. `try:` `async with bounded_file(request, limit=limit) as uploaded:` `name =
+      uploaded.filename or ""`; if `Path(name).suffix.lower() != ".csv"`: raise
+      `HTTPException(422, "CSV filename must end in .csv")`; `with stored.open("wb") as
+      handle:` `while chunk := await uploaded.read(_CHUNK):` `size += len(chunk)`; if
+      `size > limit`: raise `HTTPException(413, "upload exceeds limit")`;
+      `handle.write(chunk)`. After the `async with`: if `size == 0`: raise
+      `HTTPException(422, "uploaded file is empty")`. Then `return await _predict(resource,
+      run, paths, champion, PredictionUpload(token=token, raw=raw, options=options,
+      steps=steps))`. `except OSError: raise HTTPException(500, "could not store the uploaded
+      file") from None` `finally: stored.unlink(missing_ok=True)`.
+   (`tempfile` is not needed after all: do not import it.)
+
+### 5. Tests
+
+a. `tests/test_tools_intake_load.py`: import `append_upload_rows` and `save_dataframe`,
+   `new_artifact_ref`. `test_append_upload_rows(run_paths)`:
+   - `ref = new_artifact_ref()`; `save_dataframe(run_paths.artifact(ref, "dataframe"),
+     pd.DataFrame({"t": [1, 2], "name": pd.array(["a", "b"], dtype="str"), "y": [0.0, 1.0]}),
+     ref=ref, label="raw")`; `token = "0" * 32`; write `"t,extra,y\n3,z,5\n4,w,\n"` to
+     `run_paths.root / f"upload_{token}.csv"`.
+   - `res = append_upload_rows(run_paths, raw=ref, upload=token, target="y")`: assert
+     `res.summary == {"rows": 2, "first_row": 2, "missing": ["name"], "ignored": ["extra",
+     "y"]}`; `combined = load_dataframe(run_paths.artifact(res.artifacts[0].ref,
+     "dataframe"))`: `list(combined.index) == [0, 1, 2, 3]`, `list(combined["t"]) == [1, 2, 3,
+     4]`, `combined["y"].isna().tolist() == [False, False, True, True]`,
+     `isinstance(combined["name"].dtype, pd.StringDtype)`.
+   - Refusals (`pytest.raises(ToolDataError)`): a header-only upload `"t,name\n"` (no rows);
+     an upload `"a;b\n1;2\n"` (shares no columns); a token whose file does not exist
+     (`"1" * 32`).
+b. `tests/test_tools_evaluation.py`:
+   - `test_unlabelled_rows`: add `uploaded = unlabelled_rows(run_paths, frame=frame,
+     target="y", from_row=12)`; its saved frame has index `[0, 1]` and columns `["x"]`; and
+     `pytest.raises(ToolDataError)` for `from_row=99`.
+   - `test_write_predictions_regression`: the expected summary gains `"file":
+     "predictions.csv"`; then `again = write_predictions(run_paths, frame=frame,
+     predictions=preds, task="regression", file="uploaded_predictions.csv")`:
+     `again.summary["file"] == "uploaded_predictions.csv"` and `(run_paths.root /
+     "uploaded_predictions.csv").exists()`.
+c. `tests/test_mcp_client.py`: `_prediction_tools()` gains
+   `served_tool("append_upload_rows", _OPEN, allow_in=["*"], phase="artifacts")`,
+   `served_tool("cast_dtypes", _OPEN, allow_in=["data_profiling"], phase="cleaning")`,
+   `served_tool("split_random", _OPEN, allow_in=["data_splitting"], phase="splitting")`.
+   New `test_predict_unlabelled_upload_prepares_and_reports(world, tmp_path)`:
+   - Envelopes in order: `ToolSuccess(summary={"first_row": 5, "missing": ["m"], "ignored":
+     ["i"]}, artifacts=(combined,))`, `(typed,)`, `(rows,)`, `(predicted,)` (each `_made`;
+     `predicted` kind predictions, others dataframe), then `ToolSuccess(summary={"rows":
+     1})`. Call with `task="regression"`, `threshold=None`, `replay=()`, `frame="a_" + "1" *
+     16`, `model="a_" + "2" * 16`, `upload=PredictionUpload(token="0" * 32, raw="a_" + "4" *
+     16, options={"delimiter": ";"}, steps=(("cast_dtypes", {"target": "y"}),))`.
+   - Assert `result.summary == {"rows": 1, "missing": ["m"], "ignored": ["i"]}`; call names
+     `["append_upload_rows", "cast_dtypes", "unlabelled_rows", "predict",
+     "write_predictions"]`; append arguments `{"project": paths.slug, "run": paths.run_id,
+     "raw": "a_" + "4" * 16, "upload": "0" * 32, "target": "y", "options": {"delimiter":
+     ";"}}`; cast arguments `{"target": "y", "project": paths.slug, "run": paths.run_id,
+     "frame": str(combined.ref)}`; unlabelled arguments `{"project": paths.slug, "run":
+     paths.run_id, "frame": str(typed.ref), "target": "y", "from_row": 5}`; write arguments
+     include `"file": "uploaded_predictions.csv"` and `"frame": str(rows.ref)`; none of the
+     four made files exists afterwards.
+   - Guards, each with a fresh session and the same upload unless noted: (1) append envelope
+     `ToolSuccess(summary={}, artifacts=(_made(paths, "dataframe"),))` → `ToolCallError`
+     (no first_row); (2) `first_row` `True` → `ToolCallError`; (3) upload steps
+     `(("split_random", {}),)` with a valid append envelope → `EngineError` match `"cannot
+     prepare uploaded rows"`.
+d. `tests/test_api_inspect.py`:
+   - In `test_predictions_route`, the failed `split_random` row's message becomes
+     `f"split failed near {seed.test_frame}"` (so the producer search parses and skips a
+     failure that mentions the ref). Nothing else in that test changes.
+   - New `test_predictions_upload_route(tmp_path, monkeypatch)` with the same champion state as
+     step 4 of `test_predictions_route` (classification, threshold 0.4, one `apply_imputer`
+     step). `url = f"/api/runs/{seed.run_id}/predictions/upload"`; `upload = {"file":
+     ("new.csv", b"b\n1\n", "text/csv")}`. Helper `record(tool, arguments, outputs)` inside
+     the test opens `connect(settings.db_path)`, records one successful call (`ToolSuccess(
+     artifacts=tuple(ArtifactMeta(ref=parse_artifact_ref(ref), kind="dataframe") for ref in
+     outputs))`), closes; `outputs` is a list of `str` refs. Refs `raw`, `typed`, `combined`, `typed2`,
+     `rows`, `imputed`, `probas` are `new_artifact_ref()` values (`str(...)` in JSON arguments,
+     `record` outputs and assertions; the `ArtifactRef` itself in `ArtifactMeta`). `seed.frame`
+     is the split source, `seed.test_frame` the test frame.
+     1. No calls recorded yet: POST gives 409 `{"detail": "the rows before the split are not
+        recorded for this run"}`.
+     2. `record("split_random", {"frame": seed.frame}, [seed.test_frame])` and
+        `record("drop_duplicate_rows", {"frame": typed, "subset": ["b"]}, [seed.frame])`:
+        POST gives 409 `{"detail": "this run's data preparation cannot be repeated on new
+        rows"}` (no producer for `typed`).
+     3. `record("cast_dtypes", {"frame": raw, "target": "a", "project": "demo", "run":
+        seed.run_id}, [typed])`: POST gives the same 409 (no producer for `raw`).
+     4. `record("load_csv", {"delimiter": ";", "dataset": "x", "project": "demo", "run":
+        seed.run_id}, [raw])`.
+     5. Queue responses: append `ToolSuccess(summary={"first_row": 7, "missing": [],
+        "ignored": []}, artifacts=(ArtifactMeta(ref=combined, kind="dataframe"),))`, cast →
+        `typed2`, unlabelled → `rows`, imputer → `imputed`, predict_proba → `probas` (kinds
+        dataframe except `probas` predictions), write → `ToolSuccess(summary={"rows": 1,
+        "file": "uploaded_predictions.csv"})`. POST with `files=upload`: 200, JSON `{"rows":
+        1, "file": "uploaded_predictions.csv", "missing": [], "ignored": []}`. The last six
+        call names are `["append_upload_rows", "cast_dtypes", "unlabelled_rows",
+        "apply_imputer", "predict_proba", "write_predictions"]`; the append arguments'
+        `"options" == {"delimiter": ";"}` and `"raw" == raw`; its `"upload"` token is 32 hex
+        characters and `paths.root / f"upload_{token}.csv"` no longer exists; the cast
+        arguments equal `{"target": "a", "project": "demo", "run": seed.run_id, "frame":
+        str(combined)}` (the `drop_duplicate_rows` row filter is not replayed).
+     6. Upload errors: `files={"file": ("new.txt", b"b\n1\n", "text/plain")}` → 422; an empty
+        `("new.csv", b"", "text/csv")` → 422 `"uploaded file is empty"`; and no
+        `upload_*.csv` file is left in `paths.root` (`list(paths.root.glob("upload_*.csv")) ==
+        []`).
+     7. `GET /api/runs/{seed.run_id}/files/uploaded_predictions.csv` after writing `b"r\n"` to
+        that file: 200 `text/csv`.
+   - New `test_preparation_refusals(tmp_path, monkeypatch)` (import `_preparation` from
+     `statlab.api.inspect`; same `_open_project_api` + `_seed` setup, then `conn =
+     connect(settings.db_path)`, closed in `finally`; record calls with `record_tool_call` as in
+     `test_predictions_route`): (1) `other = str(new_artifact_ref())`; record
+     `detect_outliers` with args `{"frame": other}` producing `seed.frame`; assert
+     `_preparation(conn, seed.run_id, seed.frame) is None`. (2) `loop = str(new_artifact_ref())`;
+     record `drop_columns` with args `{"frame": loop, "columns": ["b"]}` producing `loop`; assert
+     `_preparation(conn, seed.run_id, loop) is None` (the 20-step limit ends the cycle).
+
+### 6. Checks
+
+`make test-fast TESTS="tests/test_tools_intake_load.py tests/test_tools_evaluation.py
+tests/test_mcp_client.py tests/test_api_inspect.py tests/test_skills.py
+tests/test_tool_decorator.py"` (counts via `.venv/bin/python -m pytest -p no:cacheprovider -o
+addopts="" -q <same selectors>`); Ruff check, Ruff format --check and mypy on the eight owned
+files. Stop and report on any failure or gap.
+
+Main then: review; scratch end-to-end probe (upload a few rows of the friend's dataset to its
+run copy, and a regression run); `make check`; commit; then write 77f.
+
+### Addendum 77e-A (no-shared-columns test input)
+
+`_read_csv` already refuses a one-column parse whose header contains another delimiter
+(`ToolParamError`), so 5a's `"a;b\n1;2\n"` never reaches the no-shared-columns check. In
+`test_append_upload_rows` replace that upload with `"p,q\n1,2\n"` (still
+`pytest.raises(ToolDataError)`). The served-tool placement before `write_predictions` is
+accepted. Rerun all subsection 6 checks.
+
+### Addendum 77e-B (coverage: two dead branches, one missing test)
+
+`make check` (main): 99 %, uncovered `intake.py` 339 and `inspect.py` 372, 384.
+1. `intake.py` `append_upload_rows`: delete step 3 (`if new.empty: raise ...`). `_read_csv`
+   already refuses a file without data rows ("file has zero data rows", `ToolDataError`), so it
+   is unreachable; the header-only test case still expects `ToolDataError`.
+2. `inspect.py` `predict_upload`: delete the `except OSError:` clause (keep `try`/`finally`).
+   The app's `OSError` handler already answers 500 `internal error`; the `finally` still deletes
+   the stored upload.
+3. `tests/test_api_inspect.py`: new `test_predictions_upload_size_limit(tmp_path,
+   monkeypatch)`: `_open_project_api(tmp_path, monkeypatch, max_upload_mb=1)`; `_seed`; write
+   the same champion state as `test_predictions_upload_route`; record (as there)
+   `split_random` with args `{"frame": seed.frame}` producing `seed.test_frame`, and `load_csv`
+   with args `{}` producing `seed.frame`. POST `files={"file": ("big.csv", b"a\n" + b"x" *
+   (1024 * 1024 - 1), "text/csv")}` (1 MiB + 1 byte; file parts pass the parser's part limit
+   and reach the route's own check): status 413, `{"detail": "upload exceeds limit"}`, and
+   `list(paths.root.glob("upload_*.csv")) == []`.
+Rerun all subsection 6 checks.
+
+## Stage 77e acceptance receipt (2026-10-10)
+
+Implementer (after addenda A, B): focused selectors (intake load, evaluation, mcp client, api
+inspect, skills, tool decorator) exit 0, 296 passed; Ruff check/format and mypy on the eight
+owned files exit 0. Accepted deviations: served test tools placed before `write_predictions`;
+one description string wrapped for E501. Main reviewed the full diff (matches the recipe and
+addenda).
+
+Probe (main; scratch copies of `teszt` and `regression-test` plus a `.backup` DB snapshot,
+other projects deleted, paths rewritten, `awaiting_user` runs cancelled; MCP 8767, API 8766):
+- `r_f5e9364ca69378fa` (classification, chain `load_csv` → `drop_duplicate_rows` →
+  `drop_columns`): upload of 5 day-4 rows without `target_flag`, `target_reg`, `ke` plus an
+  extra `note` column → 200, 5 rows, `missing` `["ke", "target_reg"]`, `ignored` `["note"]`,
+  file `uploaded_predictions.csv`, rows relabelled 0-4.
+- `r_922ffb37436a8f84` (regression, chain with `cast_dtypes`): first 5 dataset rows without
+  `exam_score` → 200, predictions 89.9 / 87.0 / 77.3 / 78.2 / 53.4 against actual 90.4 / 86.2 /
+  76.1 / 79.7 / 50.7; CSV download 200.
+- No `upload_*.csv` left; artifact count unchanged (288). Servers stopped, scratch deleted.
+
+`make check` (`check77e2.log`, temporary) exit 0: coverage 100 % (TOTAL 13754 stmts, 0
+missed), mypy 212 files, Ruff clean.

@@ -1480,6 +1480,12 @@ def test_unlabelled_rows(run_paths: RunPaths) -> None:
     full = _save(run_paths, pd.DataFrame({"x": [1], "y": [1.0]}))
     with pytest.raises(ToolDataError):
         unlabelled_rows(run_paths, frame=full, target="y")
+    uploaded = unlabelled_rows(run_paths, frame=frame, target="y", from_row=12)
+    saved_uploaded = load_dataframe(run_paths.artifact(uploaded.artifacts[0].ref, "dataframe"))
+    assert list(saved_uploaded.index) == [0, 1]
+    assert list(saved_uploaded.columns) == ["x"]
+    with pytest.raises(ToolDataError):
+        unlabelled_rows(run_paths, frame=frame, target="y", from_row=99)
 
 
 def test_write_predictions_classification(run_paths: RunPaths) -> None:
@@ -1538,7 +1544,17 @@ def test_write_predictions_regression(run_paths: RunPaths) -> None:
             {"row": 0, "x": 1, "prediction": 1.5},
             {"row": 1, "x": 2, "prediction": 2.5},
         ],
+        "file": "predictions.csv",
     }
+    again = write_predictions(
+        run_paths,
+        frame=frame,
+        predictions=preds,
+        task="regression",
+        file="uploaded_predictions.csv",
+    )
+    assert again.summary["file"] == "uploaded_predictions.csv"
+    assert (run_paths.root / "uploaded_predictions.csv").exists()
 
 
 def test_write_predictions_refusals(run_paths: RunPaths) -> None:

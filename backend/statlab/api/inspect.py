@@ -5,23 +5,27 @@ from __future__ import annotations
 import json
 import math
 import re
+import secrets
 import sqlite3
 from collections.abc import Callable
-from typing import Annotated
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Final, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from statlab_contracts.artifacts import ArtifactKind, parse_artifact_ref
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
 from statlab_contracts.layout import RunPaths
 
-from statlab.api.projects import APIResources, ProjectsService
+from statlab.api.projects import APIResources, ProjectsService, bounded_file
 from statlab.domains.candidate_pipeline import candidate_result
 from statlab.domains.decisions import ReplayStep
 from statlab.domains.foundation import problem_from_state, shared_result
 from statlab.errors import EngineError, ToolCallError
 from statlab.graph.state import RunState
+from statlab.mcp_client import PREPARATION_TOOLS, PredictionUpload
 from statlab.persistence.models import (
     ArtifactRow,
     LlmCallRow,
@@ -64,6 +68,7 @@ RUN_FILES: dict[str, tuple[tuple[str, ...], str]] = {
     "contract.snapshot.json": (("contract.snapshot.json",), "application/json"),
     "skill.snapshot.md": (("skill.snapshot.md",), "text/markdown; charset=utf-8"),
     "predictions.csv": (("predictions.csv",), "text/csv; charset=utf-8"),
+    "uploaded_predictions.csv": (("uploaded_predictions.csv",), "text/csv; charset=utf-8"),
 }
 ARTIFACT_MEDIA: dict[ArtifactKind, str] = {
     "dataframe": "application/octet-stream",
@@ -80,6 +85,20 @@ PLOT_NAME = re.compile(r"^a_[0-9a-f]{16}\.(?:png|chart\.json)\Z")
 NO_VALIDATION = "this model has no validation predictions yet"
 NO_CHAMPION = "this run has no champion model yet"
 NO_SOURCE = "the rows before the split are not recorded for this run"
+NO_PREPARATION = "this run's data preparation cannot be repeated on new rows"
+ROW_FILTERS: Final = frozenset({"drop_duplicate_rows", "drop_high_missing_rows"})
+LOAD_OPTIONS: Final = ("delimiter", "encoding", "decimal", "na_values", "header_row")
+_CHUNK: Final = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _Champion:
+    target: str
+    task: Literal["classification", "regression"]
+    model: str
+    threshold: float | None
+    replay: tuple[tuple[str, dict[str, JsonValue]], ...]
+    source: str
 
 
 def _locked(artifact: ArtifactRow, run: RunRow) -> bool:
@@ -119,22 +138,127 @@ def _artifact(resource: APIResources, artifact_id: str) -> tuple[ArtifactRow, Ru
     return row, paths
 
 
+def _producer(
+    conn: sqlite3.Connection, run_id: str, ref: str
+) -> tuple[str, dict[str, JsonValue]] | None:
+    """The tool and arguments of the logged call that produced ref, in the run or a fork ancestor
+    (chunk 77)."""
+    for ancestor in run_ancestry(conn, run_id):
+        for call in list_tool_calls(conn, ancestor.id):
+            if ref not in call.result_json:
+                continue
+            result = TOOL_RESULT_ADAPTER.validate_json(call.result_json)
+            if isinstance(result, ToolSuccess) and any(
+                str(meta.ref) == ref for meta in result.artifacts
+            ):
+                arguments = json.loads(call.args_json)
+                return (call.tool_name, arguments if isinstance(arguments, dict) else {})
+    return None
+
+
 def _split_source(conn: sqlite3.Connection, run_id: str, test: str) -> str | None:
     """The frame the shared split was made from: the frame argument of the logged split call that
     produced the test frame, in the run or a fork ancestor (chunk 77)."""
-    for ancestor in run_ancestry(conn, run_id):
-        for call in list_tool_calls(conn, ancestor.id):
-            if not call.tool_name.startswith("split_"):
-                continue
-            result = TOOL_RESULT_ADAPTER.validate_json(call.result_json)
-            source = json.loads(call.args_json).get("frame")
-            if (
-                isinstance(result, ToolSuccess)
-                and any(str(meta.ref) == test for meta in result.artifacts)
-                and isinstance(source, str)
-            ):
-                return source
+    found = _producer(conn, run_id, test)
+    if found is None or not found[0].startswith("split_"):
+        return None
+    source = found[1].get("frame")
+    return source if isinstance(source, str) else None
+
+
+def _preparation(
+    conn: sqlite3.Connection, run_id: str, source: str
+) -> tuple[str, dict[str, JsonValue], tuple[tuple[str, dict[str, JsonValue]], ...]] | None:
+    """The raw table, its load_csv options and the replayable steps from it to the split source,
+    row filters left out; None when the chain cannot be replayed (chunk 77)."""
+    steps: list[tuple[str, dict[str, JsonValue]]] = []
+    current = source
+    for _ in range(20):
+        found = _producer(conn, run_id, current)
+        if found is None:
+            return None
+        tool, arguments = found
+        if tool == "load_csv":
+            return (
+                current,
+                {key: arguments[key] for key in LOAD_OPTIONS if key in arguments},
+                tuple(reversed(steps)),
+            )
+        previous = arguments.get("frame")
+        if not isinstance(previous, str) or tool not in PREPARATION_TOOLS | ROW_FILTERS:
+            return None
+        if tool in PREPARATION_TOOLS:
+            steps.append(
+                (
+                    tool,
+                    {
+                        key: value
+                        for key, value in arguments.items()
+                        if key not in ("project", "run", "frame")
+                    },
+                )
+            )
+        current = previous
     return None
+
+
+def _champion(resource: APIResources, run: RunRow, paths: RunPaths) -> _Champion:
+    state = _checkpoint(paths)
+    if state is None:
+        raise HTTPException(409, NO_CHAMPION)
+    try:
+        champion = shared_result(state, "champion_selection").summary
+        split = shared_result(state, "data_splitting").summary
+        problem = problem_from_state(state)
+    except EngineError:
+        raise HTTPException(409, NO_CHAMPION) from None
+    model = champion.get("model")
+    replay = champion.get("replay")
+    test = split.get("test")
+    if not isinstance(model, str) or not isinstance(replay, list) or not isinstance(test, str):
+        raise HTTPException(409, NO_CHAMPION)
+    try:
+        steps = tuple(ReplayStep.model_validate(item) for item in replay)
+    except ValidationError:
+        raise EngineError("champion replay is malformed") from None
+    source = _split_source(resource.conn, run.id, test)
+    if source is None:
+        raise HTTPException(409, NO_SOURCE)
+    threshold = champion.get("threshold")
+    return _Champion(
+        target=problem.target,
+        task=problem.task,
+        model=model,
+        threshold=threshold if isinstance(threshold, float) else None,
+        replay=tuple((step.tool, dict(step.parameters)) for step in steps),
+        source=source,
+    )
+
+
+async def _predict(
+    resource: APIResources,
+    run: RunRow,
+    paths: RunPaths,
+    champion: _Champion,
+    upload: PredictionUpload | None,
+) -> dict[str, JsonValue]:
+    try:
+        result = await resource.mcp.predict_unlabelled(
+            project=paths.slug,
+            run=run.id,
+            frame=champion.source,
+            target=champion.target,
+            task=champion.task,
+            model=champion.model,
+            threshold=champion.threshold,
+            replay=champion.replay,
+            upload=upload,
+        )
+    except ToolCallError as exc:
+        if exc.failure.error_class in ("tool_param", "data"):
+            raise HTTPException(422, exc.failure.message) from None
+        raise
+    return result.summary
 
 
 def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
@@ -221,44 +345,43 @@ def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
     async def predictions(run_id: str) -> dict[str, JsonValue]:
         resource = resources()
         run, paths = _run(resource, run_id)
-        state = _checkpoint(paths)
-        if state is None:
-            raise HTTPException(409, NO_CHAMPION)
+        return await _predict(resource, run, paths, _champion(resource, run, paths), None)
+
+    @router.post("/api/runs/{run_id}/predictions/upload")
+    async def predict_upload(run_id: str, request: Request) -> dict[str, JsonValue]:
+        resource = resources()
+        run, paths = _run(resource, run_id)
+        champion = _champion(resource, run, paths)
+        preparation = _preparation(resource.conn, run.id, champion.source)
+        if preparation is None:
+            raise HTTPException(409, NO_PREPARATION)
+        raw, options, steps = preparation
+        token = secrets.token_hex(16)
+        stored = paths.root / f"upload_{token}.csv"
+        limit = min(resource.settings.max_upload_mb, 200) * 1024 * 1024
+        size = 0
         try:
-            champion = shared_result(state, "champion_selection").summary
-            split = shared_result(state, "data_splitting").summary
-            problem = problem_from_state(state)
-        except EngineError:
-            raise HTTPException(409, NO_CHAMPION) from None
-        model = champion.get("model")
-        replay = champion.get("replay")
-        test = split.get("test")
-        if not isinstance(model, str) or not isinstance(replay, list) or not isinstance(test, str):
-            raise HTTPException(409, NO_CHAMPION)
-        try:
-            steps = tuple(ReplayStep.model_validate(item) for item in replay)
-        except ValidationError:
-            raise EngineError("champion replay is malformed") from None
-        source = _split_source(resource.conn, run.id, test)
-        if source is None:
-            raise HTTPException(409, NO_SOURCE)
-        threshold = champion.get("threshold")
-        try:
-            result = await resource.mcp.predict_unlabelled(
-                project=paths.slug,
-                run=run.id,
-                frame=source,
-                target=problem.target,
-                task=problem.task,
-                model=model,
-                threshold=threshold if isinstance(threshold, float) else None,
-                replay=tuple((step.tool, dict(step.parameters)) for step in steps),
+            async with bounded_file(request, limit=limit) as uploaded:
+                name = uploaded.filename or ""
+                if Path(name).suffix.lower() != ".csv":
+                    raise HTTPException(422, "CSV filename must end in .csv")
+                with stored.open("wb") as handle:
+                    while chunk := await uploaded.read(_CHUNK):
+                        size += len(chunk)
+                        if size > limit:
+                            raise HTTPException(413, "upload exceeds limit")
+                        handle.write(chunk)
+            if size == 0:
+                raise HTTPException(422, "uploaded file is empty")
+            return await _predict(
+                resource,
+                run,
+                paths,
+                champion,
+                PredictionUpload(token=token, raw=raw, options=options, steps=steps),
             )
-        except ToolCallError as exc:
-            if exc.failure.error_class in ("tool_param", "data"):
-                raise HTTPException(422, exc.failure.message) from None
-            raise
-        return result.summary
+        finally:
+            stored.unlink(missing_ok=True)
 
     @router.get("/api/artifacts/{artifact_id}")
     async def download(artifact_id: str) -> FileResponse:

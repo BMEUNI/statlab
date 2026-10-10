@@ -17,11 +17,16 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import pytest
 from pydantic import JsonValue
+from statlab_contracts.artifacts import new_artifact_ref
 from statlab_contracts.contract import DatasetOptions
 from statlab_contracts.layout import ProjectPaths, RunPaths
-from statlab_tools.artifacts import load_dataframe
+from statlab_tools.artifacts import load_dataframe, save_dataframe
 from statlab_tools.tool import ToolDataError, ToolParamError
-from statlab_tools.tools.intake import ROW_WARNING_THRESHOLD, load_csv
+from statlab_tools.tools.intake import (
+    ROW_WARNING_THRESHOLD,
+    append_upload_rows,
+    load_csv,
+)
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -442,3 +447,39 @@ def test_l20_a_genuinely_unexpected_value_error_is_not_caught_here(
     monkeypatch.setattr(pd, "read_csv", _fake_read_csv)
     with pytest.raises(ValueError, match="never actually raises"):
         load_csv(seeded_run, dataset=digest)
+
+
+def test_append_upload_rows(run_paths: RunPaths) -> None:
+    ref = new_artifact_ref()
+    save_dataframe(
+        run_paths.artifact(ref, "dataframe"),
+        pd.DataFrame({"t": [1, 2], "name": pd.array(["a", "b"], dtype="str"), "y": [0.0, 1.0]}),
+        ref=ref,
+        label="raw",
+    )
+    token = "0" * 32
+    (run_paths.root / f"upload_{token}.csv").write_text(
+        "t,extra,y\n3,z,5\n4,w,\n", encoding="utf-8"
+    )
+    res = append_upload_rows(run_paths, raw=ref, upload=token, target="y")
+    assert res.summary == {
+        "rows": 2,
+        "first_row": 2,
+        "missing": ["name"],
+        "ignored": ["extra", "y"],
+    }
+    combined = load_dataframe(run_paths.artifact(res.artifacts[0].ref, "dataframe"))
+    assert list(combined.index) == [0, 1, 2, 3]
+    assert list(combined["t"]) == [1, 2, 3, 4]
+    assert combined["y"].isna().tolist() == [False, False, True, True]
+    assert isinstance(combined["name"].dtype, pd.StringDtype)
+    header_only = "2" * 32
+    (run_paths.root / f"upload_{header_only}.csv").write_text("t,name\n", encoding="utf-8")
+    with pytest.raises(ToolDataError):
+        append_upload_rows(run_paths, raw=ref, upload=header_only, target="y")
+    no_shared = "3" * 32
+    (run_paths.root / f"upload_{no_shared}.csv").write_text("p,q\n1,2\n", encoding="utf-8")
+    with pytest.raises(ToolDataError):
+        append_upload_rows(run_paths, raw=ref, upload=no_shared, target="y")
+    with pytest.raises(ToolDataError):
+        append_upload_rows(run_paths, raw=ref, upload="1" * 32, target="y")
