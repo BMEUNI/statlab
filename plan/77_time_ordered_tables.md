@@ -1,7 +1,7 @@
 ---
-status: in_progress
+status: completed
 dependencies: [76]
-completion_date: null
+completion_date: 2026-10-10
 implementation_notes: "77a temporal split + time-ordered CV; 77b lag features; 77c backend predictions on unlabelled rows; 77d run-page Predictions tab; 77e backend predictions on an uploaded file; 77f upload in the Predictions tab"
 ---
 
@@ -1379,3 +1379,100 @@ other projects deleted, paths rewritten, `awaiting_user` runs cancelled; MCP 876
 
 `make check` (`check77e2.log`, temporary) exit 0: coverage 100 % (TOTAL 13754 stmts, 0
 missed), mypy 212 files, Ruff clean.
+
+## Stage 77f (detailed spec): upload a file in the Predictions tab
+
+Goal: the run page's Predictions tab also predicts an uploaded CSV through 77e's
+`POST /api/runs/{run_id}/predictions/upload` and links the summary's `file` for download, with
+the `missing`/`ignored` column notes. Non-goals: drag and drop, upload progress.
+
+Owned files: `frontend/src/api/types.ts`, `frontend/src/api/client.ts`,
+`frontend/src/run/PredictionsView.tsx`, `frontend/tests/client.test.ts`. Not alone: preserve
+others' edits.
+
+1. `types.ts` `PredictionPreview` gains `file: string; missing: string[]; ignored: string[];`
+   (after `head`).
+2. `client.ts`:
+   - `parsePredictionPreview` returns additionally `file: requiredString(value, 'file')`,
+     `missing: value.missing === undefined ? [] : stringArray(value.missing)`, `ignored:
+     value.ignored === undefined ? [] : stringArray(value.ignored)`.
+   - After `predictUnlabelled`: `export async function predictUpload(runId: string, file:
+     Blob, filename: string, signal?: AbortSignal): Promise<PredictionPreview>`: `const form =
+     new FormData(); form.append('file', file, filename);` return
+     `parsePredictionPreview(await request(\`${runPath(runId)}/predictions/upload\`, { method:
+     'POST', form, signal }))`.
+3. `PredictionsView.tsx` (rewrite the file; keep the default export name and props):
+   - Imports: `useMutation` from `@tanstack/react-query`; `useState` from `react`;
+     `predictUnlabelled`, `predictUpload`, `runFileUrl` from `../api/client.ts`; `type
+     PredictionPreview` from `../api/types.ts`; `errorText` from `../ui/format.ts`; `cellText`
+     from `./compare.ts`.
+   - Local component `function Preview({ runId, preview }: { runId: string; preview:
+     PredictionPreview })` returning a fragment with, in order: the `<p
+     className="secondary-line">` row-count sentence exactly as 77d (using `preview`); when
+     `preview.missing.length > 0`: `<p className="help">{\`Not in your file, treated as empty:
+     ${preview.missing.join(', ')}.\`}</p>`; when `preview.ignored.length > 0`: `<p
+     className="help">{\`Not used by this run, ignored: ${preview.ignored.join(', ')}.\`}</p>`;
+     `<p><a className="button" href={runFileUrl(runId, preview.file)} download>Download
+     CSV</a></p>`; the 77d `table-wrap` table (caption `Predicted rows`, same header and body).
+   - `PredictionsView({ runId, ready })`: hooks first: `const predict = useMutation({
+     mutationFn: () => predictUnlabelled(runId) });` `const [file, setFile] = useState<File |
+     null>(null);` `const upload = useMutation({ mutationFn: (chosen: File) =>
+     predictUpload(runId, chosen, chosen.name) });`. Then the 77d `!ready` paragraph. Otherwise
+     a `<section className="validation" aria-label="Predictions">` containing, in order:
+     a. The 77d help paragraph.
+     b. `<div className="validation-bar">` with only the 77d predict button (the Download link
+        moves into `Preview`).
+     c. `predict.isError` → `<p role="alert">{errorText(predict.error)}</p>`.
+     d. `predict.data !== undefined` → `<Preview runId={runId} preview={predict.data} />`.
+     e. `<h3>Predict a new file</h3>` and `<p className="help">Upload a CSV with the
+        dataset's columns; the target can be left out. Its rows get the same preparation as the
+        dataset (placed after the dataset's rows, so lag features see its history), then the
+        champion predicts them.</p>`.
+     f. `<div className="validation-bar">` with `<input type="file" accept=".csv,text/csv"
+        aria-label="CSV file to predict" onChange={(event) => setFile(event.target.files?.[0]
+        ?? null)} />` and `<button type="button" className="primary" disabled={file === null ||
+        upload.isPending} onClick={() => { if (file !== null) upload.mutate(file); }}>` with
+        text `upload.isPending ? 'Predicting…' : 'Predict this file'`.
+     g. `upload.isError` → `<p role="alert">{errorText(upload.error)}</p>`.
+     h. `upload.data !== undefined` → `<Preview runId={runId} preview={upload.data} />`.
+4. `tests/client.test.ts`: import `predictUpload`.
+   - `predictUnlabelled POSTs and parses the preview`: body gains `file: 'predictions.csv'`;
+     the final assertion becomes `assert.deepEqual(preview, { ...body, missing: [], ignored: []
+     })`.
+   - `parsePredictionPreview rejects ...`: `preview` gains `file: 'predictions.csv'`; add
+     `assert.deepEqual(parsePredictionPreview({ ...preview, missing: ['m'], ignored: ['i']
+     }).missing, ['m'])` and throws (`ApiError`) for `{ ...preview, file: 1 }`, `{ ...preview,
+     missing: [1] }` and `{ ...preview, ignored: 'x' }`.
+   - New `test('predictUpload POSTs the file as multipart', ...)`: body `{ task: 'regression',
+     rows: 1, columns: ['row', 'prediction'], head: [{ row: 0, prediction: 1.5 }], file:
+     'uploaded_predictions.csv', missing: ['m'], ignored: [] }`; inside `withFetch`: `const
+     preview = await predictUpload('r1', new Blob(['a\n1\n']), 'new.csv');` assert
+     `requests[0]?.input === '/api/runs/r1/predictions/upload'`, method `'POST'`, `const sent
+     = requests[0]?.init?.body; assert.ok(sent instanceof FormData); const part =
+     sent.get('file'); assert.ok(part instanceof File); assert.equal(part.name, 'new.csv');`
+     and `assert.deepEqual(preview.missing, ['m'])`, `assert.equal(preview.file,
+     'uploaded_predictions.csv')`.
+
+Checks (from `frontend/`): `npm run typecheck`, `npm test`, `npm run build`. Stop and report on
+any failure or gap. Main then: review, browser check on scratch servers (upload a small CSV),
+commit, close chunk 77.
+
+## Stage 77f acceptance receipt (2026-10-10)
+
+Implementer: `npm run typecheck`, `npm test` (116 pass, 0 fail), `npm run build` exit 0.
+Accepted deviations: `&apos;` in the help text; `predict.data` used directly. Main reviewed the
+diff (matches the recipe) and reran the three gates: exit 0, 116/116. Browser (scratch copy of
+`regression-test`, vite 5174, API 8766, MCP 8767): run `r_922ffb37436a8f84` → Predictions →
+chose a 3-row CSV without `exam_score` and `age` plus an `extra` column → "Predict this file"
+showed "3 rows predicted.", "Not in your file, treated as empty: age.", "Not used by this run,
+ignored: extra.", Download CSV and the table (`.playwright-mcp/77f-upload.png`). Scratch
+servers stopped, scratch data deleted. Python unchanged since 77e's `make check`.
+
+## Chunk 77 completion (2026-10-10)
+
+All six stages accepted: 77a `8b333d5`, 77b `f6b627e`, 77c `b4859ea`, 77d `9ac3197`, 77e
+`eab7d58`, 77f (this commit). How to use it on run `r_f5e9364ca69378fa`'s data: contract
+`split.strategy: "temporal"`, `split.time_column: "rowID"`, `features.exclude` the seven
+measured-afterwards columns (`ke`, `hupx`, `afrr`, `afrr_fel`, `afrr_le`, `mfrr_fel`,
+`mfrr_le`) and `target_reg`, and `features.lags` such as `{"ke": [96], "target_reg": [96]}`;
+after the run, Predictions → "Predict rows without a target".

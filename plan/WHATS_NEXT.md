@@ -26,6 +26,12 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
+## Done 2026-10-10: chunk 77 (time-ordered tables and predictions)
+
+Temporal split with forward-in-time CV, lag features, and predictions with a finished run's
+champion (rows without a target, or an uploaded file; Predictions tab, CSV download). See
+[chunk 77](./77_time_ordered_tables.md) for receipts and how to set the contract.
+
 ## Next: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
 
 Chunk [71](./71_accounts_and_budgets.md) accepted 2026-10-10: register/sign in (scrypt, HttpOnly

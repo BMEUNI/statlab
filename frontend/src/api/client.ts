@@ -965,11 +965,20 @@ export function parsePredictionPreview(value: unknown): PredictionPreview {
     rows: requiredNumber(value, 'rows'),
     columns: stringArray(value.columns),
     head: objectArray(value.head),
+    file: requiredString(value, 'file'),
+    missing: value.missing === undefined ? [] : stringArray(value.missing),
+    ignored: value.ignored === undefined ? [] : stringArray(value.ignored),
   };
 }
 
 export async function predictUnlabelled(runId: string, signal?: AbortSignal): Promise<PredictionPreview> {
   return parsePredictionPreview(await request(`${runPath(runId)}/predictions`, { method: 'POST', signal }));
+}
+
+export async function predictUpload(runId: string, file: Blob, filename: string, signal?: AbortSignal): Promise<PredictionPreview> {
+  const form = new FormData();
+  form.append('file', file, filename);
+  return parsePredictionPreview(await request(`${runPath(runId)}/predictions/upload`, { method: 'POST', form, signal }));
 }
 
 export function artifactUrl(id: string): string {

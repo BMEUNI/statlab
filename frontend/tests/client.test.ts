@@ -12,6 +12,7 @@ import {
   parseValidationPage,
   parsePredictionPreview,
   predictUnlabelled,
+  predictUpload,
   answerGate,
   checkGateEdits,
   createProject,
@@ -603,21 +604,41 @@ test('parseValidationPage rejects a bad task and a row whose values are not an o
 });
 
 test('predictUnlabelled POSTs and parses the preview', async () => {
-  const body = { task: 'classification', rows: 3, columns: ['row', 'x', 'prediction'], head: [{ row: 4, x: 1, prediction: 'a' }] };
+  const body = { task: 'classification', rows: 3, columns: ['row', 'x', 'prediction'], head: [{ row: 4, x: 1, prediction: 'a' }], file: 'predictions.csv' };
   await withFetch(body, async (requests) => {
     const preview = await predictUnlabelled('r1');
     assert.equal(requests[0]?.input, '/api/runs/r1/predictions');
     assert.equal(requests[0]?.init?.method, 'POST');
     assert.equal(new Headers(requests[0]?.init?.headers).get('X-Statlab-Csrf'), '1');
-    assert.deepEqual(preview, body);
+    assert.deepEqual(preview, { ...body, missing: [], ignored: [] });
   });
 });
 
 test('parsePredictionPreview rejects a bad task, columns and head', () => {
-  const preview = { task: 'regression', rows: 0, columns: [], head: [] };
+  const preview = { task: 'regression', rows: 0, columns: [], head: [], file: 'predictions.csv' };
   assert.equal(parsePredictionPreview(preview).task, 'regression');
+  assert.deepEqual(parsePredictionPreview({ ...preview, missing: ['m'], ignored: ['i'] }).missing, ['m']);
+  assert.throws(() => parsePredictionPreview({ ...preview, file: 1 }), ApiError);
+  assert.throws(() => parsePredictionPreview({ ...preview, missing: [1] }), ApiError);
+  assert.throws(() => parsePredictionPreview({ ...preview, ignored: 'x' }), ApiError);
   assert.throws(() => parsePredictionPreview({ ...preview, task: 'other' }), ApiError);
   assert.throws(() => parsePredictionPreview({ ...preview, columns: [1] }), ApiError);
   assert.throws(() => parsePredictionPreview({ ...preview, head: ['x'] }), ApiError);
   assert.throws(() => parsePredictionPreview({ ...preview, rows: 'many' }), ApiError);
+});
+
+test('predictUpload POSTs the file as multipart', async () => {
+  const body = { task: 'regression', rows: 1, columns: ['row', 'prediction'], head: [{ row: 0, prediction: 1.5 }], file: 'uploaded_predictions.csv', missing: ['m'], ignored: [] };
+  await withFetch(body, async (requests) => {
+    const preview = await predictUpload('r1', new Blob(['a\n1\n']), 'new.csv');
+    assert.equal(requests[0]?.input, '/api/runs/r1/predictions/upload');
+    assert.equal(requests[0]?.init?.method, 'POST');
+    const sent = requests[0]?.init?.body;
+    assert.ok(sent instanceof FormData);
+    const part = sent.get('file');
+    assert.ok(part instanceof File);
+    assert.equal(part.name, 'new.csv');
+    assert.deepEqual(preview.missing, ['m']);
+    assert.equal(preview.file, 'uploaded_predictions.csv');
+  });
 });
