@@ -402,6 +402,109 @@ class McpClient:
             },
         )
 
+    def _prediction_spec(self, tool: str, *, replayed: bool) -> ToolSpec:
+        spec = self.tools.get(tool)
+        if replayed:
+            if spec is None or not spec.transform_only:
+                raise EngineError(f"{tool} cannot be replayed for predictions")
+        elif (
+            spec is None
+            or spec.phase != "artifacts"
+            or spec.allow_in != ("*",)
+            or spec.heavy
+            or spec.transform_only
+        ):
+            raise EngineError(f"{tool} registry metadata is invalid")
+        return spec
+
+    async def _prediction_step(
+        self,
+        tool: str,
+        arguments: dict[str, JsonValue],
+        made: list[ArtifactMeta],
+        *,
+        replayed: bool,
+    ) -> str:
+        spec = self._prediction_spec(tool, replayed=replayed)
+        result = await self._dispatch_direct(spec, arguments, read_timeout_seconds=900)
+        made.extend(result.artifacts)
+        if len(result.artifacts) != 1:
+            raise ToolCallError(
+                tool,
+                Failure(error_class="bug", message=f"{tool} must return exactly one artifact"),
+            )
+        return str(result.artifacts[0].ref)
+
+    async def predict_unlabelled(
+        self,
+        *,
+        project: str,
+        run: str,
+        frame: str,
+        target: str,
+        task: Literal["classification", "regression"],
+        model: str,
+        threshold: float | None,
+        replay: tuple[tuple[str, dict[str, JsonValue]], ...],
+    ) -> ToolSuccess:
+        """Predict the dataset's rows without a target with the champion and write predictions.csv,
+        without run-scoped accounting (chunk 77). Frames made on the way are deleted afterwards."""
+        if self._session is None:
+            raise EngineError("MCP client is not entered")
+        if get_project_by_slug(self.conn, project) is None:
+            raise EngineError("predict_unlabelled project does not exist")
+        paths = RunPaths(self.settings.data_dir, project, run)
+        made: list[ArtifactMeta] = []
+        try:
+            rows = await self._prediction_step(
+                "unlabelled_rows",
+                {"project": project, "run": run, "frame": frame, "target": target},
+                made,
+                replayed=False,
+            )
+            current = rows
+            for tool, parameters in replay:
+                current = await self._prediction_step(
+                    tool,
+                    {**parameters, "project": project, "run": run, "frame": current},
+                    made,
+                    replayed=True,
+                )
+            predicted = await self._prediction_step(
+                "predict_proba" if task == "classification" else "predict",
+                {"project": project, "run": run, "model": model, "frame": current},
+                made,
+                replayed=True,
+            )
+            arguments: dict[str, JsonValue] = {
+                "project": project,
+                "run": run,
+                "frame": rows,
+                "predictions": predicted,
+                "task": task,
+            }
+            if threshold is not None:
+                arguments["threshold"] = threshold
+            written = await self._dispatch_direct(
+                self._prediction_spec("write_predictions", replayed=False),
+                arguments,
+                read_timeout_seconds=900,
+            )
+            if written.artifacts:
+                raise ToolCallError(
+                    "write_predictions",
+                    Failure(
+                        error_class="bug", message="write_predictions returned unexpected artifacts"
+                    ),
+                )
+            return written
+        finally:
+            for meta in made:
+                if ARTIFACT_ID_PATTERN.match(str(meta.ref)) and (
+                    get_artifact(self.conn, str(meta.ref)) is None
+                ):
+                    paths.artifact(meta.ref, meta.kind).unlink(missing_ok=True)
+
     async def call(
         self,
         ctx: CallContext,

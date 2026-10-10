@@ -51,7 +51,13 @@ from statlab_tools.artifacts import load_dataframe, load_json, save_json, save_p
 from statlab_tools.charts import LINE_CAP, chart, panel, xy_series
 from statlab_tools.registry import greater_is_better, is_binary_only, is_negated, scorer_for
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
-from statlab_tools.tools._frame import as_str, as_str_scalar, is_numeric_column, json_scalar
+from statlab_tools.tools._frame import (
+    as_str,
+    as_str_scalar,
+    is_numeric_column,
+    json_scalar,
+    save_frame,
+)
 from statlab_tools.tools.training import (
     build_matrix,
     check_class_counts,
@@ -74,6 +80,7 @@ _CI_HIGH_PCT: Final = 97.5
 _SCORE_PHASES = ("model_evaluation", "champion_selection")
 _CURVE_PHASES = ("model_evaluation", "model_interpretation", "champion_selection")
 _CV_PHASES = ("model_evaluation",)
+PREDICTIONS_CSV: Final = "predictions.csv"
 
 _Truth = Annotated[
     ArtifactRef, Field(description="A frame holding the true `target` column; aligned by label.")
@@ -586,6 +593,110 @@ def validation_rows(
         "rows": rows,
     }
     return ToolSuccess(summary=summary)
+
+
+@tool(phase="artifacts", allow_in=["*"])
+def unlabelled_rows(
+    paths: RunPaths,
+    frame: Annotated[
+        ArtifactRef,
+        Field(
+            description="The whole frame the split was made from, rows without a target included."
+        ),
+    ],
+    target: Annotated[str, Field(min_length=1, description="The target column.")],
+) -> ToolSuccess:
+    """The frame's rows whose target is missing, without the target column, saved as a new frame
+    to predict on (chunk 77). The caller deletes that frame after use."""
+    data = load_dataframe(paths.artifact(frame, "dataframe"))
+    if target not in data.columns:
+        raise ToolParamError(
+            "target is not a column of the frame",
+            field_errors={"target": "not in the frame"},
+        )
+    rows = data.loc[data[target].isna()].drop(columns=[target])
+    if rows.empty:
+        raise ToolDataError("the dataset has no rows without a target to predict")
+    return ToolSuccess(
+        summary={"rows": len(rows)}, artifacts=(save_frame(paths, rows, "unlabelled"),)
+    )
+
+
+@tool(phase="artifacts", allow_in=["*"])
+def write_predictions(
+    paths: RunPaths,
+    frame: Annotated[
+        ArtifactRef, Field(description="The predicted rows with their original columns.")
+    ],
+    predictions: Annotated[
+        ArtifactRef,
+        Field(
+            description="Class probabilities (classification) or predictions (regression) on "
+            "those rows."
+        ),
+    ],
+    task: Annotated[Literal["classification", "regression"], Field(description="The run's task.")],
+    threshold: Annotated[
+        float | None, Field(gt=0, lt=1, description="Binary p(positive)>=threshold, as scored.")
+    ] = None,
+) -> ToolSuccess:
+    """Join predictions to their rows by label and write predictions.csv in the run folder: a row
+    column (the dataset row label), the original columns, prediction and, for classification, one
+    probability_{class} column per class. Hard classes follow score_classification. Returns the
+    first 20 rows (chunk 77)."""
+    data = load_dataframe(paths.artifact(frame, "dataframe"))
+    preds = load_dataframe(paths.artifact(predictions, "predictions"))
+    if not preds.index.sort_values().equals(data.index.sort_values()):
+        raise ToolDataError("predictions do not match the predicted rows")
+    preds = preds.loc[data.index]
+    added: dict[str, list[str] | np.ndarray] = {}
+    if task == "classification":
+        cols = proba_columns(preds)
+        classes = class_labels(cols)
+        if threshold is not None and len(classes) != 2:
+            raise ToolParamError(
+                "threshold is binary only; this target has more than two classes",
+                field_errors={"threshold": "not applicable to a multiclass target"},
+            )
+        positive, _ = _positive_class(snapshot(paths), classes)
+        proba = preds[cols].to_numpy(dtype="float64")
+        codes = _hard_codes(proba, classes.index(positive), threshold)
+        added["prediction"] = [classes[int(code)] for code in codes]
+        for index, label in enumerate(classes):
+            added[f"probability_{label}"] = proba[:, index]
+    else:
+        if "prediction" not in preds.columns:
+            raise ToolParamError(
+                "predictions need a prediction column",
+                field_errors={"predictions": "no prediction column"},
+            )
+        added["prediction"] = preds["prediction"].to_numpy(dtype="float64")
+    clashes = [name for name in added if name in data.columns]
+    if clashes:
+        raise ToolDataError(f"the dataset already has columns named {clashes!r}")
+    out = data.copy()
+    for name, values in added.items():
+        out[name] = values
+    temporary = paths.root / f".{PREDICTIONS_CSV}.{new_artifact_ref()}.tmp"
+    out.to_csv(temporary, index_label="row")
+    temporary.replace(paths.root / PREDICTIONS_CSV)
+    head: list[JsonValue] = [
+        {
+            "row": json_scalar(label),
+            **{str(column): json_scalar(value) for column, value in record.items()},
+        }
+        for label, record in zip(
+            out.index[:20], out.head(20).to_dict(orient="records"), strict=True
+        )
+    ]
+    return ToolSuccess(
+        summary={
+            "task": task,
+            "rows": len(out),
+            "columns": ["row", *(str(column) for column in out.columns)],
+            "head": head,
+        }
+    )
 
 
 # --- 3.1 score_regression --------------------------------------------------------------------

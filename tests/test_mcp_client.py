@@ -39,7 +39,7 @@ from statlab.persistence.repository import (
     record_tool_call,
 )
 from statlab.storage import create_artifact, ensure_run_layout, fork_artifacts, get_artifact
-from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef, new_artifact_ref
+from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef, new_artifact_ref
 from statlab_contracts.contract import DataContract, DatasetOptions
 from statlab_contracts.envelope import ORCHESTRATOR_SUPPLIED, Failure, ToolFailure, ToolSuccess
 from statlab_contracts.layout import RunPaths
@@ -2189,6 +2189,40 @@ async def test_list_estimators_guards(
             await entered.list_estimators()
 
 
+_OPEN: dict[str, object] = {"type": "object", "properties": {}, "additionalProperties": True}
+
+
+def _made(paths: RunPaths, kind: ArtifactKind) -> ArtifactMeta:
+    ref = new_artifact_ref()
+    paths.artifact(ref, kind).write_bytes(b"x")
+    return ArtifactMeta(ref=ref, kind=kind)
+
+
+def _prediction_tools() -> tuple[object, ...]:
+    return (
+        served_tool("unlabelled_rows", _OPEN, allow_in=["*"], phase="artifacts"),
+        served_tool(
+            "apply_scaler",
+            _OPEN,
+            allow_in=["feature_engineering"],
+            phase="encoding",
+            transform_only=True,
+        ),
+        served_tool(
+            "predict", _OPEN, allow_in=["champion_selection"], phase="training", transform_only=True
+        ),
+        served_tool(
+            "predict_proba",
+            _OPEN,
+            allow_in=["champion_selection"],
+            phase="training",
+            transform_only=True,
+        ),
+        served_tool("drop_columns", _OPEN, allow_in=["*"], phase="cleaning"),
+        served_tool("write_predictions", _OPEN, allow_in=["*"], phase="artifacts"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_validation_rows_dispatches_without_audit(
     world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
@@ -2238,3 +2272,253 @@ async def test_validation_rows_dispatches_without_audit(
         )
     ]
     assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_predict_unlabelled_replays_and_deletes_unregistered_frames(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    rows = _made(paths, "dataframe")
+    scaled = _made(paths, "dataframe")
+    predicted = _made(paths, "predictions")
+    create_artifact(
+        conn,
+        ref=scaled.ref,
+        run_id=paths.run_id,
+        kind="dataframe",
+        path=paths.artifact(scaled.ref, "dataframe"),
+        meta=scaled,
+        produced_by="seed",
+        split=None,
+    )
+    session = FakeSession(_prediction_tools())
+    session.envelopes = [
+        ToolSuccess(artifacts=(rows,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(scaled,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(predicted,)).model_dump(mode="json"),
+        ToolSuccess(summary={"rows": 2}).model_dump(mode="json"),
+    ]
+    async with McpClient(settings(paths, tmp_path), conn, session=session) as client:
+        result = await client.predict_unlabelled(
+            project=paths.slug,
+            run=paths.run_id,
+            frame="a_" + "1" * 16,
+            target="y",
+            task="regression",
+            model="a_" + "2" * 16,
+            threshold=None,
+            replay=(("apply_scaler", {"scaler": "a_" + "3" * 16}),),
+        )
+    assert result.summary == {"rows": 2}
+    assert session.calls == [
+        (
+            "unlabelled_rows",
+            {
+                "project": paths.slug,
+                "run": paths.run_id,
+                "frame": "a_" + "1" * 16,
+                "target": "y",
+            },
+            900,
+        ),
+        (
+            "apply_scaler",
+            {
+                "scaler": "a_" + "3" * 16,
+                "project": paths.slug,
+                "run": paths.run_id,
+                "frame": str(rows.ref),
+            },
+            900,
+        ),
+        (
+            "predict",
+            {
+                "project": paths.slug,
+                "run": paths.run_id,
+                "model": "a_" + "2" * 16,
+                "frame": str(scaled.ref),
+            },
+            900,
+        ),
+        (
+            "write_predictions",
+            {
+                "project": paths.slug,
+                "run": paths.run_id,
+                "frame": str(rows.ref),
+                "predictions": str(predicted.ref),
+                "task": "regression",
+            },
+            900,
+        ),
+    ]
+    assert not paths.artifact(rows.ref, "dataframe").exists()
+    assert paths.artifact(scaled.ref, "dataframe").exists()
+    assert not paths.artifact(predicted.ref, "predictions").exists()
+    assert conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_predict_unlabelled_classification_and_guards(
+    world: tuple[sqlite3.Connection, RunPaths, DataContract, str], tmp_path: Path
+) -> None:
+    conn, paths, _, _ = world
+    settings_ = settings(paths, tmp_path)
+    with pytest.raises(EngineError, match="MCP client is not entered"):
+        await McpClient(settings_, conn, session=FakeSession(())).predict_unlabelled(
+            project=paths.slug,
+            run=paths.run_id,
+            frame="a_" + "1" * 16,
+            target="y",
+            task="regression",
+            model="a_" + "2" * 16,
+            threshold=None,
+            replay=(),
+        )
+    missing_session = FakeSession(_prediction_tools())
+    async with McpClient(settings_, conn, session=missing_session) as client:
+        with pytest.raises(EngineError):
+            await client.predict_unlabelled(
+                project="missing-project",
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+            )
+    assert missing_session.calls == []
+
+    rows = _made(paths, "dataframe")
+    probas = _made(paths, "predictions")
+    classified = FakeSession(_prediction_tools())
+    classified.envelopes = [
+        ToolSuccess(artifacts=(rows,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(probas,)).model_dump(mode="json"),
+        ToolSuccess(summary={"rows": 1}).model_dump(mode="json"),
+    ]
+    async with McpClient(settings_, conn, session=classified) as client:
+        await client.predict_unlabelled(
+            project=paths.slug,
+            run=paths.run_id,
+            frame="a_" + "1" * 16,
+            target="y",
+            task="classification",
+            model="a_" + "2" * 16,
+            threshold=0.4,
+            replay=(),
+        )
+    assert [call[0] for call in classified.calls] == [
+        "unlabelled_rows",
+        "predict_proba",
+        "write_predictions",
+    ]
+    assert classified.calls[1][1]["frame"] == str(rows.ref)
+    assert classified.calls[2][1]["threshold"] == 0.4
+
+    not_replayable = _made(paths, "dataframe")
+    replay_session = FakeSession(_prediction_tools())
+    replay_session.envelopes = [ToolSuccess(artifacts=(not_replayable,)).model_dump(mode="json")]
+    async with McpClient(settings_, conn, session=replay_session) as client:
+        with pytest.raises(EngineError, match="cannot be replayed"):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(("drop_columns", {"columns": ["x"]}),),
+            )
+    assert not paths.artifact(not_replayable.ref, "dataframe").exists()
+
+    first = _made(paths, "dataframe")
+    second = _made(paths, "dataframe")
+    doubled = FakeSession(_prediction_tools())
+    doubled.envelopes = [ToolSuccess(artifacts=(first, second)).model_dump(mode="json")]
+    async with McpClient(settings_, conn, session=doubled) as client:
+        with pytest.raises(ToolCallError):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+            )
+    assert not paths.artifact(first.ref, "dataframe").exists()
+    assert not paths.artifact(second.ref, "dataframe").exists()
+
+    malformed = FakeSession(_prediction_tools())
+    malformed.envelopes = [
+        ToolSuccess(
+            artifacts=(ArtifactMeta(ref=ArtifactRef("a_bad"), kind="dataframe"),)
+        ).model_dump(mode="json")
+    ]
+    async with McpClient(settings_, conn, session=malformed) as client:
+        with pytest.raises(EngineError):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(("drop_columns", {}),),
+            )
+    assert len(malformed.calls) == 1
+
+    written_rows = _made(paths, "dataframe")
+    written_predicted = _made(paths, "predictions")
+    table = _made(paths, "table")
+    returns_artifact = FakeSession(_prediction_tools())
+    returns_artifact.envelopes = [
+        ToolSuccess(artifacts=(written_rows,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(written_predicted,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(table,)).model_dump(mode="json"),
+    ]
+    async with McpClient(settings_, conn, session=returns_artifact) as client:
+        with pytest.raises(ToolCallError):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+            )
+    assert paths.artifact(table.ref, "table").exists()
+
+    wrong_metadata = FakeSession(
+        (
+            *_prediction_tools()[:-1],
+            served_tool("write_predictions", _OPEN, allow_in=["*"], phase="intake"),
+        )
+    )
+    meta_rows = _made(paths, "dataframe")
+    meta_predicted = _made(paths, "predictions")
+    wrong_metadata.envelopes = [
+        ToolSuccess(artifacts=(meta_rows,)).model_dump(mode="json"),
+        ToolSuccess(artifacts=(meta_predicted,)).model_dump(mode="json"),
+    ]
+    async with McpClient(settings_, conn, session=wrong_metadata) as client:
+        with pytest.raises(EngineError, match="registry metadata is invalid"):
+            await client.predict_unlabelled(
+                project=paths.slug,
+                run=paths.run_id,
+                frame="a_" + "1" * 16,
+                target="y",
+                task="regression",
+                model="a_" + "2" * 16,
+                threshold=None,
+                replay=(),
+            )

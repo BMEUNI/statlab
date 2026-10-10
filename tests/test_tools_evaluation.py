@@ -29,7 +29,7 @@ from statlab_contracts.artifacts import ArtifactKind, ArtifactRef, new_artifact_
 from statlab_contracts.contract import DataContract
 from statlab_contracts.envelope import ToolSuccess
 from statlab_contracts.layout import RunPaths
-from statlab_tools.artifacts import load_json, save_dataframe
+from statlab_tools.artifacts import load_dataframe, load_json, save_dataframe
 from statlab_tools.tool import ToolDataError, ToolParamError
 from statlab_tools.tools import evaluation as ev
 from statlab_tools.tools.evaluation import (
@@ -44,7 +44,9 @@ from statlab_tools.tools.evaluation import (
     score_classification,
     score_regression,
     select_threshold,
+    unlabelled_rows,
     validation_rows,
+    write_predictions,
 )
 
 if TYPE_CHECKING:
@@ -1459,3 +1461,123 @@ def test_validation_rows_refusals(run_paths: RunPaths) -> None:
             task="classification",
             threshold=0.5,
         )
+
+
+def test_unlabelled_rows(run_paths: RunPaths) -> None:
+    frame = _save(
+        run_paths,
+        pd.DataFrame({"x": [1, 2, 3, 4], "y": [0.0, None, 1.0, None]}, index=[10, 11, 12, 13]),
+    )
+    res = unlabelled_rows(run_paths, frame=frame, target="y")
+    assert res.summary == {"rows": 2}
+    assert len(res.artifacts) == 1
+    assert res.artifacts[0].kind == "dataframe"
+    saved = load_dataframe(run_paths.artifact(res.artifacts[0].ref, "dataframe"))
+    assert list(saved.index) == [11, 13]
+    assert list(saved.columns) == ["x"]
+    with pytest.raises(ToolParamError):
+        unlabelled_rows(run_paths, frame=frame, target="missing")
+    full = _save(run_paths, pd.DataFrame({"x": [1], "y": [1.0]}))
+    with pytest.raises(ToolDataError):
+        unlabelled_rows(run_paths, frame=full, target="y")
+
+
+def test_write_predictions_classification(run_paths: RunPaths) -> None:
+    _write_snapshot(run_paths, _binary_contract(1))
+    frame = _save(
+        run_paths, pd.DataFrame({"x": [1, 2, 3], "c": ["a", "b", "c"]}, index=[11, 13, 15])
+    )
+    probas = _save(
+        run_paths,
+        pd.DataFrame(
+            {"proba__0": [0.45, 0.8, 0.3], "proba__1": [0.55, 0.2, 0.7]}, index=[15, 11, 13]
+        ),
+        kind="predictions",
+    )
+    res = write_predictions(run_paths, frame=frame, predictions=probas, task="classification")
+    assert res.artifacts == ()
+    assert res.summary["rows"] == 3
+    assert res.summary["columns"] == [
+        "row",
+        "x",
+        "c",
+        "prediction",
+        "probability_0",
+        "probability_1",
+    ]
+    assert _l(res.summary["head"])[0] == {
+        "row": 11,
+        "x": 1,
+        "c": "a",
+        "prediction": "0",
+        "probability_0": 0.8,
+        "probability_1": 0.2,
+    }
+    csv = pd.read_csv(run_paths.root / "predictions.csv")
+    assert list(csv["row"]) == [11, 13, 15]
+    assert list(csv["prediction"]) == [0, 1, 1]
+    tuned = write_predictions(
+        run_paths, frame=frame, predictions=probas, task="classification", threshold=0.6
+    )
+    assert [_d(row)["prediction"] for row in _l(tuned.summary["head"])] == ["0", "1", "0"]
+    assert list(pd.read_csv(run_paths.root / "predictions.csv")["prediction"]) == [0, 1, 0]
+    assert [path.name for path in run_paths.root.iterdir() if path.name.endswith(".tmp")] == []
+
+
+def test_write_predictions_regression(run_paths: RunPaths) -> None:
+    frame = _save(run_paths, pd.DataFrame({"x": [1, 2]}, index=[0, 1]))
+    preds = _save(
+        run_paths, pd.DataFrame({"prediction": [1.5, 2.5]}, index=[0, 1]), kind="predictions"
+    )
+    res = write_predictions(run_paths, frame=frame, predictions=preds, task="regression")
+    assert res.summary == {
+        "task": "regression",
+        "rows": 2,
+        "columns": ["row", "x", "prediction"],
+        "head": [
+            {"row": 0, "x": 1, "prediction": 1.5},
+            {"row": 1, "x": 2, "prediction": 2.5},
+        ],
+    }
+
+
+def test_write_predictions_refusals(run_paths: RunPaths) -> None:
+    _write_snapshot(run_paths, _binary_contract(1))
+    frame = _save(run_paths, pd.DataFrame({"x": [1, 2]}, index=[0, 1]))
+    probas = _save(
+        run_paths,
+        pd.DataFrame({"proba__0": [0.6, 0.4], "proba__1": [0.4, 0.6]}, index=[0, 1]),
+        kind="predictions",
+    )
+    misaligned = _save(
+        run_paths, pd.DataFrame({"prediction": [1.0, 2.0]}, index=[0, 5]), kind="predictions"
+    )
+    no_probas = _save(
+        run_paths, pd.DataFrame({"prediction": [1.0, 2.0]}, index=[0, 1]), kind="predictions"
+    )
+    three = _save(
+        run_paths,
+        pd.DataFrame(
+            {"proba__0": [0.2, 0.3], "proba__1": [0.3, 0.3], "proba__2": [0.5, 0.4]},
+            index=[0, 1],
+        ),
+        kind="predictions",
+    )
+    clash = _save(run_paths, pd.DataFrame({"x": [1, 2], "prediction": [0, 0]}, index=[0, 1]))
+    with pytest.raises(ToolDataError):
+        write_predictions(run_paths, frame=frame, predictions=misaligned, task="regression")
+    with pytest.raises(ToolParamError):
+        write_predictions(run_paths, frame=frame, predictions=probas, task="regression")
+    with pytest.raises(ToolParamError):
+        write_predictions(run_paths, frame=frame, predictions=no_probas, task="classification")
+    with pytest.raises(ToolParamError):
+        write_predictions(
+            run_paths,
+            frame=frame,
+            predictions=three,
+            task="classification",
+            threshold=0.5,
+        )
+    with pytest.raises(ToolDataError):
+        write_predictions(run_paths, frame=clash, predictions=probas, task="classification")
+    assert not (run_paths.root / "predictions.csv").exists()

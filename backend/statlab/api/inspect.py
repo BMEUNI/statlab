@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
+import sqlite3
 from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from statlab_contracts.artifacts import ArtifactKind, parse_artifact_ref
+from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
 from statlab_contracts.layout import RunPaths
 
 from statlab.api.projects import APIResources, ProjectsService
 from statlab.domains.candidate_pipeline import candidate_result
+from statlab.domains.decisions import ReplayStep
 from statlab.domains.foundation import problem_from_state, shared_result
-from statlab.errors import EngineError
+from statlab.errors import EngineError, ToolCallError
 from statlab.graph.state import RunState
 from statlab.persistence.models import (
     ArtifactRow,
@@ -31,6 +35,7 @@ from statlab.persistence.repository import (
     list_node_executions,
     list_tool_calls,
     require_project,
+    run_ancestry,
 )
 from statlab.storage import get_artifact, list_artifacts
 
@@ -58,6 +63,7 @@ RUN_FILES: dict[str, tuple[tuple[str, ...], str]] = {
     "comparison.json": (("comparison.json",), "application/json"),
     "contract.snapshot.json": (("contract.snapshot.json",), "application/json"),
     "skill.snapshot.md": (("skill.snapshot.md",), "text/markdown; charset=utf-8"),
+    "predictions.csv": (("predictions.csv",), "text/csv; charset=utf-8"),
 }
 ARTIFACT_MEDIA: dict[ArtifactKind, str] = {
     "dataframe": "application/octet-stream",
@@ -72,6 +78,8 @@ ARTIFACT_MEDIA: dict[ArtifactKind, str] = {
 }
 PLOT_NAME = re.compile(r"^a_[0-9a-f]{16}\.(?:png|chart\.json)\Z")
 NO_VALIDATION = "this model has no validation predictions yet"
+NO_CHAMPION = "this run has no champion model yet"
+NO_SOURCE = "the rows before the split are not recorded for this run"
 
 
 def _locked(artifact: ArtifactRow, run: RunRow) -> bool:
@@ -109,6 +117,24 @@ def _artifact(resource: APIResources, artifact_id: str) -> tuple[ArtifactRow, Ru
     if _locked(row, run):
         raise HTTPException(403, "test-derived artifact is locked until the test score is recorded")
     return row, paths
+
+
+def _split_source(conn: sqlite3.Connection, run_id: str, test: str) -> str | None:
+    """The frame the shared split was made from: the frame argument of the logged split call that
+    produced the test frame, in the run or a fork ancestor (chunk 77)."""
+    for ancestor in run_ancestry(conn, run_id):
+        for call in list_tool_calls(conn, ancestor.id):
+            if not call.tool_name.startswith("split_"):
+                continue
+            result = TOOL_RESULT_ADAPTER.validate_json(call.result_json)
+            source = json.loads(call.args_json).get("frame")
+            if (
+                isinstance(result, ToolSuccess)
+                and any(str(meta.ref) == test for meta in result.artifacts)
+                and isinstance(source, str)
+            ):
+                return source
+    return None
 
 
 def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
@@ -189,6 +215,49 @@ def inspect_router(resources: Callable[[], APIResources]) -> APIRouter:
             offset=offset,
             limit=limit,
         )
+        return result.summary
+
+    @router.post("/api/runs/{run_id}/predictions")
+    async def predictions(run_id: str) -> dict[str, JsonValue]:
+        resource = resources()
+        run, paths = _run(resource, run_id)
+        state = _checkpoint(paths)
+        if state is None:
+            raise HTTPException(409, NO_CHAMPION)
+        try:
+            champion = shared_result(state, "champion_selection").summary
+            split = shared_result(state, "data_splitting").summary
+            problem = problem_from_state(state)
+        except EngineError:
+            raise HTTPException(409, NO_CHAMPION) from None
+        model = champion.get("model")
+        replay = champion.get("replay")
+        test = split.get("test")
+        if not isinstance(model, str) or not isinstance(replay, list) or not isinstance(test, str):
+            raise HTTPException(409, NO_CHAMPION)
+        try:
+            steps = tuple(ReplayStep.model_validate(item) for item in replay)
+        except ValidationError:
+            raise EngineError("champion replay is malformed") from None
+        source = _split_source(resource.conn, run.id, test)
+        if source is None:
+            raise HTTPException(409, NO_SOURCE)
+        threshold = champion.get("threshold")
+        try:
+            result = await resource.mcp.predict_unlabelled(
+                project=paths.slug,
+                run=run.id,
+                frame=source,
+                target=problem.target,
+                task=problem.task,
+                model=model,
+                threshold=threshold if isinstance(threshold, float) else None,
+                replay=tuple((step.tool, dict(step.parameters)) for step in steps),
+            )
+        except ToolCallError as exc:
+            if exc.failure.error_class in ("tool_param", "data"):
+                raise HTTPException(422, exc.failure.message) from None
+            raise
         return result.summary
 
     @router.get("/api/artifacts/{artifact_id}")

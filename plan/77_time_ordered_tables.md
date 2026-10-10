@@ -2,7 +2,7 @@
 status: in_progress
 dependencies: [76]
 completion_date: null
-implementation_notes: "77a temporal split + time-ordered CV; 77b lag features; 77c predictions on unlabelled rows; 77d predictions on an uploaded file"
+implementation_notes: "77a temporal split + time-ordered CV; 77b lag features; 77c backend predictions on unlabelled rows; 77d run-page Predictions tab; 77e predictions on an uploaded file"
 ---
 
 # Chunk 77 — time-ordered tables and predictions
@@ -25,10 +25,12 @@ Stages (execution order; each later spec is written after the previous handoff):
 - **77b** lag features: contract `features.lags` (column → row lags), computed on the whole
   ordered frame before the split, so excluded columns (e.g. `target_reg`) and the target can be
   lag sources; requires a temporal split.
-- **77c** predictions for the dataset's unlabelled rows: keep the rows with no target through
-  the shared pre-split steps, run the champion's replay chain and model on them after the test
-  score, store a predictions CSV, show and download it on the run page.
-- **77d** predictions for an uploaded file (same columns as the dataset; lags read history from
+- **77c** backend predictions for the dataset's unlabelled rows, on demand after the champion:
+  take the rows with no target from the frame the split was made from (so they carry the same
+  pre-split steps, lags included), replay the champion's chain and model on them and write
+  `predictions.csv` in the run folder (works for any finished run, any task and split).
+- **77d** run-page Predictions tab: a button, a preview of the first rows, Download CSV.
+- **77e** predictions for an uploaded file (same columns as the dataset; lags read history from
   the dataset).
 
 ## Stage 77a (detailed spec)
@@ -533,3 +535,398 @@ columns are 100 % filled; `split_temporal` on the lagged frame: train 43,084 / v
 test 14,362 (balance-drift warning, as in 77a). Main reviewed the diff (matches the recipe and
 addendum). `make check` (`check77b.log`, temporary) exit 0: coverage 100 % (TOTAL 13507 stmts,
 0 missed), mypy 212 files, Ruff clean.
+
+## Stage 77c (detailed spec): backend predictions for rows without a target
+
+Goal: `POST /api/runs/{run_id}/predictions` predicts the dataset's rows whose target is missing
+with the run's champion and writes `<run>/predictions.csv`; `GET
+/api/runs/{run_id}/files/predictions.csv` downloads it. Works for any run whose
+`champion_selection` completed (classification or regression, any split strategy, forks).
+
+Non-goals: the UI (77d), uploaded files (77e), registering the CSV as an artifact, LLM calls,
+run-scoped tool audit, changing how runs execute.
+
+Design facts (main, read-only):
+- Source rows: the `frame` argument of the logged `split_*` tool call whose result artifacts
+  include the shared `data_splitting` summary's `test` ref. That frame is the whole table after
+  the shared pre-split steps (cast, lags, dedupe, high-missing rows, excluded columns) and before
+  `split_*` drops rows without a target (`splitting.py` ~253). Such calls live in `tool_calls`
+  of the run or a fork ancestor (forks hard-link parent artifacts under the same refs,
+  `storage.py` ~215). Checked on the user DB (read-only): every successful split's `frame`
+  artifact exists and none is pruned.
+- Champion: `shared_result(state, "champion_selection").summary` has `model` (str ref),
+  `threshold` (float or null) and `replay` (list of `ReplayStep` dumps: `tool`, `parameters`
+  without `frame`/`project`/`run`), exactly what champion scoring replays on test
+  (`champion.py` ~356-372).
+- Replay tools (`apply_*`, `drop_columns`, row-wise constructors) and `predict`/`predict_proba`
+  are `transform_only`; each takes `frame` and returns one new frame/predictions artifact.
+  Dispatching them through `McpClient._dispatch_direct` keeps the served-schema validation and
+  error envelope without run accounting. The frames they write are not registered; the client
+  deletes them afterwards.
+- `D32`: no test rows are involved; the champion is final before this runs.
+
+Owned files: `mcp_server/statlab_tools/tools/evaluation.py`, `backend/statlab/mcp_client.py`,
+`backend/statlab/api/inspect.py`, `tests/test_tools_evaluation.py`, `tests/test_mcp_client.py`,
+`tests/test_api_inspect.py`. Not alone: preserve others' edits.
+
+### 1. `evaluation.py` (directly after `validation_rows`)
+
+Imports: add `import os`; add `save_frame` to the existing `statlab_tools.tools._frame` import.
+
+Module constant: `PREDICTIONS_CSV: Final = "predictions.csv"`.
+
+a. `unlabelled_rows`, decorated `@tool(phase="artifacts", allow_in=["*"])`:
+   `def unlabelled_rows(paths: RunPaths, frame: Annotated[ArtifactRef, Field(description="The
+   whole frame the split was made from, rows without a target included.")], target:
+   Annotated[str, Field(min_length=1, description="The target column.")]) -> ToolSuccess`.
+   Docstring: `"""The frame's rows whose target is missing, without the target column, saved as
+   a new frame to predict on (chunk 77). The caller deletes that frame after use."""`
+   Body, in order:
+   1. `data = load_dataframe(paths.artifact(frame, "dataframe"))`.
+   2. If `target not in data.columns`: raise `ToolParamError("target is not a column of the
+      frame", field_errors={"target": "not in the frame"})`.
+   3. `rows = data.loc[data[target].isna()].drop(columns=[target])`.
+   4. If `rows.empty`: raise `ToolDataError("the dataset has no rows without a target to
+      predict")`.
+   5. Return `ToolSuccess(summary={"rows": len(rows)}, artifacts=(save_frame(paths, rows,
+      "unlabelled"),))`.
+
+b. `write_predictions`, decorated `@tool(phase="artifacts", allow_in=["*"])`:
+   parameters after `paths: RunPaths`:
+   - `frame: Annotated[ArtifactRef, Field(description="The predicted rows with their original
+     columns.")]`
+   - `predictions: Annotated[ArtifactRef, Field(description="Class probabilities
+     (classification) or predictions (regression) on those rows.")]`
+   - `task: Annotated[Literal["classification", "regression"], Field(description="The run's
+     task.")]`
+   - `threshold: Annotated[float | None, Field(gt=0, lt=1, description="Binary
+     p(positive)>=threshold, as scored.")] = None`
+   Docstring: `"""Join predictions to their rows by label and write predictions.csv in the run
+   folder: a row column (the dataset row label), the original columns, prediction and, for
+   classification, one probability_{class} column per class. Hard classes follow
+   score_classification. Returns the first 20 rows (chunk 77)."""`
+   Body, in order:
+   1. `data = load_dataframe(paths.artifact(frame, "dataframe"))`;
+      `preds = load_dataframe(paths.artifact(predictions, "predictions"))`.
+   2. If `not preds.index.sort_values().equals(data.index.sort_values())`: raise
+      `ToolDataError("predictions do not match the predicted rows")`. Then
+      `preds = preds.loc[data.index]`.
+   3. `added: dict[str, object] = {}`. If `task == "classification"`:
+      - `cols = proba_columns(preds)`; `classes = class_labels(cols)`.
+      - If `threshold is not None and len(classes) != 2`: raise the same `ToolParamError` as
+        `validation_rows` (message `"threshold is binary only; this target has more than two
+        classes"`, `field_errors={"threshold": "not applicable to a multiclass target"}`).
+      - `positive, _ = _positive_class(snapshot(paths), classes)`;
+        `proba = preds[cols].to_numpy(dtype="float64")`;
+        `codes = _hard_codes(proba, classes.index(positive), threshold)`.
+      - `added["prediction"] = [classes[int(code)] for code in codes]`; then for
+        `index, label in enumerate(classes)`: `added[f"probability_{label}"] = proba[:, index]`.
+      Else (regression):
+      - If `"prediction" not in preds.columns`: raise `ToolParamError("predictions need a
+        prediction column", field_errors={"predictions": "no prediction column"})`.
+      - `added["prediction"] = preds["prediction"].to_numpy(dtype="float64")`.
+   4. `clashes = [name for name in added if name in data.columns]`; if any: raise
+      `ToolDataError(f"the dataset already has columns named {clashes!r}")`.
+   5. `out = data.assign(**added)`.
+   6. `temporary = paths.root / f".{PREDICTIONS_CSV}.{new_artifact_ref()}.tmp"`;
+      `out.to_csv(temporary, index_label="row")`;
+      `os.replace(temporary, paths.root / PREDICTIONS_CSV)`.
+   7. `head: list[JsonValue] = [{"row": json_scalar(label), **{str(column): json_scalar(value)
+      for column, value in record.items()}} for label, record in zip(out.index[:20],
+      out.head(20).to_dict(orient="records"), strict=True)]`.
+   8. Return `ToolSuccess(summary={"task": task, "rows": len(out), "columns": ["row",
+      *(str(column) for column in out.columns)], "head": head})` (no artifacts).
+
+### 2. `mcp_client.py` (`McpClient`, directly after `validation_rows`)
+
+a. `def _prediction_spec(self, tool: str, *, replayed: bool) -> ToolSpec`:
+   `spec = self.tools.get(tool)`. If `replayed`: if `spec is None or not spec.transform_only`:
+   raise `EngineError(f"{tool} cannot be replayed for predictions")`. Else: if `spec is None or
+   spec.phase != "artifacts" or spec.allow_in != ("*",) or spec.heavy or spec.transform_only`:
+   raise `EngineError(f"{tool} registry metadata is invalid")`. Return `spec`.
+
+b. `async def _prediction_step(self, tool: str, arguments: dict[str, JsonValue], made:
+   list[ArtifactMeta], *, replayed: bool) -> str`:
+   `spec = self._prediction_spec(tool, replayed=replayed)`;
+   `result = await self._dispatch_direct(spec, arguments, read_timeout_seconds=900)`;
+   `made.extend(result.artifacts)`; if `len(result.artifacts) != 1`: raise
+   `ToolCallError(tool, Failure(error_class="bug", message=f"{tool} must return exactly one
+   artifact"))`; return `str(result.artifacts[0].ref)`.
+
+c. Public method:
+   `async def predict_unlabelled(self, *, project: str, run: str, frame: str, target: str,
+   task: Literal["classification", "regression"], model: str, threshold: float | None, replay:
+   tuple[tuple[str, dict[str, JsonValue]], ...]) -> ToolSuccess`, docstring `"""Predict the
+   dataset's rows without a target with the champion and write predictions.csv, without
+   run-scoped accounting (chunk 77). Frames made on the way are deleted afterwards."""`
+   Body, in order:
+   1. If `self._session is None`: raise `EngineError("MCP client is not entered")`.
+   2. If `get_project_by_slug(self.conn, project) is None`: raise
+      `EngineError("predict_unlabelled project does not exist")`.
+   3. `paths = RunPaths(self.settings.data_dir, project, run)`; `made: list[ArtifactMeta] = []`.
+   4. `try:`
+      - `rows = await self._prediction_step("unlabelled_rows", {"project": project, "run": run,
+        "frame": frame, "target": target}, made, replayed=False)`; `current = rows`.
+      - For `tool, parameters in replay`: `current = await self._prediction_step(tool,
+        {**parameters, "project": project, "run": run, "frame": current}, made,
+        replayed=True)`.
+      - `predicted = await self._prediction_step("predict_proba" if task == "classification"
+        else "predict", {"project": project, "run": run, "model": model, "frame": current},
+        made, replayed=True)`.
+      - `arguments: dict[str, JsonValue] = {"project": project, "run": run, "frame": rows,
+        "predictions": predicted, "task": task}`; if `threshold is not None`:
+        `arguments["threshold"] = threshold`.
+      - `written = await self._dispatch_direct(self._prediction_spec("write_predictions",
+        replayed=False), arguments, read_timeout_seconds=900)`.
+      - If `written.artifacts`: raise `ToolCallError("write_predictions",
+        Failure(error_class="bug", message="write_predictions returned unexpected
+        artifacts"))`.
+      - Return `written`.
+   5. `finally:` for `meta in made`: if `ARTIFACT_ID_PATTERN.match(str(meta.ref))` and
+      `get_artifact(self.conn, str(meta.ref)) is None`: `paths.artifact(meta.ref,
+      meta.kind).unlink(missing_ok=True)`. (Never delete a registered artifact or a path built
+      from a malformed ref.)
+
+### 3. `api/inspect.py`
+
+Imports: `json`; `from pydantic import ValidationError` (add to the existing pydantic import);
+`from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess`;
+`from statlab.domains.decisions import ReplayStep`; `ToolCallError` added to the
+`statlab.errors` import; `run_ancestry` added to the repository import.
+
+a. `RUN_FILES` gains `"predictions.csv": (("predictions.csv",), "text/csv; charset=utf-8")`
+   (last entry).
+b. Constants after `NO_VALIDATION`: `NO_CHAMPION = "this run has no champion model yet"` and
+   `NO_SOURCE = "the rows before the split are not recorded for this run"`.
+c. Module function after `_artifact`:
+   `def _split_source(conn: sqlite3.Connection, run_id: str, test: str) -> str | None:` with
+   docstring `"""The frame the shared split was made from: the frame argument of the logged
+   split call that produced the test frame, in the run or a fork ancestor (chunk 77)."""`
+   (`import sqlite3` at the top). For `ancestor in run_ancestry(conn, run_id)`: for `call in
+   list_tool_calls(conn, ancestor.id)`: `if not call.tool_name.startswith("split_"):
+   continue`; `result = TOOL_RESULT_ADAPTER.validate_json(call.result_json)`;
+   `source = json.loads(call.args_json).get("frame")`; if `isinstance(result, ToolSuccess) and
+   any(str(meta.ref) == test for meta in result.artifacts) and isinstance(source, str)`:
+   return `source`. After the loops return `None`.
+d. Route inside `inspect_router`, after `validation`:
+   `@router.post("/api/runs/{run_id}/predictions")`
+   `async def predictions(run_id: str) -> dict[str, JsonValue]:`
+   1. `resource = resources()`; `run, paths = _run(resource, run_id)`;
+      `state = _checkpoint(paths)`; if `state is None`: raise `HTTPException(409,
+      NO_CHAMPION)`.
+   2. `try:` `champion = shared_result(state, "champion_selection").summary`;
+      `split = shared_result(state, "data_splitting").summary`;
+      `problem = problem_from_state(state)`; `except EngineError: raise HTTPException(409,
+      NO_CHAMPION) from None`.
+   3. `model = champion.get("model")`; `replay = champion.get("replay")`;
+      `test = split.get("test")`; if `not isinstance(model, str) or not isinstance(replay,
+      list) or not isinstance(test, str)`: raise `HTTPException(409, NO_CHAMPION)`.
+   4. `try: steps = tuple(ReplayStep.model_validate(item) for item in replay)` `except
+      ValidationError: raise EngineError("champion replay is malformed") from None`.
+   5. `source = _split_source(resource.conn, run.id, test)`; if `None`: raise
+      `HTTPException(409, NO_SOURCE)`.
+   6. `threshold = champion.get("threshold")`.
+   7. `try: result = await resource.mcp.predict_unlabelled(project=paths.slug, run=run.id,
+      frame=source, target=problem.target, task=problem.task, model=model,
+      threshold=threshold if isinstance(threshold, float) else None, replay=tuple((step.tool,
+      dict(step.parameters)) for step in steps))` `except ToolCallError as exc:` if
+      `exc.failure.error_class in ("tool_param", "data")`: raise `HTTPException(422,
+      exc.failure.message) from None`; otherwise `raise`.
+   8. Return `result.summary`.
+
+### 4. Tests
+
+a. `tests/test_tools_evaluation.py`: import `unlabelled_rows`, `write_predictions` in the
+   existing evaluation import block and `load_dataframe` in the `statlab_tools.artifacts`
+   import. After `test_validation_rows_refusals` add:
+   - `test_unlabelled_rows(run_paths)`: `frame = _save(run_paths, pd.DataFrame({"x": [1, 2,
+     3, 4], "y": [0.0, None, 1.0, None]}, index=[10, 11, 12, 13]))`; `res =
+     unlabelled_rows(run_paths, frame=frame, target="y")`; assert `res.summary == {"rows": 2}`,
+     `len(res.artifacts) == 1`, `res.artifacts[0].kind == "dataframe"`; `saved =
+     load_dataframe(run_paths.artifact(res.artifacts[0].ref, "dataframe"))`; assert
+     `list(saved.index) == [11, 13]` and `list(saved.columns) == ["x"]`. Then `pytest.raises(
+     ToolParamError)` for `target="missing"`; `full = _save(run_paths, pd.DataFrame({"x": [1],
+     "y": [1.0]}))` and `pytest.raises(ToolDataError)` for `unlabelled_rows(run_paths,
+     frame=full, target="y")`.
+   - `test_write_predictions_classification(run_paths)`: `_write_snapshot(run_paths,
+     _binary_contract(1))`; `frame = _save(run_paths, pd.DataFrame({"x": [1, 2, 3], "c": ["a",
+     "b", "c"]}, index=[11, 13, 15]))`; `probas = _save(run_paths, pd.DataFrame({"proba__0":
+     [0.45, 0.8, 0.3], "proba__1": [0.55, 0.2, 0.7]}, index=[15, 11, 13]),
+     kind="predictions")`; `res = write_predictions(run_paths, frame=frame, predictions=probas,
+     task="classification")`. Assert `res.artifacts == ()`, `res.summary["rows"] == 3`,
+     `res.summary["columns"] == ["row", "x", "c", "prediction", "probability_0",
+     "probability_1"]`, `_l(res.summary["head"])[0] == {"row": 11, "x": 1, "c": "a",
+     "prediction": "0", "probability_0": 0.8, "probability_1": 0.2}`; `csv =
+     pd.read_csv(run_paths.root / "predictions.csv")`; `list(csv["row"]) == [11, 13, 15]`,
+     `list(csv["prediction"]) == [0, 1, 1]`. Then `tuned = write_predictions(..., threshold=0.6)`:
+     `[_d(row)["prediction"] for row in _l(tuned.summary["head"])] == ["0", "1", "0"]` and
+     `list(pd.read_csv(run_paths.root / "predictions.csv")["prediction"]) == [0, 1, 0]`; and
+     `[path.name for path in run_paths.root.iterdir() if path.name.endswith(".tmp")] == []`.
+   - `test_write_predictions_regression(run_paths)`: `frame = _save(run_paths,
+     pd.DataFrame({"x": [1, 2]}, index=[0, 1]))`; `preds = _save(run_paths,
+     pd.DataFrame({"prediction": [1.5, 2.5]}, index=[0, 1]), kind="predictions")`; `res =
+     write_predictions(run_paths, frame=frame, predictions=preds, task="regression")`; assert
+     `res.summary == {"task": "regression", "rows": 2, "columns": ["row", "x", "prediction"],
+     "head": [{"row": 0, "x": 1, "prediction": 1.5}, {"row": 1, "x": 2, "prediction": 2.5}]}`.
+   - `test_write_predictions_refusals(run_paths)`: `_write_snapshot(run_paths,
+     _binary_contract(1))`; `frame = _save(run_paths, pd.DataFrame({"x": [1, 2]}, index=[0,
+     1]))`; `probas = _save(run_paths, pd.DataFrame({"proba__0": [0.6, 0.4], "proba__1": [0.4,
+     0.6]}, index=[0, 1]), kind="predictions")`. Each `pytest.raises`:
+     - `ToolDataError`: predictions `_save(run_paths, pd.DataFrame({"prediction": [1.0, 2.0]},
+       index=[0, 5]), kind="predictions")`, task regression.
+     - `ToolParamError`: `probas` with task regression (no prediction column).
+     - `ToolParamError`: predictions `_save(run_paths, pd.DataFrame({"prediction": [1.0, 2.0]},
+       index=[0, 1]), kind="predictions")` with task classification (no proba columns).
+     - `ToolParamError`: three-class predictions `_save(run_paths, pd.DataFrame({"proba__0":
+       [0.2, 0.3], "proba__1": [0.3, 0.3], "proba__2": [0.5, 0.4]}, index=[0, 1]),
+       kind="predictions")`, task classification, `threshold=0.5`.
+     - `ToolDataError`: frame `_save(run_paths, pd.DataFrame({"x": [1, 2], "prediction": [0,
+       0]}, index=[0, 1]))` with `probas`, task classification.
+     Finally assert `not (run_paths.root / "predictions.csv").exists()`.
+
+b. `tests/test_mcp_client.py`, after `test_validation_rows_dispatches_without_audit`. Shared
+   module helper `_OPEN: dict[str, object] = {"type": "object", "properties": {},
+   "additionalProperties": True}` and `def _made(paths: RunPaths, kind: ArtifactKind) ->
+   ArtifactMeta:` that mints `ref = new_artifact_ref()`, writes `b"x"` to `paths.artifact(ref,
+   kind)` and returns `ArtifactMeta(ref=ref, kind=kind)` (import `ArtifactKind`). And
+   `def _prediction_tools() -> tuple[object, ...]` returning `served_tool("unlabelled_rows",
+   _OPEN, allow_in=["*"], phase="artifacts")`, `served_tool("apply_scaler", _OPEN,
+   allow_in=["feature_engineering"], phase="encoding", transform_only=True)`,
+   `served_tool("predict", _OPEN, allow_in=["champion_selection"], phase="training",
+   transform_only=True)`, `served_tool("predict_proba", _OPEN,
+   allow_in=["champion_selection"], phase="training", transform_only=True)`,
+   `served_tool("drop_columns", _OPEN, allow_in=["*"], phase="cleaning")` (not transform-only
+   here on purpose), `served_tool("write_predictions", _OPEN, allow_in=["*"],
+   phase="artifacts")`. Envelopes are `ToolSuccess(...).model_dump(mode="json")`.
+   - `test_predict_unlabelled_replays_and_deletes_unregistered_frames(world, tmp_path)`:
+     `rows, scaled, predicted = _made(paths, "dataframe"), _made(paths, "dataframe"),
+     _made(paths, "predictions")`; register `scaled` with `create_artifact(conn, ref=scaled.ref,
+     run_id=paths.run_id, kind="dataframe", path=paths.artifact(scaled.ref, "dataframe"),
+     meta=scaled, produced_by="seed", split=None)`. `session = FakeSession(_prediction_tools())`;
+     `session.envelopes = [envelopes with artifacts (rows,), (scaled,), (predicted,), and
+     ToolSuccess(summary={"rows": 2})]`. Call `predict_unlabelled(project=paths.slug,
+     run=paths.run_id, frame="a_" + "1" * 16, target="y", task="regression", model="a_" + "2" *
+     16, threshold=None, replay=(("apply_scaler", {"scaler": "a_" + "3" * 16}),))`. Assert
+     `result.summary == {"rows": 2}`; `session.calls == [("unlabelled_rows", {"project":
+     paths.slug, "run": paths.run_id, "frame": "a_" + "1" * 16, "target": "y"}, 900),
+     ("apply_scaler", {"scaler": "a_" + "3" * 16, "project": paths.slug, "run": paths.run_id,
+     "frame": str(rows.ref)}, 900), ("predict", {"project": paths.slug, "run": paths.run_id,
+     "model": "a_" + "2" * 16, "frame": str(scaled.ref)}, 900), ("write_predictions",
+     {"project": paths.slug, "run": paths.run_id, "frame": str(rows.ref), "predictions":
+     str(predicted.ref), "task": "regression"}, 900)]`; `not paths.artifact(rows.ref,
+     "dataframe").exists()`, `paths.artifact(scaled.ref, "dataframe").exists()`, `not
+     paths.artifact(predicted.ref, "predictions").exists()`; tool_calls count 0.
+   - `test_predict_unlabelled_classification_and_guards(world, tmp_path)`, in order (each
+     `async with McpClient(settings(paths, tmp_path), conn, session=...)`; the kwargs below are
+     the success call's unless noted):
+     1. Unentered `McpClient(..., session=FakeSession(()))`: `EngineError` match `"MCP client
+        is not entered"`.
+     2. Entered with `FakeSession(_prediction_tools())`, `project="missing-project"`:
+        `EngineError`; `session.calls == []`.
+     3. Classification: envelopes `(rows,)`, `(probas,)` (`_made(paths, "predictions")`),
+        `ToolSuccess(summary={"rows": 1})`; call with `task="classification"`,
+        `threshold=0.4`, `replay=()`; assert names `[call[0] for call in session.calls] ==
+        ["unlabelled_rows", "predict_proba", "write_predictions"]`, the predict_proba
+        arguments' `"frame" == str(rows.ref)`, and the write arguments' `"threshold" == 0.4`.
+     4. Not replayable: fresh session, envelopes `(rows,)`; `replay=(("drop_columns",
+        {"columns": ["x"]}),)`: `EngineError` match `"cannot be replayed"`; the `rows` file no
+        longer exists.
+     5. Two artifacts from one step: fresh session, envelope with artifacts `(first, second)`
+        (both `_made(paths, "dataframe")`): `ToolCallError`; neither file exists.
+     6. Malformed ref: fresh session, envelope with artifacts `(ArtifactMeta(ref=
+        ArtifactRef("a_bad"), kind="dataframe"),)` and `replay=(("drop_columns", {}),)`:
+        `EngineError`; `session.calls` has one call.
+     7. Write returns an artifact: fresh session, envelopes `(rows,)`, `(predicted,)`,
+        envelope with artifacts `(_made(paths, "table"),)`: `ToolCallError`; the table file
+        still exists (only artifacts of steps before the write are tracked).
+     8. Wrong write metadata: `FakeSession` whose tools are `_prediction_tools()` with
+        `write_predictions` replaced by `served_tool("write_predictions", _OPEN,
+        allow_in=["*"], phase="intake")`, envelopes `(rows,)`, `(predicted,)`: `EngineError`
+        match `"registry metadata is invalid"`.
+
+c. `tests/test_api_inspect.py` after `test_validation_route`: helper
+   `_prediction_state(seed: _Seed, *, champion: dict[str, JsonValue] | None) -> RunState`
+   built like `_validation_state`: problem as there (classification); nodes
+   `node("problem_definition"), node("data_splitting"), node("champion_selection")`; shared
+   results problem (e1), `data_splitting` summary `{"test": seed.test_frame}` (e2) and, when
+   `champion` is not None, `champion_selection` with that summary (e3); `cursor` 3 or 2;
+   `RunState.initial(...)` without `candidates`, and `model_copy(update={"shared_results":
+   ..., "cursor": ...})`. Test module imports to add: `json`; `ToolFailure` from
+   `statlab_contracts.envelope`. `test_predictions_route(tmp_path, monkeypatch)`:
+   1. POST with no checkpoint: 409 `{"detail": NO_CHAMPION}` (local constant `NO_CHAMPION =
+      "this run has no champion model yet"`).
+   2. State with `champion=None`: 409 same detail.
+   3. State with `champion={"model": 1}`: 409 same detail.
+   4. State with `champion={"model": model, "threshold": 0.4, "replay": [{"tool":
+      "apply_imputer", "parameters": {"imputer": imputer}}]}` (`model`, `imputer` =
+      `str(new_artifact_ref())`): POST gives 409 `{"detail": "the rows before the split are not
+      recorded for this run"}` (only the seed's `load_csv` call exists).
+   5. Record with `record_tool_call(conn, run_id=seed.run_id, node_execution_id=
+      seed.execution_id, ...)` (open `connect(settings.db_path)` and close it): a failed
+      `split_random` (`args_json=json.dumps({"frame": seed.frame})`, `result_json=
+      ToolFailure(error_class="data", message="m").model_dump_json()`), and a successful
+      `split_random` with `args_json=json.dumps({"frame": seed.frame})` and `result_json=
+      ToolSuccess(artifacts=(ArtifactMeta(ref=parse_artifact_ref(seed.test_frame),
+      kind="dataframe", split="test"),)).model_dump_json()`. Mint `rows`, `imputed`,
+      `probas` refs; write `b"x"` to `paths.artifact(rows, "dataframe")`. Queue
+      `session.responses` with `ToolSuccess(summary={"rows": 2}, artifacts=(ArtifactMeta(ref=
+      rows, kind="dataframe"),))`, the same shape for `imputed` (dataframe) and `probas`
+      (predictions), then `ToolSuccess(summary={"rows": 2, "task": "classification"})`. POST:
+      200, JSON `{"rows": 2, "task": "classification"}`; `[name for name, _, _ in
+      session.calls[-4:]] == ["unlabelled_rows", "apply_imputer", "predict_proba",
+      "write_predictions"]`; the first of those has arguments `{"project": "demo", "run":
+      seed.run_id, "frame": seed.frame, "target": "a"}`; the last has `"threshold": 0.4` and
+      `"frame": str(rows)`; the `rows` file no longer exists.
+   6. Queue `ToolFailure(error_class="data", message="the dataset has no rows without a target
+      to predict")`: POST gives 422 `{"detail": "the dataset has no rows without a target to
+      predict"}`.
+   7. Queue `ToolFailure(error_class="transient", message="m")`: POST gives 503.
+   8. State with `champion={"model": model, "replay": [{"tool": ""}]}`: POST gives 500.
+   9. Write `b"a,b\n"` to `paths.root / "predictions.csv"`; `GET
+      /api/runs/{seed.run_id}/files/predictions.csv` gives 200, `content-type` starting
+      `text/csv`, body `"a,b\n"`.
+
+### 5. Checks
+
+`make test-fast TESTS="tests/test_tools_evaluation.py tests/test_mcp_client.py
+tests/test_api_inspect.py tests/test_skills.py tests/test_tool_decorator.py"`;
+`.venv/bin/python -m ruff check` and `.venv/bin/python -m ruff format --check` on the six owned
+files; `.venv/bin/python -m mypy` on the six owned files. Stop and report on any failure,
+unexpected value or spec gap.
+
+Main then: review; end-to-end probe on scratch copies (MCP 8767, API 8766, a copy of
+`projects/teszt` and a `.backup` snapshot of `statlab.db`; never the user's files or ports):
+POST the friend's run `r_f5e9364ca69378fa` predictions, check rows/columns and the CSV;
+`make check`; commit; then write 77d.
+
+### Addendum 77c-A (lint/type corrections in `write_predictions`)
+
+1. Step 3: declare `added: dict[str, list[str] | np.ndarray] = {}` (values are a list of class
+   strings, or float64 arrays).
+2. Step 5: replace `out = data.assign(**added)` with `out = data.copy()` followed by
+   `for name, values in added.items(): out[name] = values`.
+3. Step 6: replace `os.replace(temporary, paths.root / PREDICTIONS_CSV)` with
+   `temporary.replace(paths.root / PREDICTIONS_CSV)`, and remove `import os`.
+4. Tests: 4b step 7 uses `task="regression"` (accepted). 4b step 6 stays as written: the
+   malformed-ref meta is appended by the first step, so the `finally` cleanup skips it before
+   the replay guard's `EngineError` propagates; that is the intended coverage.
+Rerun all subsection 5 checks.
+
+## Stage 77c acceptance receipt (2026-10-10)
+
+Implementer (after addendum A): focused selectors (tools evaluation, mcp client, api inspect,
+skills, tool decorator) exit 0, 247 passed; Ruff check/format and mypy on the six owned files
+exit 0. Main reviewed the full diff (matches the recipe and addendum).
+
+End-to-end probe (main): scratch copy of `projects/teszt` plus a `.backup` snapshot of
+`statlab.db` (other projects deleted from the snapshot, paths rewritten, the one
+`awaiting_user` run cancelled so boot resumed nothing); MCP 8767, API 8766. POST
+`/api/runs/r_f5e9364ca69378fa/predictions` gave 200 in about 1 s: classification, 17,952 rows
+(the day-4 rows), columns `row`, the 17 kept dataset columns, `prediction`, `probability_0`,
+`probability_1`; the CSV download gave 200 `text/csv`, 17,953 lines. No intermediate frames
+left (artifact count 288 before and after). Every row was predicted `1` (p ≥ 0.9994): that
+run's champion leans on the 7 columns empty on those rows (chunk 76), so its predictions are
+meaningless, as expected. Scratch servers stopped, scratch directory deleted.
+
+`make check` (`check77c.log`, temporary) exit 0: coverage 100 % (TOTAL 13637 stmts, 0
+missed), mypy 212 files, Ruff clean.

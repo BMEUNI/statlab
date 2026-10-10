@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from statlab_contracts.artifacts import (
     parse_artifact_ref,
 )
 from statlab_contracts.contract import DataContract, TargetSpec
-from statlab_contracts.envelope import ToolSuccess
+from statlab_contracts.envelope import ToolFailure, ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
 
@@ -401,3 +402,182 @@ async def test_validation_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         lacking = await client.get(f"{url}?candidate={branch_id}")
         assert lacking.status_code == 404
         assert lacking.json() == {"detail": NO_VALIDATION}
+
+
+NO_CHAMPION = "this run has no champion model yet"
+
+
+def _prediction_state(seed: _Seed, *, champion: dict[str, JsonValue] | None) -> RunState:
+    problem = ProblemSpec(
+        rationale="r",
+        target="a",
+        target_type="binary",
+        task="classification",
+        primary_metric="roc_auc",
+        metric_rule="explicit",
+    )
+    state = RunState.initial(
+        run_id=seed.run_id,
+        spine_id="s",
+        nodes=(
+            node("problem_definition"),
+            node("data_splitting"),
+            node("champion_selection"),
+        ),
+        mode="autonomous",
+    )
+    results = [
+        BoundaryResult(
+            node_name="problem_definition",
+            execution_id="e1",
+            result=NodeResult(
+                status="completed", summary={"problem": problem.model_dump(mode="json")}
+            ),
+        ),
+        BoundaryResult(
+            node_name="data_splitting",
+            execution_id="e2",
+            result=NodeResult(status="completed", summary={"test": seed.test_frame}),
+        ),
+    ]
+    if champion is not None:
+        results.append(
+            BoundaryResult(
+                node_name="champion_selection",
+                execution_id="e3",
+                result=NodeResult(status="completed", summary=champion),
+            )
+        )
+    cursor = 3 if champion is not None else 2
+    return state.model_copy(update={"shared_results": tuple(results), "cursor": cursor})
+
+
+@pytest.mark.asyncio
+async def test_predictions_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _open_project_api(tmp_path, monkeypatch) as (client, settings, session, project):
+        seed = _seed(settings, str(project["id"]))
+        paths = RunPaths(settings.data_dir, "demo", seed.run_id)
+        url = f"/api/runs/{seed.run_id}/predictions"
+        model = str(new_artifact_ref())
+        imputer = str(new_artifact_ref())
+        missing = await client.post(url)
+        assert missing.status_code == 409
+        assert missing.json() == {"detail": NO_CHAMPION}
+        paths.state_json.write_text(
+            _prediction_state(seed, champion=None).model_dump_json(), encoding="utf-8"
+        )
+        no_champion = await client.post(url)
+        assert no_champion.status_code == 409
+        assert no_champion.json() == {"detail": NO_CHAMPION}
+        paths.state_json.write_text(
+            _prediction_state(seed, champion={"model": 1}).model_dump_json(), encoding="utf-8"
+        )
+        malformed_champion = await client.post(url)
+        assert malformed_champion.status_code == 409
+        assert malformed_champion.json() == {"detail": NO_CHAMPION}
+        paths.state_json.write_text(
+            _prediction_state(
+                seed,
+                champion={
+                    "model": model,
+                    "threshold": 0.4,
+                    "replay": [{"tool": "apply_imputer", "parameters": {"imputer": imputer}}],
+                },
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+        unrecorded = await client.post(url)
+        assert unrecorded.status_code == 409
+        assert unrecorded.json() == {
+            "detail": "the rows before the split are not recorded for this run"
+        }
+        conn = connect(settings.db_path)
+        try:
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="split_random",
+                args_json=json.dumps({"frame": seed.frame}),
+                result_json=ToolFailure(error_class="data", message="m").model_dump_json(),
+                duration_ms=5,
+            )
+            record_tool_call(
+                conn,
+                run_id=seed.run_id,
+                node_execution_id=seed.execution_id,
+                tool_name="split_random",
+                args_json=json.dumps({"frame": seed.frame}),
+                result_json=ToolSuccess(
+                    artifacts=(
+                        ArtifactMeta(
+                            ref=parse_artifact_ref(seed.test_frame),
+                            kind="dataframe",
+                            split="test",
+                        ),
+                    )
+                ).model_dump_json(),
+                duration_ms=5,
+            )
+        finally:
+            conn.close()
+        rows = new_artifact_ref()
+        imputed = new_artifact_ref()
+        probas = new_artifact_ref()
+        paths.artifact(rows, "dataframe").write_bytes(b"x")
+        session.responses.append(
+            ToolSuccess(summary={"rows": 2}, artifacts=(ArtifactMeta(ref=rows, kind="dataframe"),))
+        )
+        session.responses.append(
+            ToolSuccess(
+                summary={"rows": 2}, artifacts=(ArtifactMeta(ref=imputed, kind="dataframe"),)
+            )
+        )
+        session.responses.append(
+            ToolSuccess(
+                summary={"rows": 2}, artifacts=(ArtifactMeta(ref=probas, kind="predictions"),)
+            )
+        )
+        session.responses.append(ToolSuccess(summary={"rows": 2, "task": "classification"}))
+        ok = await client.post(url)
+        assert ok.status_code == 200
+        assert ok.json() == {"rows": 2, "task": "classification"}
+        assert [name for name, _, _ in session.calls[-4:]] == [
+            "unlabelled_rows",
+            "apply_imputer",
+            "predict_proba",
+            "write_predictions",
+        ]
+        assert session.calls[-4][1] == {
+            "project": "demo",
+            "run": seed.run_id,
+            "frame": seed.frame,
+            "target": "a",
+        }
+        assert session.calls[-1][1]["threshold"] == 0.4
+        assert session.calls[-1][1]["frame"] == str(rows)
+        assert not paths.artifact(rows, "dataframe").exists()
+        session.responses.append(
+            ToolFailure(
+                error_class="data",
+                message="the dataset has no rows without a target to predict",
+            )
+        )
+        refused = await client.post(url)
+        assert refused.status_code == 422
+        assert refused.json() == {"detail": "the dataset has no rows without a target to predict"}
+        session.responses.append(ToolFailure(error_class="transient", message="m"))
+        unavailable = await client.post(url)
+        assert unavailable.status_code == 503
+        paths.state_json.write_text(
+            _prediction_state(
+                seed, champion={"model": model, "replay": [{"tool": ""}]}
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+        assert (await client.post(url)).status_code == 500
+        paths.root.joinpath("predictions.csv").write_bytes(b"a,b\n")
+        served = await client.get(f"/api/runs/{seed.run_id}/files/predictions.csv")
+        assert served.status_code == 200
+        assert served.headers["content-type"].startswith("text/csv")
+        assert served.content == b"a,b\n"
