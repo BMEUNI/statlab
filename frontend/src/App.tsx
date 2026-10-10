@@ -41,6 +41,9 @@ export default function App() {
   }
 
   function afterSignOut() {
+    clearSession(browserStore(), CURRENT_KEY);
+    setChatKey((key) => key + 1);
+    navigate({ name: 'home' });
     setSignedOut(true);
     queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'auth' });
   }
