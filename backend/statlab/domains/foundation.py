@@ -19,6 +19,7 @@ from statlab.domains.decisions import (
     ProblemSpec,
     ProfileDecision,
     ProfileFindings,
+    ProfilePlot,
     QualityDecision,
     SplitDecision,
 )
@@ -260,26 +261,33 @@ class _Evidence:
         )
 
 
-def _validate_quality(decision: QualityDecision, fixable: dict[str, JsonValue]) -> None:
+def _usable_quality(
+    decision: QualityDecision, fixable: dict[str, JsonValue], evidence: _Evidence
+) -> QualityDecision:
+    """Keep only reported fixes; drop the rest with a warning instead of failing
+    the step (chunk 80)."""
     reported = _object(fixable.get("mark_missing"), "quality fixable mark_missing")
+    dropped = 0
+    mark_missing: dict[str, tuple[str, ...]] = {}
     for column, values in decision.mark_missing.items():
         options = reported.get(column)
-        if not isinstance(options, list):
-            raise _RefusalError(
-                f"mark_missing column {column!r} has no reported values; "
-                f"allowed columns: {sorted(reported)!r}"
-            )
-        bad = sorted(set(values) - {item for item in options if isinstance(item, str)})
-        if bad:
-            raise _RefusalError(
-                f"mark_missing[{column!r}] values {bad!r} were not reported; allowed: {options!r}"
-            )
-    allowed_merge = _strings(fixable.get("merge_variants"), "quality fixable merge_variants")
-    bad = sorted(set(decision.merge_variants) - set(allowed_merge))
-    if bad:
-        raise _RefusalError(
-            f"merge_variants {bad!r} were not reported; allowed: {list(allowed_merge)!r}"
+        allowed: set[str] = (
+            {item for item in options if isinstance(item, str)}
+            if isinstance(options, list)
+            else set()
         )
+        usable = tuple(value for value in values if value in allowed)
+        dropped += len(values) - len(usable)
+        if usable:
+            mark_missing[column] = usable
+    allowed_merge = set(_strings(fixable.get("merge_variants"), "quality fixable merge_variants"))
+    merge = tuple(column for column in decision.merge_variants if column in allowed_merge)
+    dropped += len(decision.merge_variants) - len(merge)
+    if dropped:
+        evidence.warnings.append(
+            f"ignored {dropped} quality fix(es) that the checks did not report"
+        )
+    return decision.model_copy(update={"mark_missing": mark_missing, "merge_variants": merge})
 
 
 def _frame(output: ToolSuccess) -> ArtifactRef:
@@ -453,36 +461,48 @@ class FoundationExecutor:
                     numeric.discard(column)
         return columns, numeric
 
-    def _validate_profile(
+    def _usable_profile(
         self,
         invocation: NodeInvocation,
+        evidence: _Evidence,
         decision: ProfileDecision,
         schema: dict[str, JsonValue],
         target: str,
-    ) -> None:
+    ) -> ProfileDecision:
+        """Keep only usable column choices; drop the rest with a warning instead of
+        failing the step (chunk 80)."""
         columns, numeric = self._profile_columns(schema)
-        selections = (
-            (decision.numeric, "summarize_numeric", numeric),
-            (decision.categorical, "summarize_categorical", set(columns) - numeric),
-            (decision.correlations, "compute_correlations", numeric),
-            (decision.outliers, "detect_outliers", numeric),
-        )
         allowed = self.runtime.skill.node(invocation.spec.name).allowed
-        for selected, tool, compatible in selections:
-            bad = sorted({entry for entry in selected if entry not in compatible})
-            if bad:
-                raise _RefusalError(
-                    f"{tool} entries must be exact column names; rejected {bad!r} "
-                    f"(unknown or incompatible); allowed: {sorted(compatible)!r}"
-                )
-            if selected and tool not in allowed:
+        dropped = 0
+        update: dict[str, object] = {}
+        for name, selected, tool, compatible in (
+            ("numeric", decision.numeric, "summarize_numeric", numeric),
+            ("categorical", decision.categorical, "summarize_categorical", set(columns) - numeric),
+            ("correlations", decision.correlations, "compute_correlations", numeric),
+            ("outliers", decision.outliers, "detect_outliers", numeric),
+        ):
+            usable = tuple(entry for entry in selected if entry in compatible)
+            dropped += len(selected) - len(usable)
+            if usable and tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")
+            update[name] = usable
+        plots: list[ProfilePlot] = []
         for plot in decision.plots:
             tool = f"plot_{plot.kind}"
-            if plot.column not in columns or tool not in allowed:
-                raise _RefusalError("plot names an unknown column or unavailable tool")
-            if plot.kind == "target_relation" and plot.column == target:
-                raise _RefusalError("target cannot be its own relation predictor")
+            if tool not in allowed:
+                raise _RefusalError(f"{tool} is unavailable in this node skill")
+            if plot.column not in columns or (
+                plot.kind == "target_relation" and plot.column == target
+            ):
+                dropped += 1
+            else:
+                plots.append(plot)
+        update["plots"] = tuple(plots)
+        if dropped:
+            evidence.warnings.append(
+                f"ignored {dropped} profiling choice(s) that were not usable columns"
+            )
+        return decision.model_copy(update=update)
 
     async def _profile(self, invocation: NodeInvocation, evidence: _Evidence) -> NodeResult:
         raw = _ref(shared_result(invocation.state, "intake").summary, "raw")
@@ -513,11 +533,10 @@ class FoundationExecutor:
             "pair or comment."
             f" Numeric columns: {', '.join(sorted(numeric)) or 'none'}."
             f" Non-numeric columns: {', '.join(sorted(set(columns) - numeric)) or 'none'}.",
-            check=_rejecting(
-                lambda d: self._validate_profile(invocation, d, schema.summary, problem.target)
-            ),
         )
-        self._validate_profile(invocation, decision, schema.summary, problem.target)
+        decision = self._usable_profile(
+            invocation, evidence, decision, schema.summary, problem.target
+        )
         summary: dict[str, JsonValue] = {
             "frame": str(raw),
             "decision": decision.model_dump(mode="json"),
@@ -527,7 +546,9 @@ class FoundationExecutor:
         approved = await self._approve(invocation, evidence, decision)
         if approved is None:
             return evidence.result("awaiting_user", summary)
-        self._validate_profile(invocation, approved, schema.summary, problem.target)
+        approved = self._usable_profile(
+            invocation, evidence, approved, schema.summary, problem.target
+        )
         summary["decision"] = approved.model_dump(mode="json")
         frame = raw
         if self.runtime.contract.features.roles:
@@ -603,9 +624,8 @@ class FoundationExecutor:
             "cell texts that stand for a missing value; merge_variants lists text columns whose "
             "spelling variants name the same category. Leave both empty to change nothing. "
             "Name every failing check in findings.",
-            check=_rejecting(lambda d: _validate_quality(d, fixable)),
         )
-        _validate_quality(decision, fixable)
+        decision = _usable_quality(decision, fixable, evidence)
         summary: dict[str, JsonValue] = {
             "frame": str(frame),
             "decision": decision.model_dump(mode="json"),
@@ -615,7 +635,7 @@ class FoundationExecutor:
         approved = await self._approve(invocation, evidence, decision)
         if approved is None:
             return evidence.result("awaiting_user", summary)
-        _validate_quality(approved, fixable)
+        approved = _usable_quality(approved, fixable, evidence)
         summary["decision"] = approved.model_dump(mode="json")
         if approved.mark_missing or approved.merge_variants:
             fixed = await self._call(

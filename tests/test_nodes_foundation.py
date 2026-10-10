@@ -53,7 +53,7 @@ from statlab.errors import EngineError, ToolCallError
 from statlab.graph.candidates import RunControl, ToolBoundary
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import BoundaryResult, RunState
-from statlab.llm.client import CallRecovery, DecisionRejectedError, LlmClient
+from statlab.llm.client import CallRecovery, LlmClient
 from statlab.llm.routing import ModelRouter, Role
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.mcp_client import CallContext, Repair
@@ -691,37 +691,60 @@ async def test_invalid_contract_cannot_be_approved(foundation: Harness) -> None:
         ProfileDecision(
             rationale="target mismatch", plots=(ProfilePlot(kind="target_relation", column="y"),)
         ),
+        ProfileDecision(
+            rationale="ghost plot", plots=(ProfilePlot(kind="distribution", column="ghost"),)
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_profile_selection_refuses_before_optional_tools(
+async def test_profile_drops_unusable_choice(
     foundation: Harness,
     decision: ProfileDecision,
 ) -> None:
     await foundation.advance(2)
     foundation.llm.responses[ProfileDecision] = decision
     result = await foundation.step()
-    assert result.status == "failed"
-    assert [tool for _, tool, _ in foundation.tools.calls[-3:]] == [
-        "profile_schema",
-        "report_missingness",
-        "summarize_target",
-    ]
+    assert result.status == "completed"
+    assert "ignored 1 profiling choice(s) that were not usable columns" in result.warnings
+    assert result.summary["decision"] == ProfileDecision(rationale=decision.rationale).model_dump(
+        mode="json"
+    )
+    assert not any(
+        tool in {"summarize_numeric", "plot_distribution", "plot_target_relation"}
+        for _, tool, _ in foundation.tools.calls
+    )
 
 
 @pytest.mark.asyncio
-async def test_profile_check_feeds_llm_repair(
+async def test_profile_keeps_usable_choices(foundation: Harness) -> None:
+    foundation.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="mixed",
+        numeric=("x", "id"),
+        categorical=("x", "excluded"),
+        correlations=("x vs y",),
+    )
+    await foundation.advance(2)
+    result = await foundation.step()
+    assert result.status == "completed"
+    assert "ignored 3 profiling choice(s) that were not usable columns" in result.warnings
+    numeric_calls = [
+        params for _, tool, params in foundation.tools.calls if tool == "summarize_numeric"
+    ]
+    assert len(numeric_calls) == 1 and numeric_calls[0]["columns"] == ["x"]
+    categorical_calls = [
+        params for _, tool, params in foundation.tools.calls if tool == "summarize_categorical"
+    ]
+    assert len(categorical_calls) == 1 and categorical_calls[0]["columns"] == ["excluded"]
+    assert not any(tool == "compute_correlations" for _, tool, _ in foundation.tools.calls)
+
+
+@pytest.mark.asyncio
+async def test_profile_prompt_names_typed_columns(
     foundation: Harness, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="statlab.domains.runtime")
     await foundation.advance(2)
     await foundation.step()
-    check = foundation.llm.checks[ProfileDecision]
-    assert check(ProfileDecision(rationale="ok", numeric=("x",))) is None
-    with pytest.raises(DecisionRejectedError, match="allowed"):
-        check(ProfileDecision(rationale="bad", categorical=("x",)))
-    with pytest.raises(DecisionRejectedError, match=r"rejected \['x vs y'\]"):
-        check(ProfileDecision(rationale="bad", correlations=("x vs y",)))
     assert ProfileDecision(
         rationale="r", numeric=("x", "x", "y"), correlations=("x", "y", "x")
     ).numeric == (
@@ -734,7 +757,6 @@ async def test_profile_check_feeds_llm_repair(
         "x",
         "y",
     )
-    assert check(ProfileDecision(rationale="dup", numeric=("x", "x"))) is None
     messages = next(m for o, _, m in foundation.llm.calls if o is ProfileDecision)
     assert "summarize_categorical takes only non-numeric columns" in messages[-1]["content"]
     assert "never a sentence, pair or comment" in messages[-1]["content"]
@@ -1313,9 +1335,25 @@ async def test_profile_roles_override_dtype_and_skip_absent_columns(
     assert relation[0]["target"] == "y" and relation[0]["column"] == "x"
 
 
+@pytest.mark.parametrize(
+    ("removed", "response", "message"),
+    [
+        ("summarize_numeric", None, "summarize_numeric is unavailable in this node skill"),
+        (
+            "plot_distribution",
+            ProfileDecision(
+                rationale="plot", plots=(ProfilePlot(kind="distribution", column="x"),)
+            ),
+            "plot_distribution is unavailable in this node skill",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_profile_refuses_unavailable_tool_and_unknown_plot_column(
+async def test_profile_refuses_unavailable_tool(
     foundation: Harness,
+    removed: str,
+    response: ProfileDecision | None,
+    message: str,
 ) -> None:
     h = foundation
     base = policy()
@@ -1332,29 +1370,19 @@ async def test_profile_refuses_unavailable_tool_and_unknown_plot_column(
                     "tools",
                     "outputs",
                     "pitfalls",
-                    base.node(spec.name).allowed - {"summarize_numeric"},
+                    base.node(spec.name).allowed - {removed},
                 )
                 for spec in TABULAR_SPINE
             ),
             b"fixed policy",
         ),
     )
+    if response is not None:
+        h.llm.responses[ProfileDecision] = response
     await h.advance(2)
     out = await h.step()
     assert out.status == "failed" and out.error is not None
-    assert out.error.message == "summarize_numeric is unavailable in this node skill"
-
-
-@pytest.mark.asyncio
-async def test_profile_refuses_unknown_plot_column(foundation: Harness) -> None:
-    h = foundation
-    h.llm.responses[ProfileDecision] = ProfileDecision(
-        rationale="Ghost plot", plots=(ProfilePlot(kind="distribution", column="ghost"),)
-    )
-    await h.advance(2)
-    out = await h.step()
-    assert out.status == "failed" and out.error is not None
-    assert out.error.message == "plot names an unknown column or unavailable tool"
+    assert out.error.message == message
 
 
 @pytest.mark.asyncio
@@ -1566,26 +1594,34 @@ async def test_quality_fixes_feed_split(
 
 
 @pytest.mark.asyncio
-async def test_quality_check_rejects_unreported_fixes(
+async def test_quality_drops_unreported_fixes(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
 ) -> None:
     h = _full(migrated_db, project, tmp_path)
+    h.llm.responses[QualityDecision] = QualityDecision(
+        rationale="mixed",
+        mark_missing={"city": ("?", "n/a"), "other": ("?",)},
+        merge_variants=("city", "other"),
+    )
     await h.advance(3)
-    await h.step()
-    check = h.llm.checks[QualityDecision]
-    assert check(QualityDecision(rationale="ok", mark_missing={"city": ("?",)})) is None
-    with pytest.raises(DecisionRejectedError, match="were not reported"):
-        check(QualityDecision(rationale="bad", mark_missing={"city": ("n/a",)}))
-    with pytest.raises(DecisionRejectedError, match="no reported values"):
-        check(QualityDecision(rationale="bad", mark_missing={"other": ("?",)}))
-    with pytest.raises(DecisionRejectedError, match="merge_variants"):
-        check(QualityDecision(rationale="bad", merge_variants=("other",)))
+    result = await h.step()
+    assert result.status == "completed"
+    assert "ignored 3 quality fix(es) that the checks did not report" in result.warnings
+    fix_params = [params for _, tool, params in h.tools.calls if tool == "fix_data_quality"]
+    assert fix_params == [
+        {
+            "frame": str(RAW),
+            "target": "y",
+            "mark_missing": {"city": ["?"]},
+            "merge_variants": ["city"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_quality_refuses_unreported_fix_after_decision(
+async def test_quality_with_only_unreported_fixes_changes_nothing(
     migrated_db: sqlite3.Connection,
     project: ProjectRow,
     tmp_path: Path,
@@ -1594,8 +1630,10 @@ async def test_quality_refuses_unreported_fix_after_decision(
     h.llm.responses[QualityDecision] = QualityDecision(rationale="bad", merge_variants=("other",))
     await h.advance(3)
     result = await h.step()
-    assert result.status == "failed"
-    assert result.error is not None and "merge_variants" in result.error.message
+    assert result.status == "completed"
+    assert "ignored 1 quality fix(es) that the checks did not report" in result.warnings
+    assert not any(tool == "fix_data_quality" for _, tool, _ in h.tools.calls)
+    assert QualityDecision.model_validate(result.summary["decision"]).merge_variants == ()
 
 
 @pytest.mark.asyncio

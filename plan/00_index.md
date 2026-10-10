@@ -187,6 +187,7 @@ The entire tool layer is built and tested **before any agent code exists** (D22)
 | 77 | [`77_time_ordered_tables.md`](./77_time_ordered_tables.md) — time-ordered tables and predictions | completed | 76 |
 | 78 | [`78_start_run_missing_fields.md`](./78_start_run_missing_fields.md) — say why a run cannot start | completed | 77 |
 | 79 | [`79_long_user_summary.md`](./79_long_user_summary.md) — a long chat summary never fails a step | completed | 78 |
+| 80 | [`80_drop_unusable_choices.md`](./80_drop_unusable_choices.md) — unusable profiling/quality choices are dropped, not fatal | completed | 79 |
 | 44 | [`44_chat_setting_changes.md`](./44_chat_setting_changes.md) — "set X to Y" in the chat forks a new run with a new contract version from the earliest affected step; offline stand-in understands chat commands; fork note in the new run's chat | completed 2026-10-08 (make check 3125 passed, 100%; npm test 80/80) | 43 |
 | 43 | [`43_cost_and_ui_polish.md`](./43_cost_and_ui_polish.md) — prompt digest + cache-friendly prefix, code-built decisions for fixed steps, ordered stepper, lucide icons, size-safe layout, mode and fit-time labels | completed 2026-10-08 (make check 3117 passed, 100%; npm test 79/79) | 42 |
 | 42 | [`42_speed_chat_redesign.md`](./42_speed_chat_redesign.md) — threaded CV/permutation, numpy bootstrap scoring, navy/blue redesign, chat narration + run summary, short gate forms | completed 2026-10-08 (make check 3104 passed, 100%; npm test 77/77) | 41 |
