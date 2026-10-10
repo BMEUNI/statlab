@@ -284,9 +284,7 @@ def _usable_quality(
     merge = tuple(column for column in decision.merge_variants if column in allowed_merge)
     dropped += len(decision.merge_variants) - len(merge)
     if dropped:
-        evidence.warnings.append(
-            f"ignored {dropped} quality fix(es) that the checks did not report"
-        )
+        evidence.warnings.append(f"ignored {dropped} quality fix(es) that cannot be applied")
     return decision.model_copy(update={"mark_missing": mark_missing, "merge_variants": merge})
 
 
@@ -615,6 +613,18 @@ class FoundationExecutor:
             },
         )
         fixable = _object(check.summary.get("fixable"), "quality fixable")
+        # A split time/group value is never blanked: the split needs it on every row (chunk 81).
+        split = self.runtime.contract.split
+        protected = {
+            column for column in (split.time_column, split.group_column) if column is not None
+        }
+        reported = _object(fixable.get("mark_missing"), "quality fixable mark_missing")
+        fixable = {
+            **fixable,
+            "mark_missing": {
+                column: values for column, values in reported.items() if column not in protected
+            },
+        }
         decision = await self.runtime.decide(
             invocation,
             QualityDecision,

@@ -1608,7 +1608,7 @@ async def test_quality_drops_unreported_fixes(
     await h.advance(3)
     result = await h.step()
     assert result.status == "completed"
-    assert "ignored 3 quality fix(es) that the checks did not report" in result.warnings
+    assert "ignored 3 quality fix(es) that cannot be applied" in result.warnings
     fix_params = [params for _, tool, params in h.tools.calls if tool == "fix_data_quality"]
     assert fix_params == [
         {
@@ -1631,9 +1631,45 @@ async def test_quality_with_only_unreported_fixes_changes_nothing(
     await h.advance(3)
     result = await h.step()
     assert result.status == "completed"
-    assert "ignored 1 quality fix(es) that the checks did not report" in result.warnings
+    assert "ignored 1 quality fix(es) that cannot be applied" in result.warnings
     assert not any(tool == "fix_data_quality" for _, tool, _ in h.tools.calls)
     assert QualityDecision.model_validate(result.summary["decision"]).merge_variants == ()
+
+
+@pytest.mark.asyncio
+async def test_quality_never_blanks_split_time_column(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h = harness(
+        migrated_db,
+        project,
+        tmp_path,
+        contract=DataContract(
+            target=TargetSpec(column="y", type="binary"),
+            features=FeatureRules(id_columns=("id",), exclude=("excluded",)),
+            split=SplitRules(strategy="temporal", time_column="t"),
+        ),
+        spine=TABULAR_SPINE,
+    )
+    h.tools.fixable = {"mark_missing": {"t": ["9999"], "city": ["?"]}, "merge_variants": []}
+    h.llm.responses[QualityDecision] = QualityDecision(
+        rationale="sentinel", mark_missing={"t": ("9999",), "city": ("?",)}
+    )
+    await h.advance(3)
+    result = await h.step()
+    assert result.status == "completed"
+    assert "ignored 1 quality fix(es) that cannot be applied" in result.warnings
+    fix_params = [params for _, tool, params in h.tools.calls if tool == "fix_data_quality"]
+    assert fix_params == [
+        {
+            "frame": str(RAW),
+            "target": "y",
+            "mark_missing": {"city": ["?"]},
+            "merge_variants": [],
+        }
+    ]
 
 
 @pytest.mark.asyncio
