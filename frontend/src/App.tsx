@@ -1,4 +1,4 @@
-import { CircleQuestionMark, FolderOpen, Plus } from 'lucide-react';
+import { CircleQuestionMark, FolderOpen, Plus, ShieldCheck } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, getAuthConfig, getMe, getVocabulary, onSignedOut } from './api/client.ts';
 import { modelsFor } from './run/model.ts';
@@ -67,6 +67,7 @@ export default function App() {
             }}
           ><Plus className="icon" aria-hidden="true" />New chat</button>
           <a className="button" href="#/projects" aria-current={inProjects ? 'page' : undefined}><FolderOpen className="icon" aria-hidden="true" />Projects &amp; runs</a>
+          {user.is_admin && <a className="button" href="#/admin" aria-current={route.name === 'admin' ? 'page' : undefined}><ShieldCheck className="icon" aria-hidden="true" />Admin</a>}
           <details className="help-menu">
             <summary aria-label="What is Statlab?" title="What is Statlab?"><CircleQuestionMark className="icon" aria-hidden="true" /></summary>
             <div className="help-pop">

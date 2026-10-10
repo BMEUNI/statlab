@@ -446,7 +446,14 @@ table.validation-table td.num { text-align: right; font-variant-numeric: tabular
 @media (max-width: 40rem) { .user-name { display: none; } }
 .user-pop { width: min(18rem, calc(100vw - 32px)); }
 .user-pop-name { margin: 0; font-weight: 600; }
-.user-pop .button, .user-pop button { width: 100%; margin-top: 8px; }
+.topnav .user-pop .button, .topnav .user-pop button {
+  width: 100%;
+  margin-top: 8px;
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--rule);
+}
+.topnav .user-pop .button:hover, .topnav .user-pop button:hover { background: var(--paper); }
 
 .meter { display: grid; gap: 4px; min-width: 9rem; }
 .meter-track { height: 6px; border-radius: 999px; background: var(--rule); overflow: hidden; }
