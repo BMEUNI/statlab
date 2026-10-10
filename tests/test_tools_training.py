@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 from pydantic import JsonValue
 from statlab_contracts.artifacts import ArtifactRef, new_artifact_ref
-from statlab_contracts.contract import DataContract
+from statlab_contracts.contract import DataContract, SplitRules, TargetSpec
 from statlab_contracts.envelope import TOOL_RESULT_ADAPTER, ToolSuccess
 from statlab_contracts.layout import RunPaths
 from statlab_tools.artifacts import load_dataframe, save_dataframe
@@ -34,12 +34,15 @@ from statlab_tools.tools.encoding import (
     fit_onehot_encoder,
     fit_scaler,
 )
+from statlab_tools.tools.evaluation import cross_validate_estimator
 from statlab_tools.tools.splitting import split_stratified
 from statlab_tools.tools.training import (
+    cv_splitter,
     get_model_params,
     list_estimators,
     predict,
     predict_proba,
+    split_is_temporal,
     train_estimator,
     tune_estimator,
 )
@@ -931,3 +934,63 @@ def test_tune_best_params_is_the_argmax_of_results(run_paths: RunPaths) -> None:
         best = max(means) if res.summary["greater_is_better"] else min(means)
         assert res.summary["best_score"] == best
         assert res.summary["best_params"] == rows[means.index(best)]["params"]
+
+
+def test_temporal_snapshot_uses_forward_folds(run_paths: RunPaths) -> None:
+    assert split_is_temporal(run_paths) is False
+    snapshot = DataContract(
+        target=TargetSpec(column="y"),
+        split=SplitRules(strategy="temporal", time_column="f1"),
+    )
+    run_paths.contract_snapshot_json.write_text(snapshot.model_dump_json())
+    assert split_is_temporal(run_paths) is True
+    assert type(cv_splitter(5, "classification", 0, temporal=True)).__name__ == "TimeSeriesSplit"
+
+    ref = _save(run_paths, _separable_binary(n=240))
+    grid = {"C": (0.1, 1.0, 10.0)}
+    a = tune_estimator(
+        run_paths,
+        ref,
+        target="y",
+        name="logistic_regression",
+        metric="roc_auc",
+        seed=1,
+        param_grid=grid,
+    )
+    b = tune_estimator(
+        run_paths,
+        ref,
+        target="y",
+        name="logistic_regression",
+        metric="roc_auc",
+        seed=99,
+        param_grid=grid,
+    )
+    assert a.summary["results"] == b.summary["results"]
+
+    folds = []
+    for seed in (1, 99):
+        cv = cross_validate_estimator(
+            run_paths,
+            ref,
+            target="y",
+            name="logistic_regression",
+            metric="roc_auc",
+            seed=seed,
+        )
+        assert len(_list(cv.summary["fold_scores"])) == 5
+        folds.append(cv.summary["fold_scores"])
+    assert folds[0] == folds[1]
+
+    probas = []
+    for seed in (1, 99):
+        trained = train_estimator(
+            run_paths,
+            ref,
+            target="y",
+            name="logistic_regression",
+            seed=seed,
+            calibrate=True,
+        )
+        probas.append(_loaded(run_paths, predict_proba(run_paths, trained.artifacts[0].ref, ref)))
+    assert np.allclose(probas[0]["proba__1"].to_numpy(), probas[1]["proba__1"].to_numpy())

@@ -170,7 +170,7 @@ class OfflineTools(ToolBoundary):
                 summary={"rows_before": 240, "rows_dropped": self.rows_dropped},
                 artifacts=(ArtifactMeta(ref=FRAME, kind="dataframe"),),
             )
-        if tool in ("split_random", "split_stratified"):
+        if tool in ("split_random", "split_stratified", "split_temporal"):
             # Accepted B6 dispatch records/locks the produced test artifact before verification.
             set_test_fingerprint(self.conn, ctx.paths.run_id, self.fingerprint)
             report: dict[str, JsonValue] = {
@@ -273,6 +273,7 @@ def policy() -> SkillPolicy:
             "drop_columns",
             "split_random",
             "split_stratified",
+            "split_temporal",
             "verify_split",
             "check_data_quality",
             "fix_data_quality",
@@ -828,7 +829,7 @@ async def test_guided_valid_approval_and_wrong_schema(foundation: Harness) -> No
     assert (await foundation.step()).status == "completed"
 
 
-@pytest.mark.parametrize("strategy", ["temporal", "grouped"])
+@pytest.mark.parametrize("strategy", ["grouped"])
 @pytest.mark.asyncio
 async def test_unsupported_contract_strategy_has_no_actions(
     migrated_db: sqlite3.Connection,
@@ -857,19 +858,72 @@ async def test_unsupported_contract_strategy_has_no_actions(
     assert result.status == "failed" and len(env.tools.calls) == calls
 
 
-@pytest.mark.parametrize("dependence", ["temporal", "grouped"])
+@pytest.mark.parametrize(
+    ("dependence", "message"),
+    [
+        (
+            "temporal",
+            "rows depend on time: set split.strategy to temporal and split.time_column in the "
+            "contract",
+        ),
+        ("grouped", "grouped rows have no supported split yet; review data"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_decision_dependence_has_no_actions(
     foundation: Harness,
     dependence: Literal["temporal", "grouped"],
+    message: str,
 ) -> None:
     await foundation.advance(3)
     foundation.llm.responses[SplitDecision] = SplitDecision(
         rationale="dependent rows", dependence=dependence
     )
     calls = len(foundation.tools.calls)
-    assert (await foundation.step()).status == "failed"
+    out = await foundation.step()
+    assert out.status == "failed"
+    assert out.error is not None and out.error.message == message
     assert len(foundation.tools.calls) == calls
+
+
+@pytest.mark.asyncio
+async def test_temporal_contract_splits_by_time_column(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    contract = DataContract(
+        target=TargetSpec(column="y", type="binary"),
+        split=SplitRules(strategy="temporal", time_column="x"),
+    )
+    env = harness(migrated_db, project, tmp_path, contract=contract)
+    env.llm.responses[SplitDecision] = SplitDecision(rationale="time order", dependence="temporal")
+    await env.advance(4)
+    split = next(params for _, tool, params in env.tools.calls if tool == "split_temporal")
+    assert {k: v for k, v in split.items() if k != "frame"} == {
+        "target": "y",
+        "time_column": "x",
+        "test_size": 0.2,
+        "valid_size": 0.2,
+    }
+    assert not any(tool in ("split_random", "split_stratified") for _, tool, _ in env.tools.calls)
+    assert shared_result(env.state, "data_splitting").summary["train"] == TRAIN
+
+
+@pytest.mark.asyncio
+async def test_temporal_proposal_without_time_column_refuses(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    env = harness(migrated_db, project, tmp_path)
+    env.llm.responses[SplitDecision] = SplitDecision(rationale="time", strategy="temporal")
+    await env.advance(3)
+    out = await env.step()
+    assert out.status == "failed"
+    assert out.error is not None
+    assert out.error.message == "a temporal split needs split.time_column in the contract"
+    assert not any(tool.startswith("split_") for _, tool, _ in env.tools.calls)
 
 
 @pytest.mark.asyncio

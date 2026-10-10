@@ -71,7 +71,7 @@ def test_modelling_policy(registry: dict[str, ToolSpec]) -> None:
         assert "TODO:" not in skill.heuristics and "TODO:" not in skill.pitfalls
         assert skill.purpose and skill.outputs
         assert skill.allowed <= registry.keys()
-    assert "split_temporal" not in policy.original_bytes.decode()
+    assert "split_temporal" in policy.node("data_splitting").allowed
     assert "split_grouped" not in policy.original_bytes.decode()
     with pytest.raises(ConfigError, match="absent"):
         policy.node("absent")

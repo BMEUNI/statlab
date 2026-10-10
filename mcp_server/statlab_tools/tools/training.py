@@ -151,6 +151,15 @@ def tuning_from_snapshot(paths: RunPaths) -> tuple[int, int]:
     return _FALLBACK_CV_FOLDS, _FALLBACK_BUDGET_SECONDS
 
 
+def split_is_temporal(paths: RunPaths) -> bool:
+    """True when the contract snapshot asks for a temporal split (chunk 77); then
+    cross-validation folds must run forward in time."""
+    if paths.contract_snapshot_json.exists():
+        contract = DataContract.model_validate_json(paths.contract_snapshot_json.read_text())
+        return contract.split.strategy == "temporal"
+    return False
+
+
 def _reject_class_weight(entry: EstimatorEntry, class_weight: ClassWeight) -> None:
     """`class_weight != "none"` on an entry without support is `tool_param` (§3.1)."""
     if class_weight != "none" and not entry.supports_class_weight:
@@ -239,13 +248,17 @@ def check_task(frame: pd.DataFrame, target: str, task: Task) -> None:
         raise ToolDataError(f"estimator is a regressor but target {target!r} is not numeric")
 
 
-def cv_splitter(cv_folds: int, task: Task, seed: int) -> object:
+def cv_splitter(cv_folds: int, task: Task, seed: int, temporal: bool = False) -> object:
     """The CV splitter (D-c): `StratifiedKFold` for a classifier, `KFold` for a regressor, both
     shuffled with the injected seed. Chunk 10 keeps the input's row order, so an unshuffled split
     of target-sorted or time-sorted data would make biased folds. Returned as `object` -- a
-    sklearn splitter is a dynamic value (P6)."""
-    from sklearn.model_selection import KFold, StratifiedKFold
+    sklearn splitter is a dynamic value (P6). With `temporal` (a temporal-split run),
+    `TimeSeriesSplit`: each fold validates on rows after its training rows; train frames from
+    `split_temporal` are in time order."""
+    from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
 
+    if temporal:
+        return TimeSeriesSplit(n_splits=cv_folds)
     if task == "classification":
         return StratifiedKFold(cv_folds, shuffle=True, random_state=seed)
     return KFold(cv_folds, shuffle=True, random_state=seed)
@@ -402,7 +415,7 @@ def train_estimator(
                 field_errors={"calibrate": "only a classification estimator can be calibrated"},
             )
         check_class_counts(y, cv_folds)
-        estimator = _wrap_calibrated(estimator, cv_folds, seed)
+        estimator = _wrap_calibrated(estimator, cv_folds, seed, split_is_temporal(paths))
         calibrated = True
 
     # D17 addendum 50: forest and extra-trees trees fit on threads; predictions stay
@@ -458,12 +471,12 @@ def _set_params(estimator: object, params: dict[str, ParamValue]) -> object:
     return estimator
 
 
-def _wrap_calibrated(estimator: object, cv_folds: int, seed: int) -> object:
+def _wrap_calibrated(estimator: object, cv_folds: int, seed: int, temporal: bool) -> object:
     """`CalibratedClassifierCV(estimator, cv=<shuffled StratifiedKFold>, method="sigmoid")` (D34b,
     D-c), returned as `object`."""
     from sklearn.calibration import CalibratedClassifierCV
 
-    splitter = cv_splitter(cv_folds, "classification", seed)
+    splitter = cv_splitter(cv_folds, "classification", seed, temporal)
     return CalibratedClassifierCV(estimator, cv=splitter, method="sigmoid")
 
 
@@ -554,7 +567,7 @@ def tune_estimator(
             )
 
     scorer = scorer_for(metric, multiclass=multiclass)
-    splitter = cv_splitter(cv_folds, entry.task, seed)
+    splitter = cv_splitter(cv_folds, entry.task, seed, split_is_temporal(paths))
     y_arr = y.to_numpy() if entry.task == "classification" else y.to_numpy(dtype="float64")
 
     jobs = min(cv_folds, parallel_jobs(name))

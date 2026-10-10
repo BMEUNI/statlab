@@ -22,6 +22,7 @@ from statlab_tools.tools.splitting import (
     MIN_SPLIT_ROWS,
     split_random,
     split_stratified,
+    split_temporal,
 )
 
 if TYPE_CHECKING:
@@ -645,3 +646,95 @@ async def test_mcp_split_stratified_round_trips(
         assert validated.ok is True
         test_meta = next(m for m in validated.artifacts if m.split == "test")
         assert test_meta.split == "test"
+
+
+def test_temporal_split_orders_by_time_and_reports_ranges(run_paths: RunPaths) -> None:
+    t = [(i * 37) % 200 for i in range(200)]
+    frame = pd.DataFrame({"t": t, "y": [i % 2 for i in range(200)], "x": list(range(200))})
+    ref = _save(run_paths, frame)
+    res = split_temporal(run_paths, ref, target="y", time_column="t")
+    assert res.summary["rows"] == {"train": 120, "valid": 40, "test": 40}
+    splits = _loaded_splits(run_paths, res)
+    assert splits["train"]["t"].tolist() == list(range(120))
+    assert splits["valid"]["t"].tolist() == list(range(120, 160))
+    assert splits["test"]["t"].tolist() == list(range(160, 200))
+    assert res.summary["time_column"] == "t"
+    assert res.summary["time_ranges"] == {
+        "train": [0, 119],
+        "valid": [120, 159],
+        "test": [160, 199],
+    }
+    assert splits["train"]["x"].tolist() == [frame["x"][frame["t"] == v].item() for v in range(120)]
+
+
+def test_temporal_split_keeps_ties_together(run_paths: RunPaths) -> None:
+    frame = pd.DataFrame({"t": [i // 10 for i in range(200)], "y": [i % 2 for i in range(200)]})
+    ref = _save(run_paths, frame)
+    res = split_temporal(
+        run_paths, ref, target="y", time_column="t", test_size=0.18, valid_size=0.18
+    )
+    assert res.summary["rows"] == {"train": 130, "valid": 40, "test": 30}
+    splits = _loaded_splits(run_paths, res)
+    train_t = set(splits["train"]["t"].tolist())
+    valid_t = set(splits["valid"]["t"].tolist())
+    test_t = set(splits["test"]["t"].tolist())
+    assert train_t.isdisjoint(valid_t)
+    assert train_t.isdisjoint(test_t)
+    assert valid_t.isdisjoint(test_t)
+
+
+def test_temporal_split_parses_dates(run_paths: RunPaths) -> None:
+    stamps = pd.date_range("2024-01-01", periods=200, freq="h")
+    positions = [(i * 37) % 200 for i in range(200)]
+    y = [i % 2 for i in range(200)]
+    text = [stamps[p].strftime("%Y-%m-%dT%H:%M") for p in positions]
+    ref_text = _save(run_paths, pd.DataFrame({"t": text, "y": y}))
+    res_text = split_temporal(run_paths, ref_text, target="y", time_column="t")
+    splits_text = _loaded_splits(run_paths, res_text)
+    assert splits_text["train"]["t"].tolist() == [
+        stamps[p].strftime("%Y-%m-%dT%H:%M") for p in range(120)
+    ]
+    assert _get(res_text.summary, "time_ranges", "test") == [
+        stamps[160].strftime("%Y-%m-%dT%H:%M"),
+        stamps[199].strftime("%Y-%m-%dT%H:%M"),
+    ]
+
+    ref_dates = _save(run_paths, pd.DataFrame({"t": [stamps[p] for p in positions], "y": y}))
+    res_dates = split_temporal(run_paths, ref_dates, target="y", time_column="t")
+    assert res_dates.summary["rows"] == {"train": 120, "valid": 40, "test": 40}
+    splits_dates = _loaded_splits(run_paths, res_dates)
+    assert splits_dates["train"]["t"].tolist() == list(stamps[:120])
+
+
+def test_temporal_split_rejects_bad_time_columns(run_paths: RunPaths) -> None:
+    y = [i % 2 for i in range(200)]
+    numeric = _save(run_paths, pd.DataFrame({"t": list(range(200)), "y": y}))
+    before = _artifact_files(run_paths)
+    with pytest.raises(ToolParamError):
+        split_temporal(run_paths, numeric, target="y", time_column="nope")
+    assert _artifact_files(run_paths) == before
+
+    with_null: list[object] = [float(i) for i in range(200)]
+    with_null[5] = None
+    null_ref = _save(run_paths, pd.DataFrame({"t": with_null, "y": y}))
+    before = _artifact_files(run_paths)
+    with pytest.raises(ToolDataError, match="missing value"):
+        split_temporal(run_paths, null_ref, target="y", time_column="t")
+    assert _artifact_files(run_paths) == before
+
+    stamps = [f"2024-01-01T{i % 24:02d}:{i % 60:02d}" for i in range(200)]
+    stamps[7] = "soon"
+    text_ref = _save(run_paths, pd.DataFrame({"t": stamps, "y": y}))
+    before = _artifact_files(run_paths)
+    with pytest.raises(ToolDataError, match="neither numbers nor ISO 8601"):
+        split_temporal(run_paths, text_ref, target="y", time_column="t")
+    assert _artifact_files(run_paths) == before
+
+
+def test_temporal_split_with_empty_test_is_refused(run_paths: RunPaths) -> None:
+    frame = pd.DataFrame({"t": list(range(40)), "y": [i % 2 for i in range(40)]})
+    ref = _save(run_paths, frame)
+    before = _artifact_files(run_paths)
+    with pytest.raises(ToolDataError, match="MIN_SPLIT_ROWS"):
+        split_temporal(run_paths, ref, target="y", time_column="t", test_size=0.01)
+    assert _artifact_files(run_paths) == before

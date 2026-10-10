@@ -650,13 +650,21 @@ def _check_roles(
 def _check_split_time_column(
     contract: DataContract, data: pd.DataFrame, *, missing_columns: set[str]
 ) -> list[_Mismatch]:
-    """C12: `split.time_column`, when set, parses as datetime."""
+    """C12: `split.time_column`, when set, holds numbers or dates (chunk 77: numbers are
+    accepted)."""
     column = contract.split.time_column
     if column is None or column in missing_columns:
         return []
+    if is_numeric_column(data[column]) or pd.api.types.is_datetime64_any_dtype(data[column]):
+        return []
     share = iso8601_parse_share(data[column])
     if share < DATETIME_PARSE_SHARE:
-        return [_mismatch("split.time_column", f"only {share:.0%} of values parse as ISO 8601")]
+        return [
+            _mismatch(
+                "split.time_column",
+                f"only {share:.0%} of values parse as ISO 8601 dates and the column is not numeric",
+            )
+        ]
     return []
 
 

@@ -60,6 +60,7 @@ from statlab_tools.tools.training import (
     check_task,
     cv_splitter,
     feature_columns,
+    split_is_temporal,
     tuning_from_snapshot,
 )
 
@@ -1123,7 +1124,7 @@ def _cv_prepare(
                 field_errors={"metric": f"{metric!r} is binary-only"},
             )
     y_arr = y.to_numpy() if entry.task == "classification" else y.to_numpy(dtype="float64")
-    splitter = cv_splitter(cv_folds, entry.task, seed)
+    splitter = cv_splitter(cv_folds, entry.task, seed, split_is_temporal(paths))
     scorer = scorer_for(metric, multiclass=multiclass)
     return x, y_arr, entry.task, splitter, scorer, greater_is_better(metric), cv_folds
 

@@ -639,15 +639,21 @@ class FoundationExecutor:
             or decision.strategy
             or ("stratified" if problem.task == "classification" else "random")
         )
-        if strategy in ("temporal", "grouped") or decision.dependence != "independent":
+        if strategy == "grouped" or decision.dependence == "grouped":
+            raise _RefusalError("grouped rows have no supported split yet; review data")
+        if strategy == "temporal" and contract.split.time_column is None:
+            raise _RefusalError("a temporal split needs split.time_column in the contract")
+        if decision.dependence == "temporal" and strategy != "temporal":
             raise _RefusalError(
-                "temporal/grouped dependence has no supported v1 split; review data"
+                "rows depend on time: set split.strategy to temporal and split.time_column "
+                "in the contract"
             )
         rules = SplitRules(
             strategy=strategy,
             test_size=contract.split.test_size,
             valid_size=contract.split.valid_size,
             seed=contract.split.seed,
+            time_column=contract.split.time_column if strategy == "temporal" else None,
         )
         if strategy == "stratified" and problem.task != "classification":
             raise _RefusalError("regression cannot use a stratified split")
@@ -659,8 +665,9 @@ class FoundationExecutor:
             invocation,
             SplitDecision,
             evidence=tuple(boundary.result.summary for boundary in invocation.state.shared_results),
-            question="Choose only an absent strategy. Flag temporal/group dependence; v1 cannot "
-            "split those data. Contract ratios, seed and structural policies remain fixed.",
+            question="Choose only an absent strategy. Flag temporal or grouped dependence: a "
+            "temporal split needs split.time_column in the contract, and grouped rows cannot be "
+            "split yet. Contract ratios, seed and structural policies remain fixed.",
         )
         rules = self._split_rules(decision, problem)
         summary: dict[str, JsonValue] = {
@@ -750,17 +757,21 @@ class FoundationExecutor:
                     },
                 )
             )
+        arguments: dict[str, JsonValue] = {
+            "frame": str(frame),
+            "target": problem.target,
+            "test_size": rules.test_size,
+            "valid_size": rules.valid_size,
+        }
+        if rules.strategy == "temporal":
+            arguments["time_column"] = rules.time_column
+        else:
+            arguments["seed"] = rules.seed
         splits = await self._call(
             invocation,
             evidence,
             f"split_{rules.strategy}",
-            {
-                "frame": str(frame),
-                "target": problem.target,
-                "seed": rules.seed,
-                "test_size": rules.test_size,
-                "valid_size": rules.valid_size,
-            },
+            arguments,
         )
         refs = {
             artifact.split: str(artifact.ref) for artifact in splits.artifacts if artifact.split

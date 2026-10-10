@@ -1,7 +1,8 @@
 """Node 4 splitting tools: `PLAN.md` §4 node 4, §6.3's `splitting` phase, this chunk's spec.
 
-Three tools -- `split_random`, `split_stratified`, `verify_split` -- are the only place rows are
-assigned to train/valid/test (D26: every candidate shares one split). The split tools set
+Four tools -- `split_random`, `split_stratified`, `split_temporal` (chunk 77), `verify_split` --
+are the only place rows are assigned to train/valid/test (D26: every candidate shares one split).
+The split tools set
 `ArtifactMeta.split` so the D32a lineage lock has a typed fact, return a content fingerprint of
 `test` so cross-run exposure can be counted (D32c, via D-c's formula), and refuse an undersized
 split rather than produce one (D33c, D-e). `verify_split` re-runs the same size/balance checks
@@ -38,7 +39,12 @@ from statlab_contracts.vocabulary import SplitRole
 
 from statlab_tools.artifacts import load_dataframe, save_dataframe
 from statlab_tools.tool import ORCHESTRATOR_SUPPLIED, ToolDataError, ToolParamError, tool
-from statlab_tools.tools._frame import is_class_target, json_scalar, observed_counts
+from statlab_tools.tools._frame import (
+    is_class_target,
+    is_numeric_column,
+    json_scalar,
+    observed_counts,
+)
 
 MIN_SPLIT_ROWS: Final = 30
 """D33c: every split must hold at least this many rows. Named valid/test by D33c; train takes
@@ -244,9 +250,16 @@ def _prepare(
     return data[non_null_mask], dropped
 
 
-def _finish(paths: RunPaths, splits: _Splits, target: str, dropped: int) -> ToolSuccess:
+def _finish(
+    paths: RunPaths,
+    splits: _Splits,
+    target: str,
+    dropped: int,
+    extra: dict[str, JsonValue] | None = None,
+) -> ToolSuccess:
     """Shared finish: run the two refusal checks, raise `ToolDataError` on failure (writing no
-    file), otherwise save the three frames with their `split` and return the summary."""
+    file), otherwise save the three frames with their `split` and return the summary. `extra`
+    adds tool-specific summary keys."""
     size = _check_size(splits)
     balance = _check_balance(splits, target)
     if size["status"] == "fail" or balance["status"] == "fail":
@@ -277,6 +290,8 @@ def _finish(paths: RunPaths, splits: _Splits, target: str, dropped: int) -> Tool
         "test_fingerprint": test_fingerprint,
         "checks": {"size": size, "target_balance": balance},
     }
+    if extra:
+        summary.update(extra)
     warnings: list[str] = []
     if dropped > 0:
         warnings.append(f"dropped {dropped} row(s) with a null target before splitting (D34d)")
@@ -285,6 +300,38 @@ def _finish(paths: RunPaths, splits: _Splits, target: str, dropped: int) -> Tool
             f"class balance drifts across splits (max_drift_z > {BALANCE_DRIFT_Z_WARN}); see checks"
         )
     return ToolSuccess(summary=summary, artifacts=tuple(metas), warnings=tuple(warnings))
+
+
+def _tie_end(values: np.ndarray, cut: int) -> int:
+    """Move a cut forward to the end of its tie group so rows with the same time stay in one
+    split."""
+    if 0 < cut < len(values):
+        return int(np.searchsorted(values, values[cut - 1], side="right"))
+    return cut
+
+
+def _time_key(times: pd.Series, time_column: str) -> np.ndarray:
+    """Sortable values of the time column: numbers as float64, dates (datetime columns or
+    ISO 8601 text) as naive UTC datetime64."""
+    missing = int(times.isna().sum())
+    if missing:
+        raise ToolDataError(
+            f"time_column {time_column!r} has {missing} missing value(s); a temporal split needs "
+            "a time for every row"
+        )
+    if is_numeric_column(times):
+        return times.to_numpy(dtype="float64")
+    if pd.api.types.is_datetime64_any_dtype(times):
+        parsed = pd.to_datetime(times, utc=True)
+    else:
+        parsed = pd.to_datetime(times, format="ISO8601", errors="coerce", utc=True)
+        bad = int(parsed.isna().sum())
+        if bad:
+            raise ToolDataError(
+                f"time_column {time_column!r}: {bad} value(s) are neither numbers nor ISO 8601 "
+                "dates"
+            )
+    return parsed.dt.tz_localize(None).to_numpy()
 
 
 # --- the tools -----------------------------------------------------------------------------------
@@ -376,6 +423,59 @@ def split_stratified(
         "test": data.iloc[np.sort(np.concatenate(test_parts))],
     }
     return _finish(paths, splits, target, dropped)
+
+
+@tool(phase="splitting", allow_in=["data_splitting"])
+def split_temporal(
+    paths: RunPaths,
+    frame: Annotated[ArtifactRef, Field(description="The dataframe to split.")],
+    target: _Target,
+    time_column: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Column that orders rows in time (numbers or dates). Earlier rows train, "
+            "later rows validate, the latest rows test.",
+        ),
+    ],
+    test_size: _TestSize = 0.2,
+    valid_size: _ValidSize = 0.2,
+) -> ToolSuccess:
+    """Partition rows by time: the earliest rows train, the next validate, the latest test. Use
+    when rows are ordered in time and later rows must be predicted from earlier ones; a random
+    split would let the model see the future. Each split's rows are in time order, so
+    cross-validation inside train can use forward-chaining folds. Rows with the same time stay
+    in one split. Null targets are dropped first (D34d); the same D33c guard refuses an
+    undersized split. No seed: the cut is deterministic.
+    """
+    data, dropped = _prepare(paths, frame, target, test_size, valid_size)
+    if time_column not in data.columns:
+        raise ToolParamError(
+            f"time_column {time_column!r} is not a column in the data",
+            field_errors={"time_column": "unknown"},
+        )
+    key = _time_key(data[time_column], time_column)
+    order = np.argsort(key, kind="stable")
+    ordered = key[order]
+    n = len(data)
+    train_end = _tie_end(ordered, n - round(n * test_size) - round(n * valid_size))
+    valid_end = _tie_end(ordered, max(n - round(n * test_size), train_end))
+    splits: _Splits = {
+        "train": data.iloc[order[:train_end]],
+        "valid": data.iloc[order[train_end:valid_end]],
+        "test": data.iloc[order[valid_end:]],
+    }
+    ranges: dict[str, JsonValue] = {
+        name: (
+            [json_scalar(part[time_column].iloc[0]), json_scalar(part[time_column].iloc[-1])]
+            if len(part)
+            else []
+        )
+        for name, part in splits.items()
+    }
+    return _finish(
+        paths, splits, target, dropped, extra={"time_column": time_column, "time_ranges": ranges}
+    )
 
 
 @tool(phase="splitting", allow_in=["data_splitting"])

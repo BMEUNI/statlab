@@ -629,6 +629,22 @@ def test_c12_time_column_non_date_strings_fails(
     assert "split.time_column" in fields
 
 
+def test_c12_time_column_numbers_and_datetimes_pass(
+    seeded_run: RunPaths, write_snapshot: Callable[[DataContract], None]
+) -> None:
+    contract = DataContract.model_validate(
+        {"target": {"column": "y"}, "split": {"strategy": "temporal", "time_column": "d"}}
+    )
+    write_snapshot(contract)
+    numbers = _save(seeded_run, pd.DataFrame({"y": [0, 1], "d": [3, 1]}))
+    assert validate_contract(seeded_run, numbers).summary["valid"] is True
+    dates = _save(
+        seeded_run,
+        pd.DataFrame({"y": [0, 1], "d": pd.to_datetime(["2024-01-01", "2024-02-01"])}),
+    )
+    assert validate_contract(seeded_run, dates).summary["valid"] is True
+
+
 # --- additional coverage ------------------------------------------------------------------------
 
 

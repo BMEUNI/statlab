@@ -108,7 +108,7 @@ Prepare one shared train, validation and locked test split.
 
 ### Heuristics
 - Create one shared seeded split; stratify classification when supported.
-- Use random splitting only for independent rows; escalate temporal or grouped data because v1 has no such split.
+- Use random splitting only for independent rows. Time-ordered rows need split.strategy temporal with split.time_column in the contract; flag temporal dependence when the contract has no such split. Grouped rows have no split yet: escalate.
 - Remove only contract-approved, target-independent exact duplicates or high-missing rows before splitting; account for missing targets.
 - Verify counts, overlap and duplicates; require at least 30 validation and test rows and 5 per class for classification.
 
@@ -119,6 +119,7 @@ cast_dtypes
 drop_columns
 split_random
 split_stratified
+split_temporal
 verify_split
 
 ### Outputs
