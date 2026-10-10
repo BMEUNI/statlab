@@ -9,9 +9,21 @@ test('routes round-trip', () => {
     { name: 'project', projectId: 'a/b c' },
     { name: 'setup', projectId: 'a/b c' },
     { name: 'run', runId: 'a/b c' },
+    { name: 'admin', section: 'overview' },
+    { name: 'admin', section: 'people' },
+    { name: 'admin', section: 'projects' },
+    { name: 'admin', section: 'runs' },
+    { name: 'admin', section: 'defaults' },
   ];
   for (const route of routes) assert.deepEqual(parseRoute(formatRoute(route)), route);
   assert.equal(formatRoute({ name: 'notFound' }), '#/');
+  assert.equal(formatRoute({ name: 'admin', section: 'overview' }), '#/admin');
+});
+
+test('admin routes', () => {
+  assert.deepEqual(parseRoute('#/admin'), { name: 'admin', section: 'overview' });
+  assert.deepEqual(parseRoute('#/admin/x'), { name: 'notFound' });
+  assert.deepEqual(parseRoute('#/admin/people/x'), { name: 'notFound' });
 });
 
 test('root and invalid hashes', () => {

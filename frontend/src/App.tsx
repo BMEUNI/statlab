@@ -1,25 +1,57 @@
 import { CircleQuestionMark, FolderOpen, Plus } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
-import { getVocabulary } from './api/client.ts';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ApiError, getAuthConfig, getMe, getVocabulary, onSignedOut } from './api/client.ts';
 import { modelsFor } from './run/model.ts';
 import ChatHome from './chat/ChatHome.tsx';
 import { CURRENT_KEY, browserStore, clearSession } from './chat/session.ts';
+import AdminPage from './admin/AdminPage.tsx';
+import AuthPage from './auth/AuthPage.tsx';
+import UserMenu from './auth/UserMenu.tsx';
 import ProjectPage from './pages/ProjectPage.tsx';
 import ProjectsPage from './pages/ProjectsPage.tsx';
 import RunPage from './pages/RunPage.tsx';
 import SetupWizard from './setup/SetupWizard.tsx';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRoute } from './useRoute.ts';
+import { errorText } from './ui/format.ts';
 
 export default function App() {
   const { route, navigate } = useRoute();
   const [chatKey, setChatKey] = useState(0);
+  const queryClient = useQueryClient();
+  const [signedOut, setSignedOut] = useState(false);
+  const config = useQuery({ queryKey: ['auth', 'config'], queryFn: ({ signal }) => getAuthConfig(signal) });
+  const me = useQuery({ queryKey: ['auth', 'me'], queryFn: ({ signal }) => getMe(signal) });
   const inProjects = route.name === 'projects' || route.name === 'project' || route.name === 'setup';
-  const vocabulary = useQuery({ queryKey: ['vocabulary'], queryFn: ({ signal }) => getVocabulary(signal) });
+  const vocabulary = useQuery({
+    queryKey: ['vocabulary'],
+    queryFn: ({ signal }) => getVocabulary(signal),
+    enabled: me.isSuccess,
+  });
   const models = (task: string) => {
     const list = modelsFor(vocabulary.data?.estimators ?? [], task);
     return list === '' ? '' : `: ${list}`;
   };
+
+  useEffect(() => onSignedOut(() => setSignedOut(true)), []);
+
+  function signedIn() {
+    setSignedOut(false);
+    void queryClient.resetQueries();
+  }
+
+  function afterSignOut() {
+    setSignedOut(true);
+    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'auth' });
+  }
+
+  const needsAuth = signedOut || (me.isError && me.error instanceof ApiError && me.error.status === 401);
+  if (config.isPending || (me.isPending && !signedOut)) return <div className="auth-loading"><p>Loading…</p></div>;
+  if (config.isError) return <div className="page"><p role="alert">{errorText(config.error)}</p></div>;
+  if (needsAuth) return <AuthPage config={config.data} onSignedIn={signedIn} />;
+  if (me.isError) return <div className="page"><p role="alert">{errorText(me.error)}</p></div>;
+  if (!me.isSuccess) return <div className="auth-loading"><p>Loading…</p></div>;
+  const user = me.data;
 
   return (
     <div className="app">
@@ -47,14 +79,23 @@ export default function App() {
               </ul>
             </div>
           </details>
+          <UserMenu user={user} onSignedOut={afterSignOut} />
         </nav>
       </header>
       <main className={route.name === 'home' || route.name === 'run' ? 'app-main' : 'app-main scroll'}>
         {route.name === 'home' && <ChatHome key={chatKey} navigate={navigate} />}
-        {route.name === 'run' && <RunPage key={route.runId} runId={route.runId} navigate={navigate} />}
+        {route.name === 'run' && <RunPage key={route.runId} runId={route.runId} isAdmin={user.is_admin} navigate={navigate} />}
         {route.name === 'projects' && <div className="page"><ProjectsPage navigate={navigate} /></div>}
-        {route.name === 'project' && <div className="page"><ProjectPage projectId={route.projectId} navigate={navigate} /></div>}
+        {route.name === 'project' && <div className="page"><ProjectPage projectId={route.projectId} me={user} navigate={navigate} /></div>}
         {route.name === 'setup' && <div className="page"><SetupWizard projectId={route.projectId} navigate={navigate} /></div>}
+        {route.name === 'admin' && (user.is_admin ? (
+          <div className="page wide"><AdminPage section={route.section} meId={user.id} /></div>
+        ) : (
+          <div className="page">
+            <h1>Admins only</h1>
+            <p>Ask an admin if you need access.</p>
+          </div>
+        ))}
         {route.name === 'notFound' && (
           <div className="page">
             <h1>Page not found</h1>

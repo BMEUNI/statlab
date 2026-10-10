@@ -1,8 +1,8 @@
 ---
-status: in_progress
+status: completed
 dependencies: [70]
-completion_date: null
-implementation_notes: "71a accounts, sessions, access guard and members (backend); 71b budgets and admin API; 71c frontend; 71d harness and docs"
+completion_date: 2026-10-10
+implementation_notes: "accounts with scrypt and session cookies, one access guard, members, enforced budgets per person/project/run, admin API and panel, change owner; make check 100%, npm 113/113, offline 19/19"
 ---
 
 # Chunk 71 — accounts, project members and admin budgets
@@ -1016,3 +1016,445 @@ the diff (guard in `RunControl.check`, 402 gates on create/message/answer/resume
 propose and assistant, admin-only prefix, signup switch, change owner keeps the old owner as a
 member). `make check` (`check71b.log`, temporary) exit 0: coverage 100 % (TOTAL                                               13367      0   3740      0   100%), mypy
 212 files, Ruff clean.
+
+## Stage 71c (detailed spec) — frontend: sign-in, user menu, members, admin panel, budget banner
+
+Prerequisite: 71b accepted (`dacc02d`). API shapes are the 71a/71b models above.
+
+Design notes (frontend-design review): keep the app's tokens (navy top bar, Atkinson
+Hyperlegible, `--signal` blue, `--gate` amber, `--fault` red). One signature element: the
+budget meter (thin track, fill turns amber at 80 % and red at the limit, dashed track when there
+is no limit), used in the user menu, every admin table and the run banner. The sign-in brand
+panel carries a faint ruled-rows texture (a table, the product's material). Admin overview
+figures sit in a ruled strip, not a card grid. No all-caps labels, no middle-dot meta strings,
+no arrows appended to links.
+
+Owned files (new, under `frontend/`): `src/admin/budget.ts`, `src/ui/BudgetMeter.tsx`,
+`src/admin/LimitField.tsx`, `src/admin/AdminPage.tsx`, `src/admin/AdminOverview.tsx`,
+`src/admin/AdminPeople.tsx`, `src/admin/AdminProjects.tsx`, `src/admin/AdminRuns.tsx`,
+`src/admin/AdminDefaults.tsx`, `src/auth/AuthPage.tsx`, `src/auth/UserMenu.tsx`,
+`src/project/MembersPanel.tsx`, `src/run/BudgetBanner.tsx`, `tests/budget.test.ts`.
+Owned files (edit): `src/api/types.ts`, `src/api/client.ts`, `src/routes.ts`, `src/App.tsx`,
+`src/pages/ProjectPage.tsx`, `src/pages/RunPage.tsx`, `src/ui/format.ts`, `src/style.css`,
+`tests/client.test.ts`, `tests/routes.test.ts`, `package.json` (test script only). Not alone:
+preserve others' edits. All visible text below is exact.
+
+### 1. `src/routes.ts`
+
+- `export type AdminSection = 'overview' | 'people' | 'projects' | 'runs' | 'defaults';` and
+  add `| { name: 'admin'; section: AdminSection }` to `Route`.
+- `parseRoute`: after the `projects` single-segment check: one segment `admin` -> `{ name:
+  'admin', section: 'overview' }`; two segments with head `admin` and second one of `people`,
+  `projects`, `runs`, `defaults` -> that section; any other `admin/...` -> notFound (this check
+  sits before the generic `id` handling).
+- `formatRoute`: `admin` -> `#/admin` for `overview`, else `#/admin/<section>`.
+
+### 2. `src/api/types.ts`
+
+Add (snake_case like `ProjectSummary`): `AuthUser { id; email; name; is_admin: boolean }`,
+`AuthConfig { signup_open: boolean; has_users: boolean }`, `Meter { spent_usd: number;
+limit_usd: number | null }`, `RunBudget { run: Meter; project: Meter; person: Meter;
+started_by: string | null; blocked: string | null }`, `MemberRole = 'owner' | 'member'`,
+`Member { user_id; email; name; role: MemberRole; added_at }`, `AdminSettings {
+default_monthly_limit_usd: number | null; default_project_limit_usd: number | null;
+default_run_limit_usd: number | null; signup_open: boolean }`, `AdminUser { id; email; name;
+is_admin: boolean; disabled: boolean; created_at; last_login_at: string | null;
+monthly_limit_usd: number | null; month: Meter; total_spent_usd: number; projects: number;
+runs: number }`, `AdminProject { id; name; slug; created_at; owner_id: string | null;
+owner_name: string | null; owner_email: string | null; members: number; runs: number; budget:
+Meter; limit_usd: number | null; run_limit_usd: number | null; effective_run_limit_usd: number
+| null }`, `AdminRun { id; project_id; project_name; status: RunStatus; started_at; limit_usd:
+number | null; budget: RunBudget }`, `AdminOverview { month; month_spent_usd; total_spent_usd;
+users; admins; disabled_users; projects; runs; open_runs: number; blocked_runs: AdminRun[];
+settings: AdminSettings }`, `UserPatch { is_admin?: boolean; disabled?: boolean;
+monthly_limit_usd?: number | null }`, `ProjectPatch { limit_usd?: number | null;
+run_limit_usd?: number | null }`. (Unlisted fields are strings.)
+
+### 3. `src/api/client.ts`
+
+- `RequestOptions`: `method` adds `'PUT'`; new optional `messages?: Partial<Record<number,
+  string>>`.
+- `request()`: headers always include `'X-Statlab-Csrf': '1'`. On a non-ok response: if
+  `response.status === 401`, call every listener in a module `Set<() => void>` named
+  `signedOutListeners`; the message is `options.messages?.[response.status]` when defined,
+  else the existing chain extended with `401 -> 'Sign in to continue.'`, `402 -> 'A budget
+  limit is reached. Ask an admin to raise it.'`, `429 -> 'Too many failed sign-ins. Try again
+  in 15 minutes.'`. Error bodies are still never read.
+- `export function onSignedOut(listener: () => void): () => void` — adds to the set, returns a
+  function that deletes it.
+- New private helper `requiredBoolean(object, key)` (throws `invalidResponse()` unless
+  boolean). Parsers (exported, each throws `invalidResponse()` on a wrong shape): `parseAuthUser`,
+  `parseAuthConfig`, `parseMeter`, `parseRunBudget`, `parseMembers` (role must be `owner` or
+  `member`), `parseAdminSettings`, `parseAdminUsers`, `parseAdminUser`, `parseAdminProjects`,
+  `parseAdminProject`, `parseAdminRuns`, `parseAdminRun` (status via `isRunStatus`),
+  `parseAdminOverview`. Use `requiredString`, `nullableString`, `requiredNumber`,
+  `nullableNumber`, `objectArray`.
+- Functions (paths encode ids with `encodeURIComponent`, projects via `projectPath`):
+  - `getAuthConfig(signal?)` GET `/api/auth/config`; `getMe(signal?)` GET `/api/auth/me`.
+  - `signIn(email, password)` POST `/api/auth/login` `{email, password}`, messages `{401:
+    'Email or password is incorrect.', 403: 'This account is disabled. Ask an admin.'}`.
+  - `register(name, email, password)` POST `/api/auth/register` `{email, name, password}`,
+    messages `{403: 'Sign-up is closed. Ask an admin for an account.', 409: 'An account with
+    this email already exists.', 422: 'Check the email address and use a password of at least
+    10 characters.'}`.
+  - `signOut()` POST `/api/auth/logout`, `text: true`, returns void.
+  - `getMyBudget(signal?)` GET `/api/auth/budget` -> `Meter`.
+  - `listMembers(projectId, signal?)` GET `${projectPath}/members`; `addMember(projectId,
+    email)` POST `{email}`, messages `{403: 'Only the project owner can add people.', 404: 'No
+    account uses this email.', 409: 'This person is already a member.'}`; `removeMember(
+    projectId, userId)` DELETE `${projectPath}/members/${encoded}`, `text: true`, messages
+    `{403: 'Only the project owner can remove people.', 409: 'The project owner cannot be
+    removed.'}`.
+  - `deleteProject` gains messages `{403: 'Only the project owner can delete this project.'}`.
+  - `getRunBudget(runId, signal?)` GET `/api/runs/${encoded}/budget`.
+  - Admin, each with messages including `403: 'Admins only.'`: `getAdminOverview(signal?)`,
+    `listAdminUsers(signal?)`, `updateAdminUser(userId, patch: UserPatch)` PATCH (also `409:
+    'You cannot remove your own admin rights or disable your own account.'`),
+    `listAdminProjects(signal?)`, `updateAdminProject(projectId, patch: ProjectPatch)` PATCH,
+    `changeProjectOwner(projectId, email)` PUT `/api/admin/projects/${encoded}/owner` `{email}`
+    (also `404: 'No account uses this email.'`), `listAdminRuns(signal?)` GET
+    `/api/admin/runs?limit=200`, `updateRunLimit(runId, limitUsd: number | null)` PATCH
+    `{limit_usd}`, `getAdminSettings(signal?)`, `saveAdminSettings(settings)` PUT.
+
+### 4. `src/admin/budget.ts` (pure, no React)
+
+- `formatUsd(value)`: `value > 0 && value < 0.005` -> `'<$0.01'`; else `'$' +
+  value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })`.
+- `type MeterTone = 'none' | 'ok' | 'near' | 'over'`; `meterTone(meter)`: limit null -> none;
+  `spent >= limit` -> over; `limit > 0 && spent / limit >= 0.8` -> near; else ok.
+- `meterFill(meter)`: limit null -> 0; limit 0 -> 1; else `Math.min(1, spent / limit)`.
+- `meterText(meter)`: limit null -> `` `${formatUsd(spent)} spent, no limit` ``; else
+  `` `${formatUsd(spent)} of ${formatUsd(limit)}` ``.
+- `parseLimit(text): number | null | 'invalid'`: trim; `''` -> null; drop one leading `$`;
+  `Number(rest)`; if `rest === ''` or not finite or `< 0` or `> 1_000_000` -> `'invalid'`; else
+  `Math.round(value * 100) / 100`.
+- `limitText(value)`: null -> `''`; else `value.toFixed(2)`.
+- `inheritedText(value)`: null -> `'No limit'`; else `` `Default ${formatUsd(value)}` ``.
+- `monthLabel(month)`: match `^(\d{4})-(\d{2})$`; no match -> `month`; else `new
+  Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', { month: 'long', year: 'numeric',
+  timeZone: 'UTC' })`.
+- `initials(name)`: words of `name.trim()` split on whitespace; first letter of up to the
+  first two words, upper-cased; empty -> `'?'`.
+- `isOpenStatus(status: RunStatus)`: `pending`, `running`, `awaiting_user`, `paused`.
+
+### 5. Components
+
+`src/ui/BudgetMeter.tsx` — props `{ meter: Meter; label: string; compact?: boolean }`. Root
+`div` class `meter meter-${tone}` plus `compact` when set. Children: `div.meter-track`
+(`aria-hidden="true"`) containing `span.meter-fill` with inline `width` = `meterFill * 100`
+%; then `span.meter-text` containing `span.sr-only` `{label}: ` and `meterText(meter)`.
+
+`src/admin/LimitField.tsx` — props `{ label: string; value: number | null; placeholder:
+string; pending: boolean; onSave: (value: number | null) => void }`. `useId()` for the input
+id. State `draft` initialised to `limitText(value)`; an effect resets it when `value` changes.
+`parsed = parseLimit(draft)`; `dirty = draft.trim() !== limitText(value)`. Renders `form.limit-
+field` (onSubmit: preventDefault; if `parsed !== 'invalid'` call `onSave(parsed)`):
+`label.sr-only` (htmlFor) `{label}`, `span.limit-prefix` `$` (aria-hidden), `input`
+`type="text" inputMode="decimal"` value/onChange, `placeholder`, `aria-invalid={parsed ===
+'invalid'}`; when `dirty`: `button.limit-save` `type="submit"` text `Save`, disabled when
+`pending || parsed === 'invalid'`.
+
+`src/auth/AuthPage.tsx` — props `{ config: AuthConfig; onSignedIn: () => void }`. `canRegister
+= config.signup_open || !config.has_users`. State `mode: 'signin' | 'register'` initial
+`config.has_users ? 'signin' : 'register'`; `name`, `email`, `password`. Mutation calls
+`signIn(email.trim(), password)` or `register(name.trim(), email.trim(), password)`; success ->
+`onSignedIn()`. Markup: `div.auth` > `section.auth-brand` (`span.brand-mark.large`
+aria-hidden, `p.auth-name` `Statlab`, `p.auth-line` `Upload a table. An agent cleans it, fits
+several models and scores the best one once on held-out data. You approve the key
+decisions.`) and `main.auth-panel` > `div.auth-card`: when `canRegister && config.has_users`
+a `div.tabs` role tablist with two tab buttons `Sign in` / `Create account`
+(`aria-selected`, click sets mode and resets the mutation); `h1` `Sign in` or `Create your
+account`; when `!config.has_users` `p.help` `No accounts yet. The first account becomes the
+admin.`; `form` (onSubmit preventDefault, mutate): register only `div.field` label `Name`
+input text `autoComplete="name"` required maxLength 100; `div.field` label `Email` input
+`type="email"` `autoComplete="email"` required maxLength 254; `div.field` label `Password`
+input `type="password"` required, `autoComplete` `current-password` or `new-password`,
+`minLength={10}` and `maxLength={128}` in register mode, with `p.help` `At least 10
+characters.` in register mode; error `p` role alert `errorText(error)`; submit
+`button.primary.auth-submit` text `Sign in` / `Create account`, while pending `Signing in…` /
+`Creating account…`, disabled while pending. After the form, when `!canRegister`: `p.help`
+`Sign-up is closed. Ask an admin for an account.`
+
+`src/auth/UserMenu.tsx` — props `{ user: AuthUser; onSignedOut: () => void }`. Query
+`['auth', 'budget']` `getMyBudget`. Sign-out mutation `signOut`, success -> `onSignedOut()`.
+`details.user-menu` > `summary` (aria-label `` `Account: ${user.name}` ``) with
+`span.avatar` (aria-hidden) `initials(user.name)` and `span.user-name` `{user.name}`; then
+`div.help-pop.user-pop`: `p.user-pop-name` name, `p.help` email, `p.help-pop-title` `This
+month`, the meter (`BudgetMeter` label `Your spend this month`) or `Loading…` or the error
+text; when admin `a.button` href `#/admin` with `ShieldCheck` icon and `Admin panel`;
+`button` type button with `LogOut` icon and `Sign out` (disabled while pending).
+
+`src/project/MembersPanel.tsx` — props `{ projectId: string; me: AuthUser; navigate }`.
+Query `['members', projectId]`. `canManage = me.is_admin || members.some(m => m.user_id ===
+me.id && m.role === 'owner')`. Add mutation (`addMember`) success: clear the email,
+invalidate `['members', projectId]`. Remove mutation (`removeMember`) success: if the removed
+id is `me.id` navigate to `{ name: 'projects' }`, else invalidate. Markup: `section.panel.
+members` aria-labelledby; `h2` `People`; loading `Loading people…`, error alert; `ul.member-
+list` > `li` per member: `span.avatar.small` initials, `span.member-who` with `strong`
+`{name}` plus ` (you)` for me, and `small.help` email; `span` class `pill signal` / `pill` text
+`Owner` / `Member`; for a `member` row: if `m.user_id === me.id` a `button.link-button` `Leave`
+(window.confirm `Leave this project? You lose access until the owner adds you again.`), else if
+`canManage` a `button.link-button` `Remove` (aria-label `` `Remove ${name}` ``). When
+`canManage`: `form.inline-add` with `div.field` label `Add a person by email` and input
+`type="email"` required, and `button.primary` type submit with `UserPlus` icon and `Add`
+(disabled while pending); `p.help` `They need an account first. Members can start runs, chat
+and change settings. Only the owner can add people or delete the project.` Errors of either
+mutation in `p` role alert.
+
+`src/run/BudgetBanner.tsx` — props `{ runId: string; status: RunStatus; isAdmin: boolean }`.
+Query `['budget', runId, status]` `getRunBudget`. Render nothing unless `data?.blocked` is a
+string. Else `div.budget-banner` role status: `TriangleAlert` icon (class `icon`,
+aria-hidden), then `div` with `p` (`strong` `Paused by a budget.` when status is `paused`,
+else `Budget limit reached.`, then a space and the `blocked` text) and `p.help`: admin ->
+`Raise the limit in the ` + `a` href `#/admin/runs` `admin panel` + `, then resume the run.`;
+others -> `Ask an admin to raise the limit, then resume the run.`
+
+`src/admin/AdminPage.tsx` — props `{ section: AdminSection; meId: string }`. Markup:
+`div.admin` > `header.admin-head` (`h1` `Admin`, `p.secondary-line` `Budgets, people and
+projects. Spend counts the model calls of each run; a run counts against the person who
+started it.`) and `div.admin-body` > `nav.admin-nav` (aria-label `Admin sections`) with
+links (href via `formatRoute`, `aria-current="page"` on the active one, icon + text):
+`LayoutDashboard` `Overview`, `Users` `People`, `FolderOpen` `Projects`, `Activity` `Runs`,
+`SlidersHorizontal` `Defaults`; and `div.admin-main` rendering the section component
+(`AdminPeople` gets `meId`). All admin mutations invalidate the query prefix `['admin']`.
+
+`src/admin/AdminOverview.tsx` — query `['admin', 'overview']`. Loading `Loading…`, error
+alert. `h2.admin-title` `monthLabel(month)`. `dl.figures` with five `div`s: `Spent this
+month` / `formatUsd`; `Spent in total` / `formatUsd`; `People` / `users` plus `dd.figure-note`
+`` `${admins} admin${admins === 1 ? '' : 's'}` `` and, when `disabled_users > 0`, `` `,
+${disabled_users} disabled` ``; `Projects` / `projects`; `Runs` / `runs` plus
+`dd.figure-note` `` `${open_runs} open` ``. `h2` `Waiting on a budget`. Empty -> `p.help` `No
+run is waiting on a budget.` Else `ul.attention` > `li.attention-row` per run: `div` with
+`a` (href run route) `project_name`, a space, `code` id, and `p` `budget.blocked`; then
+`LimitField` label `` `Run limit for ${id}` `` value `limit_usd` placeholder `Inherited`
+pending, save -> `updateRunLimit`. Then `h2` `Defaults in use` and `dl.defaults-summary` with
+`Monthly limit per person`, `Lifetime limit per project`, `Limit per run` (each `formatUsd` or
+`No limit`) and `Sign-up` (`Open` / `Closed`), then `a` href `#/admin/defaults` `Change
+defaults`.
+
+`src/admin/AdminPeople.tsx` — props `{ meId: string }`. Queries `['admin', 'users']`,
+`['admin', 'settings']`. `p.help` `Empty limit fields use the default. Spend resets on the 1st
+of each month (UTC).` Mutation error alert. Table (`div.table-wrap` > `table`, caption sr-only
+`People`) columns `Person`, `Role`, `This month`, `Monthly limit`, `Projects`, `Runs`, `Last
+sign-in`, `Actions` (last header `span.sr-only`). Cells: `div.person` (`span.avatar.small`,
+`span` with `strong` name and `small.help` email); role `span.pill.signal` `Admin` or text
+`Member`, plus `span.pill.fault` `Disabled` when disabled; `BudgetMeter` compact label `` `${name}
+this month` ``; `LimitField` label `` `Monthly limit for ${name}` `` placeholder
+`inheritedText(settings.default_monthly_limit_usd)` (or `No limit` before settings load), save
+-> `updateAdminUser(id, { monthly_limit_usd })`; `td.num` projects, runs; `formatTime(
+last_login_at)`; actions: for `meId` row `span.help` `You`; else `div.row-actions` with button
+`Make admin` / `Remove admin` (patch `is_admin`) and `Disable` (confirm `` `Disable
+${name}? They are signed out and cannot sign in until you enable the account again.` ``) /
+`Enable` (patch `disabled`).
+
+`src/admin/AdminProjects.tsx` — queries `['admin', 'projects']`, `['admin', 'settings']`;
+state `ownerFor: string | null` and `ownerEmail`. `p.help` `Project limits count every run in
+the project. The run limit applies to each run that has no limit of its own.` Table columns
+`Project`, `Owner`, `Members`, `Runs`, `Spent`, `Project limit`, `Run limit`. Cells: `a` to the
+project route with name, `small.help` slug; owner name or `—`, `small.help` email when present,
+then a `button.link-button` `Change owner` that sets `ownerFor`; when `ownerFor === id` a
+`form.owner-change` with `label.sr-only` `New owner's email`, input `type="email"` required
+placeholder `Email of the new owner`, `button` submit `Make owner`, `button` `Cancel`, and
+`p.help` `The current owner stays as a member.`; success resets `ownerFor`/`ownerEmail`;
+`td.num` members, runs; `BudgetMeter` compact `budget`; `LimitField` `limit_usd` placeholder
+`inheritedText(settings.default_project_limit_usd)` -> `updateAdminProject(id, { limit_usd
+})`; `LimitField` `run_limit_usd` placeholder `inheritedText(
+settings.default_run_limit_usd)` -> `updateAdminProject(id, { run_limit_usd })`.
+
+`src/admin/AdminRuns.tsx` — query `['admin', 'runs']`; state `filter: 'all' | 'open' |
+'blocked'`. `div.chips` with three `button.chip` (`aria-pressed`): `All`, `Open`, `Waiting on a
+budget`. `p.help` `The latest 200 runs. A run paused by a budget continues after you raise the
+limit and its owner resumes it.` Filtered empty -> `p` `No runs match.` Table columns `Run`,
+`Project`, `Started by`, `Status`, `Started`, `Run spend`, `Run limit`. Cells: `a` run route with
+`code` id and, when blocked, `p.row-note` the text; project name; `budget.started_by ?? '—'`;
+`span` class `statusPillClass(status)` text status; `formatTime(started_at)`; `BudgetMeter`
+compact `budget.run`; `LimitField` `limit_usd` placeholder `Inherited` -> `updateRunLimit`.
+
+`src/admin/AdminDefaults.tsx` — query `['admin', 'settings']`; local text state for the three
+limits (from `limitText`) and `signupOpen`, initialised when data arrives (effect on data).
+`form.panel.defaults-form`: `h2` `Defaults`; `p.help` `Used when a person, project or run has
+no limit of its own. Leave a field empty for no limit.`; three `div.field` each label, a
+`span.limit-prefix` `$`, input text inputMode decimal (`aria-invalid` when `parseLimit` is
+invalid), and `p.help`: `Monthly limit per person` / `Resets on the 1st of each month (UTC).`;
+`Lifetime limit per project` / `Counts every run in the project.`; `Limit per run` / `A run
+pauses when it reaches this.`; `div.field.check-field` checkbox `Anyone can create an
+account` with `p.help` `When off, only existing accounts can sign in. The first account can
+always be created.`; error alert; after success `p` role status `Defaults saved.`; `div.actions`
+`button.primary` submit `Save defaults` disabled while pending or any limit invalid. Submit ->
+`saveAdminSettings` with parsed values.
+
+### 6. Page edits
+
+- `src/ui/format.ts`: move `pillClass` from `ProjectPage.tsx` here as exported
+  `statusPillClass(status: RunStatus)` (same body); `ProjectPage` imports it.
+- `src/pages/ProjectPage.tsx`: new prop `me: AuthUser`; render `<MembersPanel projectId me
+  navigate />` directly before the `Datasets` heading.
+- `src/pages/RunPage.tsx`: new prop `isAdmin: boolean`; render `<BudgetBanner runId
+  status={data.run.status} isAdmin />` directly after `RunHeader`.
+- `src/App.tsx`:
+  - Queries `['auth', 'config']` `getAuthConfig` and `['auth', 'me']` `getMe`; vocabulary
+    query gets `enabled: me.isSuccess`.
+  - State `signedOut` (false). Effect: `return onSignedOut(() => setSignedOut(true))`.
+  - `signedIn()` = `setSignedOut(false); void queryClient.resetQueries();`.
+    `afterSignOut()` = `setSignedOut(true); queryClient.removeQueries({ predicate: (query) =>
+    query.queryKey[0] !== 'auth' })`.
+  - `needsAuth = signedOut || (me.isError && me.error instanceof ApiError && me.error.status
+    === 401)`.
+  - Render order: config pending, or me pending while not `signedOut` -> `div.auth-loading`
+    `p` `Loading…`; config error -> `div.page` alert `errorText`; `needsAuth` -> `<AuthPage
+    config onSignedIn={signedIn} />`; me error -> `div.page` alert; else the current app. The
+    top bar gets `<UserMenu user={me.data} onSignedOut={afterSignOut} />` after the help menu.
+  - Route `admin`: non-admin -> `div.page` with `h1` `Admins only` and `p` `Ask an admin if
+    you need access.`; admin -> `div.page.wide` `<AdminPage section meId={me.data.id} />`.
+  - `ProjectPage` gets `me={me.data}`, `RunPage` gets `isAdmin={me.data.is_admin}`.
+
+### 7. `src/style.css` (append; tokens only, no new colors)
+
+- Extend both `input[type="text"], input[type="number"], select, textarea` selector lists
+  (lines ~89 and ~348) with `input[type="email"], input[type="password"]`.
+- `.page.wide` max-width 84rem. `.auth-loading` grid, place-items center, height 100dvh, color
+  graphite.
+- `.auth` grid, min-height 100dvh, columns `minmax(0, 5fr) minmax(0, 7fr)`. `.auth-brand`
+  background navy, color navy-ink, padding 48px, flex column, justify-content flex-end, gap
+  16px, background-image `repeating-linear-gradient(to bottom, transparent 0 31px,
+  rgba(255,255,255,0.06) 31px 32px)`. `.brand-mark.large` 56px square. `.auth-name` margin 0,
+  font-size 2.5rem, weight 700, letter-spacing -0.01em. `.auth-line` margin 0, max-width 28rem,
+  color navy-muted, font-size 1.125rem, line-height 1.55. `.auth-panel` grid, place-items
+  center, padding 32px 16px. `.auth-card` width `min(26rem, 100%)`, background surface, border
+  1px rule, radius-lg, padding 32px, shadow. `.auth-card h1` font-size 1.5rem, margin 16px 0 4px.
+  `.auth-card .field input` width 100%. `.auth-submit` width 100%, margin-top 8px. At max-width
+  48rem: `.auth` single column; `.auth-brand` padding 24px 16px, justify-content flex-start;
+  `.auth-name` 1.75rem.
+- `.user-menu` position relative. `.user-menu > summary` list-style none, inline-flex, center,
+  gap 8px, padding 4px 12px 4px 4px, border 1px `rgba(255,255,255,0.28)`, radius 999px, color
+  navy-ink, cursor pointer; hide the webkit marker; hover and `[open]` background navy-2.
+  `.avatar` inline-grid, place-items center, 28px square, radius 50%, background sky, color
+  navy, weight 700, font-size 0.8125rem, flex none. `.avatar.small` 24px, background target,
+  color signal. `.user-name` max-width 10rem, overflow hidden, ellipsis, nowrap; hidden at
+  max-width 40rem. `.user-pop` width `min(18rem, calc(100vw - 32px))`. `.user-pop-name` margin
+  0, weight 600. `.user-pop .button, .user-pop button` width 100%, margin-top 8px.
+- Meter: `.meter` grid, gap 4px, min-width 9rem. `.meter-track` height 6px, radius 999px,
+  background rule, overflow hidden. `.meter-fill` block, height 100%, background signal.
+  `.meter-near .meter-fill` gate. `.meter-over .meter-fill` fault. `.meter-over .meter-text`
+  color fault, weight 600. `.meter-none .meter-track` height 0, background transparent,
+  border-top 2px dashed rule. `.meter-text` font-size 0.875rem, tabular-nums. `.meter.compact
+  .meter-text` 0.8125rem. Inside `prefers-reduced-motion: no-preference`: `.meter-fill`
+  transition width 400ms ease-out.
+- Admin: `.admin-head` margin-bottom 16px. `.admin-body` grid, columns `12rem minmax(0, 1fr)`,
+  gap 24px, align-items start. `.admin-nav` sticky, top 16px, flex column, gap 2px. `.admin-nav
+  a` flex, center, gap 8px, padding 8px 12px, radius, color graphite, no underline, weight 600.
+  Hover: background surface, color ink. `[aria-current="page"]`: background surface, color
+  signal, box-shadow `inset 3px 0 0 var(--signal)`. At max-width 48rem: single column; nav row,
+  overflow-x auto, static. `.admin-title` margin-top 0. `.figures` grid, columns
+  `repeat(auto-fit, minmax(9rem, 1fr))`, margin 0 0 24px, border-top and border-bottom 1px
+  rule; `.figures > div` padding 16px 16px 16px 0; `.figures dt` color graphite, 0.875rem;
+  `.figures dd` margin 0, 1.75rem, weight 700, tabular-nums; `.figures dd.figure-note` 0.875rem,
+  weight 400, color graphite. `.attention` list-style none, padding 0, margin 0.
+  `.attention-row` flex, wrap, gap 12px, space-between, center, padding 12px 16px, border 1px
+  gate, border-left-width 4px, radius, background gate-soft, margin-bottom 8px; `.attention-row
+  p` margin 4px 0 0. `.defaults-summary` grid, columns `max-content 1fr`, gap 4px 16px;
+  `.defaults-summary dt` color graphite; `.defaults-summary dd` margin 0.
+- `.limit-field` inline-flex, center, gap 4px. `.limit-prefix` color graphite. `.limit-field
+  input` width 6.5rem, padding 4px 8px, tabular-nums. `input[aria-invalid="true"]`
+  border-color fault. `.limit-save` padding 4px 10px, 0.875rem.
+- `.person` flex, center, gap 10px. `.row-actions` flex, wrap, gap 6px; its buttons padding
+  4px 10px, 0.875rem. `.row-note` margin 4px 0 0, color fault, 0.875rem. `td.num` right
+  aligned, tabular-nums. `.owner-change` flex, wrap, gap 6px, margin-top 6px. `.link-button`
+  border 0, background none, color signal, padding 4px 8px. `.check-field label` inline-flex,
+  center. `.defaults-form .field input[type="text"]` width 9rem.
+- `.member-list` list-style none, padding 0, margin 0 0 8px; `.member-list li` flex, center,
+  gap 10px, padding 8px 0, border-bottom 1px rule; `.member-who` flex column, flex 1,
+  min-width 0.
+- `.budget-banner` flex, gap 10px, align flex-start, padding 12px 14px, border 1px gate,
+  border-left-width 4px, radius, background gate-soft, margin 12px 0; `.budget-banner p`
+  margin 0 0 4px; `.budget-banner .icon` color gate, flex none, margin-top 2px.
+
+### 8. Tests
+
+- `package.json` `test` script: append `tests/budget.test.ts`.
+- `tests/budget.test.ts`: `formatUsd` 0 -> `$0.00`, 1234.5 -> `$1,234.50`, 0.004 -> `<$0.01`;
+  `meterTone` `{0.5, null}` none, `{1, 2}` ok, `{1.6, 2}` near, `{2, 2}` over, `{0, 0}` over;
+  `meterFill` `{1, null}` 0, `{0, 0}` 1, `{0.5, 2}` 0.25, `{3, 2}` 1; `meterText` `{0.5, null}`
+  `$0.50 spent, no limit`, `{0.5, 2}` `$0.50 of $2.00`; `parseLimit` `''` null, `' 2.5 '` 2.5,
+  `'$3'` 3, `'1.239'` 1.24, `'$'` invalid, `'-1'` invalid, `'abc'` invalid, `'2000000'`
+  invalid; `limitText` null `''`, 2 `'2.00'`; `inheritedText` null `No limit`, 5 `Default
+  $5.00`; `monthLabel('2026-10')` `October 2026`, `monthLabel('bad')` `bad`; `initials('Ada
+  Lovelace')` `AL`, `initials('cher')` `C`, `initials('  ')` `?`; `isOpenStatus` true for
+  `paused`, false for `completed`.
+- `tests/client.test.ts` (import the new names):
+  1. In the fixed-message test add `[401, 'Sign in to continue.']`, `[402, 'A budget limit is
+     reached. Ask an admin to raise it.']`, `[429, 'Too many failed sign-ins. Try again in 15
+     minutes.']`; `bodyReads` stays 0.
+  2. `createProject` test: also assert header `X-Statlab-Csrf` is `'1'`.
+  3. New `onSignedOut fires on 401 only`: register a counting listener and a second one that
+     is removed right away; fetch returning 401 -> `listProjects` rejects, count 1; fetch
+     returning 404 -> count still 1; the removed listener never ran; remove the first one at
+     the end.
+  4. New `signIn posts credentials and maps 401`: with a recording fetch returning `{id: 'u_1',
+     email: 'a@b.co', name: 'A', is_admin: false}` -> result deep-equals it, input
+     `/api/auth/login`, method POST, body JSON `{email: 'a@b.co', password: 'pw-1234567'}`;
+     then fetch returning 401 -> rejects with message `Email or password is incorrect.`.
+  5. New `admin parsers`: `parseAdminOverview` of a full sample (one blocked run, status
+     `paused`) deep-equals the input; changing that run's status to `boss` throws `Backend
+     returned an invalid response.`; `parseMembers([{user_id: 'u', email: 'e', name: 'n',
+     role: 'boss', added_at: 't'}])` throws; `parseRunBudget` sample deep-equals.
+  6. New `admin writes use PATCH and PUT`: `updateAdminUser('u/1', { monthly_limit_usd: 2 })`
+     -> input `/api/admin/users/u%2F1`, method PATCH, body `{"monthly_limit_usd":2}`
+     (response: a valid AdminUser sample); `saveAdminSettings(sample)` -> method PUT, input
+     `/api/admin/settings`.
+- `tests/routes.test.ts`: round-trip list gains `{ name: 'admin', section }` for all five
+  sections; `parseRoute('#/admin')` -> overview; `formatRoute({ name: 'admin', section:
+  'overview' })` is `#/admin`; `#/admin/x` and `#/admin/people/x` -> notFound.
+
+### Checks (implementer, from `frontend/`)
+
+`npm test`, `npm run typecheck`, `npm run build`. Stop and report on any failure, a missing
+export, or a needed file outside the owned list. Main then: review, browser check on scratch
+servers (8766/8767/5174), `make check` only if Python changed (none expected).
+
+### Addendum 71c-A (labels, loading/error texts, return types)
+
+1. Meter labels: AdminProjects `` `Spend of ${name}` ``; AdminRuns `` `Spend of run ${id}` ``.
+2. Every admin section: while its main query is pending render `p` `Loading…`; on its error
+   render `p` role alert `errorText(error)` (AdminPeople and AdminProjects: the users/projects
+   query; the settings query only feeds placeholders and shows nothing on error). Every
+   mutation in AdminPeople, AdminProjects, AdminRuns, AdminOverview and AdminDefaults shows its
+   error as `p` role alert `errorText(error)` directly above the table (or the form). One
+   mutation per component may serve all its rows (pass the row id in the variables).
+3. Return types confirmed: `addMember -> Member`, `changeProjectOwner -> AdminProject`,
+   `updateRunLimit -> AdminRun`, `updateAdminUser -> AdminUser`, `updateAdminProject ->
+   AdminProject`, `saveAdminSettings -> AdminSettings`.
+4. MembersPanel sends `email.trim()`; AdminProjects sends `ownerEmail.trim()`.
+5. `useId()` ids with `htmlFor` are correct everywhere a label needs an input id.
+
+### Addendum 71c-B (limit field labels; RunPage prop)
+
+LimitField labels: AdminProjects `` `Project limit for ${name}` `` and `` `Run limit for runs in
+${name}` ``; AdminRuns `` `Run limit for ${id}` ``. RunPage passes `isAdmin={isAdmin}` (the
+prop's value) to `BudgetBanner`; that is what the spec meant.
+
+### Addendum 71c-C (browser review corrections)
+
+Browser check on scratch servers found:
+1. `BudgetBanner` also shows on finished runs ("then resume the run" is wrong there). Render it
+   only when `isOpenStatus(status)` and `blocked` is a string.
+2. AdminRuns filter `Waiting on a budget` keeps runs with `budget.blocked !== null &&
+   isOpenStatus(status)` (same meaning as the overview list).
+3. `MembersPanel`: the ` (you)` text goes inside the `strong` (it currently wraps onto its own
+   line in the flex column).
+4. `style.css`: `.members .inline-add .field` margin 0; `.members .inline-add input` width
+   `min(20rem, 100%)` (the Add button sat lower than the input).
+Checks: `npm test`, `npm run typecheck`, `npm run build`.
+
+### Stage 71c receipt and chunk acceptance (2026-10-10)
+
+Implementer (after addenda A-C): `npm test` 113/113, `npm run typecheck` 0, `npm run build` 0.
+Main reviewed App gating (401 listener, reset on sign-in, removal of non-auth queries on sign
+out), request CSRF header and fixed messages (error bodies still unread), and checked the UI
+in a browser on scratch servers (8766/8767/5174, copy of `integration/out/20261010T080829Z-
+offline`): sign-in page, admin overview, people, runs (a $0 run limit turns the meter red and
+shows the reason), run budget banner, project People panel (owner added a member). Addendum C
+fixed four review findings; re-checked the People panel. Screenshots `.playwright-mcp/71-*.png`.
+Main then ran the full offline suite: exit 0, 19/19 PASS (`integration/out/20261010T082604Z-
+offline`, one pre-existing soft warning in S12). No Python changed in 71c, so 71b's `make check`
+stands. No live run (no paid LLM behaviour changed).

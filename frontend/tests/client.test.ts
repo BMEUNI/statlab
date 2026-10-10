@@ -37,6 +37,13 @@ import {
   uploadContract,
   validateContract,
   uploadDataset,
+  onSignedOut,
+  signIn,
+  parseAdminOverview,
+  parseMembers,
+  parseRunBudget,
+  updateAdminUser,
+  saveAdminSettings,
 } from '../src/api/client.ts';
 
 const project = { id: 'p1', slug: 'sample', name: 'Sample', created_at: '2026-01-01T00:00:00Z' };
@@ -133,6 +140,8 @@ test('HTTP and network failures expose fixed messages and never read error bodie
       [413, 'Upload is too large.'], [502, 'The agent could not produce a valid answer.'],
       [404, 'Resource not found.'], [409, 'Run transition rejected.'], [422, 'Invalid request.'],
       [503, 'Backend is unavailable.'], [500, 'Backend request failed.'],
+      [401, 'Sign in to continue.'], [402, 'A budget limit is reached. Ask an admin to raise it.'],
+      [429, 'Too many failed sign-ins. Try again in 15 minutes.'],
     ] as const) {
       const response = new Response('SECRET', { status });
       response.json = async () => { bodyReads += 1; return { secret: 'SECRET' }; };
@@ -195,6 +204,94 @@ test('createProject POSTs JSON', async () => {
     assert.equal(requests[0]?.init?.method, 'POST');
     assert.equal(requests[0]?.init?.body, JSON.stringify({ slug: 'sample', name: 'Sample' }));
     assert.equal(new Headers(requests[0]?.init?.headers).get('Content-Type'), 'application/json');
+    assert.equal(new Headers(requests[0]?.init?.headers).get('X-Statlab-Csrf'), '1');
+  });
+});
+
+test('onSignedOut fires on 401 only', async () => {
+  const originalFetch = globalThis.fetch;
+  let count = 0;
+  let removedRan = false;
+  const stop = onSignedOut(() => { count += 1; });
+  const stopRemoved = onSignedOut(() => { removedRan = true; });
+  stopRemoved();
+  try {
+    globalThis.fetch = async () => new Response('x', { status: 401 });
+    await assert.rejects(listProjects());
+    assert.equal(count, 1);
+    globalThis.fetch = async () => new Response('x', { status: 404 });
+    await assert.rejects(listProjects());
+    assert.equal(count, 1);
+    assert.equal(removedRan, false);
+  } finally {
+    stop();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('signIn posts credentials and maps 401', async () => {
+  const user = { id: 'u_1', email: 'a@b.co', name: 'A', is_admin: false };
+  await withFetch(user, async (requests) => {
+    assert.deepEqual(await signIn('a@b.co', 'pw-1234567'), user);
+    assert.equal(requests[0]?.input, '/api/auth/login');
+    assert.equal(requests[0]?.init?.method, 'POST');
+    assert.equal(requests[0]?.init?.body, JSON.stringify({ email: 'a@b.co', password: 'pw-1234567' }));
+  });
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response('x', { status: 401 });
+    await assert.rejects(signIn('a@b.co', 'bad'), { message: 'Email or password is incorrect.' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+const adminRun = {
+  id: 'r1', project_id: 'p1', project_name: 'Sample', status: 'paused', started_at: 't',
+  limit_usd: null,
+  budget: {
+    run: { spent_usd: 1, limit_usd: 1 }, project: { spent_usd: 0, limit_usd: null },
+    person: { spent_usd: 2, limit_usd: 5 }, started_by: 'u_1', blocked: 'run limit reached',
+  },
+};
+const adminOverview = {
+  month: '2026-10', month_spent_usd: 1, total_spent_usd: 2, users: 2, admins: 1,
+  disabled_users: 0, projects: 1, runs: 1, open_runs: 1, blocked_runs: [adminRun],
+  settings: {
+    default_monthly_limit_usd: null, default_project_limit_usd: null,
+    default_run_limit_usd: 1, signup_open: true,
+  },
+};
+
+test('admin parsers', () => {
+  assert.deepEqual(parseAdminOverview(adminOverview), adminOverview);
+  isInvalidResponse(() => parseAdminOverview({
+    ...adminOverview, blocked_runs: [{ ...adminRun, status: 'boss' }],
+  }));
+  isInvalidResponse(() => parseMembers([{ user_id: 'u', email: 'e', name: 'n', role: 'boss', added_at: 't' }]));
+  assert.deepEqual(parseRunBudget(adminRun.budget), adminRun.budget);
+});
+
+test('admin writes use PATCH and PUT', async () => {
+  const adminUser = {
+    id: 'u/1', email: 'a@b.co', name: 'A', is_admin: false, disabled: false, created_at: 't',
+    last_login_at: null, monthly_limit_usd: 2, month: { spent_usd: 0, limit_usd: 2 },
+    total_spent_usd: 0, projects: 0, runs: 0,
+  };
+  await withFetch(adminUser, async (requests) => {
+    assert.deepEqual(await updateAdminUser('u/1', { monthly_limit_usd: 2 }), adminUser);
+    assert.equal(requests[0]?.input, '/api/admin/users/u%2F1');
+    assert.equal(requests[0]?.init?.method, 'PATCH');
+    assert.equal(requests[0]?.init?.body, '{"monthly_limit_usd":2}');
+  });
+  const settings = {
+    default_monthly_limit_usd: null, default_project_limit_usd: null,
+    default_run_limit_usd: null, signup_open: false,
+  };
+  await withFetch(settings, async (requests) => {
+    await saveAdminSettings(settings);
+    assert.equal(requests[0]?.init?.method, 'PUT');
+    assert.equal(requests[0]?.input, '/api/admin/settings');
   });
 });
 

@@ -1,5 +1,5 @@
 import { ApiError } from '../api/client.ts';
-import type { RunSummary } from '../api/types.ts';
+import type { RunStatus, RunSummary } from '../api/types.ts';
 import type { Path } from '../contract/draft.ts';
 
 export function slugify(name: string): string {
@@ -48,4 +48,10 @@ export function errorText(error: Error): string {
 
 export function pathKey(path: Path): string {
   return path.filter((segment): segment is string => typeof segment === 'string').join('.');
+}
+
+export function statusPillClass(status: RunStatus): string {
+  if (status === 'awaiting_user' || status === 'paused') return 'pill gate';
+  if (status === 'failed' || status === 'cancelled') return 'pill fault';
+  return status === 'completed' ? 'pill signal' : 'pill';
 }

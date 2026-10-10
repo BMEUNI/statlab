@@ -28,6 +28,14 @@ are M9 prerequisites; B9–B11 domain/control behavior still needs runtime accep
 
 ## Next: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
 
+Chunk [71](./71_accounts_and_budgets.md) accepted 2026-10-10: register/sign in (scrypt, HttpOnly
+SameSite=Strict cookie, CSRF header), one access guard for every project/run/artifact route,
+project members, enforced budgets (person per month, project, run; hard stop: 402 and a pause
+at the next check), admin panel (overview, people, projects with change owner, runs, defaults,
+sign-up switch). The first account to register is admin and owns every older project and run.
+PLAN D14/D16 superseded by D14-71/D16-71. Open: setup-assistant LLM calls are not counted
+(refused when the person's budget is spent); login throttle is per process.
+
 Chunk [68](./68_gate_schema_startup.md) accepted 2026-10-09: gate comparisons ignore string
 descriptions; prepared/applied gates retain their captured schema; a gate EngineError warns
 and skips that run during boot. `make check` passed with 100% line/branch. Copied real-data

@@ -56,6 +56,10 @@ The plain offline stand-in gives the smallest valid answer to every LLM question
 
 Neither offline mode judges the data.
 
+Accounts (chunk 71): the driver signs in once as `harness@example.test` (registers on a fresh
+database, logs in otherwise) and sends `X-Statlab-Csrf: 1` on every request. It is the first
+account, so it is admin; no budget limits are set, so budgets never stop a scenario.
+
 ## Checks applied to every scenario (unless the scenario says otherwise)
 
 | ID | Check | Severity |

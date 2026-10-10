@@ -15,9 +15,10 @@ import ReportView from '../report/ReportView.tsx';
 import ValidationView from '../run/ValidationView.tsx';
 import RunTimeline, { type Selection } from '../run/RunTimeline.tsx';
 import RunHeader from '../run/RunHeader.tsx';
+import BudgetBanner from '../run/BudgetBanner.tsx';
 import { errorText } from '../ui/format.ts';
 
-export default function RunPage({ runId, navigate }: { runId: string; navigate: (route: Route) => void }) {
+export default function RunPage({ runId, isAdmin, navigate }: { runId: string; isAdmin: boolean; navigate: (route: Route) => void }) {
   const queryClient = useQueryClient();
   const snapshot = useQuery({ queryKey: ['run', runId], queryFn: ({ signal }) => getRun(runId, signal) });
   const executions = useQuery({ queryKey: ['executions', runId], queryFn: ({ signal }) => getExecutions(runId, signal) });
@@ -103,6 +104,7 @@ export default function RunPage({ runId, navigate }: { runId: string; navigate: 
             switched={switchedToAutomatic(data.gates)}
             viewOnly={viewOnly}
           />
+          <BudgetBanner runId={runId} status={data.run.status} isAdmin={isAdmin} />
           {data.execution_failed && (
             <p role="alert">The run's executor stopped with an error. Check the attempts below.</p>
           )}

@@ -2,25 +2,20 @@ import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Trash } from 'lucide-react';
 import { ApiError, deleteProject, getProject, listContracts, listDatasets, renameProject } from '../api/client.ts';
-import type { RunStatus } from '../api/types.ts';
 import { getAt } from '../contract/draft.ts';
+import MembersPanel from '../project/MembersPanel.tsx';
 import RunComparison from '../project/RunComparison.tsx';
+import type { AuthUser } from '../api/types.ts';
 import { lineage } from '../project/lineage.ts';
 import { modeLabel, nodeLabel } from '../run/model.ts';
 import { formatRoute, type Route } from '../routes.ts';
-import { errorText, formatTime } from '../ui/format.ts';
-
-function pillClass(status: RunStatus): string {
-  if (status === 'awaiting_user' || status === 'paused') return 'pill gate';
-  if (status === 'failed' || status === 'cancelled') return 'pill fault';
-  return status === 'completed' ? 'pill signal' : 'pill';
-}
+import { errorText, formatTime, statusPillClass } from '../ui/format.ts';
 
 function runLink(runId: string | null) {
   return runId === null ? '—' : <a href={formatRoute({ name: 'run', runId })}>{runId}</a>;
 }
 
-export default function ProjectPage({ projectId, navigate }: { projectId: string; navigate: (route: Route) => void }) {
+export default function ProjectPage({ projectId, me, navigate }: { projectId: string; me: AuthUser; navigate: (route: Route) => void }) {
   const project = useQuery({ queryKey: ['project', projectId], queryFn: ({ signal }) => getProject(projectId, signal) });
   const datasets = useQuery({ queryKey: ['datasets', projectId], queryFn: ({ signal }) => listDatasets(projectId, signal) });
   const contracts = useQuery({ queryKey: ['contracts', projectId], queryFn: ({ signal }) => listContracts(projectId, signal) });
@@ -162,7 +157,7 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
                       <a href={formatRoute({ name: 'run', runId: run.id })}><code>{run.id}</code></a>
                       {depth > 0 && forkTarget !== null && <small className="help">Rewound at {nodeLabel(forkTarget)}</small>}
                     </td>
-                    <td><span className={pillClass(run.status)}>{run.status}</span></td>
+                    <td><span className={statusPillClass(run.status)}>{run.status}</span></td>
                     <td>{modeLabel(run.mode, project.data.switched_runs.includes(run.id))}</td>
                     <td>{formatTime(run.started_at)}</td>
                     <td>{formatTime(run.ended_at)}</td>
@@ -179,6 +174,8 @@ export default function ProjectPage({ projectId, navigate }: { projectId: string
           {comparing && selected.length >= 2 && <RunComparison runIds={selected} />}
         </>
       )}
+
+      <MembersPanel projectId={projectId} me={me} navigate={navigate} />
 
       <h2>Datasets</h2>
       {datasets.isPending && <p>Loading datasets…</p>}

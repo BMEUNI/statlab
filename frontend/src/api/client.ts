@@ -1,5 +1,17 @@
 import type {
+  AdminOverview,
+  AdminProject,
+  AdminRun,
+  AdminSettings,
+  AdminUser,
   AssistantReply,
+  AuthConfig,
+  AuthUser,
+  Member,
+  Meter,
+  ProjectPatch,
+  RunBudget,
+  UserPatch,
   ValidationPage,
   ValidationRow,
   ChatTurn,
@@ -66,6 +78,12 @@ function requiredString(object: JsonObject, key: string): string {
 function nullableString(object: JsonObject, key: string): string | null {
   const value = object[key];
   if (value !== null && typeof value !== 'string') throw invalidResponse();
+  return value;
+}
+
+function requiredBoolean(object: JsonObject, key: string): boolean {
+  const value = object[key];
+  if (typeof value !== 'boolean') throw invalidResponse();
   return value;
 }
 
@@ -404,15 +422,184 @@ export function parseControlReply(value: unknown): ControlReply {
   };
 }
 
+export function parseAuthUser(value: unknown): AuthUser {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    id: requiredString(value, 'id'),
+    email: requiredString(value, 'email'),
+    name: requiredString(value, 'name'),
+    is_admin: requiredBoolean(value, 'is_admin'),
+  };
+}
+
+export function parseAuthConfig(value: unknown): AuthConfig {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    signup_open: requiredBoolean(value, 'signup_open'),
+    has_users: requiredBoolean(value, 'has_users'),
+  };
+}
+
+export function parseMeter(value: unknown): Meter {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return { spent_usd: requiredNumber(value, 'spent_usd'), limit_usd: nullableNumber(value.limit_usd) };
+}
+
+export function parseRunBudget(value: unknown): RunBudget {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    run: parseMeter(value.run),
+    project: parseMeter(value.project),
+    person: parseMeter(value.person),
+    started_by: nullableString(value, 'started_by'),
+    blocked: nullableString(value, 'blocked'),
+  };
+}
+
+function parseMember(row: JsonObject): Member {
+  const role = row.role;
+  if (role !== 'owner' && role !== 'member') throw invalidResponse();
+  return {
+    user_id: requiredString(row, 'user_id'),
+    email: requiredString(row, 'email'),
+    name: requiredString(row, 'name'),
+    role,
+    added_at: requiredString(row, 'added_at'),
+  };
+}
+
+export function parseMembers(value: unknown): Member[] {
+  return objectArray(value).map(parseMember);
+}
+
+export function parseAdminSettings(value: unknown): AdminSettings {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    default_monthly_limit_usd: nullableNumber(value.default_monthly_limit_usd),
+    default_project_limit_usd: nullableNumber(value.default_project_limit_usd),
+    default_run_limit_usd: nullableNumber(value.default_run_limit_usd),
+    signup_open: requiredBoolean(value, 'signup_open'),
+  };
+}
+
+function parseAdminUserRow(row: JsonObject): AdminUser {
+  return {
+    id: requiredString(row, 'id'),
+    email: requiredString(row, 'email'),
+    name: requiredString(row, 'name'),
+    is_admin: requiredBoolean(row, 'is_admin'),
+    disabled: requiredBoolean(row, 'disabled'),
+    created_at: requiredString(row, 'created_at'),
+    last_login_at: nullableString(row, 'last_login_at'),
+    monthly_limit_usd: nullableNumber(row.monthly_limit_usd),
+    month: parseMeter(row.month),
+    total_spent_usd: requiredNumber(row, 'total_spent_usd'),
+    projects: requiredNumber(row, 'projects'),
+    runs: requiredNumber(row, 'runs'),
+  };
+}
+
+export function parseAdminUser(value: unknown): AdminUser {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return parseAdminUserRow(value);
+}
+
+export function parseAdminUsers(value: unknown): AdminUser[] {
+  return objectArray(value).map(parseAdminUserRow);
+}
+
+function parseAdminProjectRow(row: JsonObject): AdminProject {
+  return {
+    id: requiredString(row, 'id'),
+    name: requiredString(row, 'name'),
+    slug: requiredString(row, 'slug'),
+    created_at: requiredString(row, 'created_at'),
+    owner_id: nullableString(row, 'owner_id'),
+    owner_name: nullableString(row, 'owner_name'),
+    owner_email: nullableString(row, 'owner_email'),
+    members: requiredNumber(row, 'members'),
+    runs: requiredNumber(row, 'runs'),
+    budget: parseMeter(row.budget),
+    limit_usd: nullableNumber(row.limit_usd),
+    run_limit_usd: nullableNumber(row.run_limit_usd),
+    effective_run_limit_usd: nullableNumber(row.effective_run_limit_usd),
+  };
+}
+
+export function parseAdminProject(value: unknown): AdminProject {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return parseAdminProjectRow(value);
+}
+
+export function parseAdminProjects(value: unknown): AdminProject[] {
+  return objectArray(value).map(parseAdminProjectRow);
+}
+
+function parseAdminRunRow(row: JsonObject): AdminRun {
+  const status = row.status;
+  if (!isRunStatus(status)) throw invalidResponse();
+  return {
+    id: requiredString(row, 'id'),
+    project_id: requiredString(row, 'project_id'),
+    project_name: requiredString(row, 'project_name'),
+    status,
+    started_at: requiredString(row, 'started_at'),
+    limit_usd: nullableNumber(row.limit_usd),
+    budget: parseRunBudget(row.budget),
+  };
+}
+
+export function parseAdminRun(value: unknown): AdminRun {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return parseAdminRunRow(value);
+}
+
+export function parseAdminRuns(value: unknown): AdminRun[] {
+  return objectArray(value).map(parseAdminRunRow);
+}
+
+export function parseAdminOverview(value: unknown): AdminOverview {
+  if (!isJsonObject(value)) throw invalidResponse();
+  return {
+    month: requiredString(value, 'month'),
+    month_spent_usd: requiredNumber(value, 'month_spent_usd'),
+    total_spent_usd: requiredNumber(value, 'total_spent_usd'),
+    users: requiredNumber(value, 'users'),
+    admins: requiredNumber(value, 'admins'),
+    disabled_users: requiredNumber(value, 'disabled_users'),
+    projects: requiredNumber(value, 'projects'),
+    runs: requiredNumber(value, 'runs'),
+    open_runs: requiredNumber(value, 'open_runs'),
+    blocked_runs: objectArray(value.blocked_runs).map(parseAdminRunRow),
+    settings: parseAdminSettings(value.settings),
+  };
+}
+
 function abortError(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError');
 }
 
-type RequestOptions = { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; json?: JsonValue; form?: FormData; signal?: AbortSignal | undefined; text?: boolean };
+const signedOutListeners = new Set<() => void>();
+
+export function onSignedOut(listener: () => void): () => void {
+  signedOutListeners.add(listener);
+  return () => {
+    signedOutListeners.delete(listener);
+  };
+}
+
+type RequestOptions = {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  json?: JsonValue;
+  form?: FormData;
+  signal?: AbortSignal | undefined;
+  text?: boolean;
+  messages?: Partial<Record<number, string>>;
+};
 
 async function request(path: string, options: RequestOptions): Promise<unknown> {
   const { method, json, form, signal, text } = options;
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', 'X-Statlab-Csrf': '1' };
   let body: string | FormData | null = null;
   if (json !== undefined) {
     body = JSON.stringify(json);
@@ -428,14 +615,18 @@ async function request(path: string, options: RequestOptions): Promise<unknown> 
     throw new ApiError('Cannot reach the backend.');
   }
   if (!response.ok) {
-    const message = response.status === 403 ? 'Locked until the test score is recorded.' :
+    if (response.status === 401) for (const listener of signedOutListeners) listener();
+    const message = options.messages?.[response.status] ?? (response.status === 403 ? 'Locked until the test score is recorded.' :
       response.status === 404 ? 'Resource not found.' :
       response.status === 409 ? 'Run transition rejected.' :
       response.status === 410 ? 'Artifact was pruned.' :
       response.status === 413 ? 'Upload is too large.' :
       response.status === 422 ? 'Invalid request.' :
+      response.status === 401 ? 'Sign in to continue.' :
+      response.status === 402 ? 'A budget limit is reached. Ask an admin to raise it.' :
+      response.status === 429 ? 'Too many failed sign-ins. Try again in 15 minutes.' :
       response.status === 502 ? 'The agent could not produce a valid answer.' :
-      response.status === 503 ? 'Backend is unavailable.' : 'Backend request failed.';
+      response.status === 503 ? 'Backend is unavailable.' : 'Backend request failed.');
     throw new ApiError(message, response.status);
   }
   try {
@@ -486,7 +677,11 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  await request(projectPath(projectId), { method: 'DELETE', text: true });
+  await request(projectPath(projectId), {
+    method: 'DELETE',
+    text: true,
+    messages: { 403: 'Only the project owner can delete this project.' },
+  });
 }
 
 export async function listDatasets(projectId: string, signal?: AbortSignal): Promise<DatasetRecord[]> {
@@ -785,4 +980,159 @@ export async function listRunArtifacts(runId: string, signal?: AbortSignal): Pro
 
 export async function previewArtifact(id: string, signal?: AbortSignal): Promise<ArtifactPreview> {
   return parseArtifactPreview(await request(`${artifactUrl(id)}/preview`, { method: 'GET', signal }));
+}
+
+export async function getAuthConfig(signal?: AbortSignal): Promise<AuthConfig> {
+  return parseAuthConfig(await request('/api/auth/config', { method: 'GET', signal }));
+}
+
+export async function getMe(signal?: AbortSignal): Promise<AuthUser> {
+  return parseAuthUser(await request('/api/auth/me', { method: 'GET', signal }));
+}
+
+export async function signIn(email: string, password: string): Promise<AuthUser> {
+  return parseAuthUser(
+    await request('/api/auth/login', {
+      method: 'POST',
+      json: { email, password },
+      messages: {
+        401: 'Email or password is incorrect.',
+        403: 'This account is disabled. Ask an admin.',
+      },
+    }),
+  );
+}
+
+export async function register(name: string, email: string, password: string): Promise<AuthUser> {
+  return parseAuthUser(
+    await request('/api/auth/register', {
+      method: 'POST',
+      json: { email, name, password },
+      messages: {
+        403: 'Sign-up is closed. Ask an admin for an account.',
+        409: 'An account with this email already exists.',
+        422: 'Check the email address and use a password of at least 10 characters.',
+      },
+    }),
+  );
+}
+
+export async function signOut(): Promise<void> {
+  await request('/api/auth/logout', { method: 'POST', text: true });
+}
+
+export async function getMyBudget(signal?: AbortSignal): Promise<Meter> {
+  return parseMeter(await request('/api/auth/budget', { method: 'GET', signal }));
+}
+
+export async function listMembers(projectId: string, signal?: AbortSignal): Promise<Member[]> {
+  return parseMembers(await request(`${projectPath(projectId)}/members`, { method: 'GET', signal }));
+}
+
+export async function addMember(projectId: string, email: string): Promise<Member> {
+  const value = await request(`${projectPath(projectId)}/members`, {
+    method: 'POST',
+    json: { email },
+    messages: {
+      403: 'Only the project owner can add people.',
+      404: 'No account uses this email.',
+      409: 'This person is already a member.',
+    },
+  });
+  if (!isJsonObject(value)) throw invalidResponse();
+  return parseMember(value);
+}
+
+export async function removeMember(projectId: string, userId: string): Promise<void> {
+  await request(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    text: true,
+    messages: {
+      403: 'Only the project owner can remove people.',
+      409: 'The project owner cannot be removed.',
+    },
+  });
+}
+
+export async function getRunBudget(runId: string, signal?: AbortSignal): Promise<RunBudget> {
+  return parseRunBudget(await request(`${runPath(runId)}/budget`, { method: 'GET', signal }));
+}
+
+const adminOnly: Partial<Record<number, string>> = { 403: 'Admins only.' };
+
+export async function getAdminOverview(signal?: AbortSignal): Promise<AdminOverview> {
+  return parseAdminOverview(
+    await request('/api/admin/overview', { method: 'GET', signal, messages: adminOnly }),
+  );
+}
+
+export async function listAdminUsers(signal?: AbortSignal): Promise<AdminUser[]> {
+  return parseAdminUsers(await request('/api/admin/users', { method: 'GET', signal, messages: adminOnly }));
+}
+
+export async function updateAdminUser(userId: string, patch: UserPatch): Promise<AdminUser> {
+  return parseAdminUser(
+    await request(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      json: patch,
+      messages: {
+        ...adminOnly,
+        409: 'You cannot remove your own admin rights or disable your own account.',
+      },
+    }),
+  );
+}
+
+export async function listAdminProjects(signal?: AbortSignal): Promise<AdminProject[]> {
+  return parseAdminProjects(
+    await request('/api/admin/projects', { method: 'GET', signal, messages: adminOnly }),
+  );
+}
+
+export async function updateAdminProject(projectId: string, patch: ProjectPatch): Promise<AdminProject> {
+  return parseAdminProject(
+    await request(`/api/admin/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      json: patch,
+      messages: adminOnly,
+    }),
+  );
+}
+
+export async function changeProjectOwner(projectId: string, email: string): Promise<AdminProject> {
+  return parseAdminProject(
+    await request(`/api/admin/projects/${encodeURIComponent(projectId)}/owner`, {
+      method: 'PUT',
+      json: { email },
+      messages: { ...adminOnly, 404: 'No account uses this email.' },
+    }),
+  );
+}
+
+export async function listAdminRuns(signal?: AbortSignal): Promise<AdminRun[]> {
+  return parseAdminRuns(
+    await request('/api/admin/runs?limit=200', { method: 'GET', signal, messages: adminOnly }),
+  );
+}
+
+export async function updateRunLimit(runId: string, limitUsd: number | null): Promise<AdminRun> {
+  return parseAdminRun(
+    await request(`/api/admin/runs/${encodeURIComponent(runId)}`, {
+      method: 'PATCH',
+      json: { limit_usd: limitUsd },
+      messages: adminOnly,
+    }),
+  );
+}
+
+export async function getAdminSettings(signal?: AbortSignal): Promise<AdminSettings> {
+  return parseAdminSettings(
+    await request('/api/admin/settings', { method: 'GET', signal, messages: adminOnly }),
+  );
+}
+
+export async function saveAdminSettings(settings: AdminSettings): Promise<AdminSettings> {
+  return parseAdminSettings(
+    await request('/api/admin/settings', { method: 'PUT', json: settings, messages: adminOnly }),
+  );
 }

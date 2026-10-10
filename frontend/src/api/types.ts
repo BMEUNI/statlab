@@ -196,3 +196,75 @@ export type ValidationPage = {
   columns: string[];
   rows: ValidationRow[];
 };
+
+export type AuthUser = { id: string; email: string; name: string; is_admin: boolean };
+export type AuthConfig = { signup_open: boolean; has_users: boolean };
+export type Meter = { spent_usd: number; limit_usd: number | null };
+export type RunBudget = {
+  run: Meter;
+  project: Meter;
+  person: Meter;
+  started_by: string | null;
+  blocked: string | null;
+};
+export type MemberRole = 'owner' | 'member';
+export type Member = { user_id: string; email: string; name: string; role: MemberRole; added_at: string };
+export type AdminSettings = {
+  default_monthly_limit_usd: number | null;
+  default_project_limit_usd: number | null;
+  default_run_limit_usd: number | null;
+  signup_open: boolean;
+};
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string;
+  is_admin: boolean;
+  disabled: boolean;
+  created_at: string;
+  last_login_at: string | null;
+  monthly_limit_usd: number | null;
+  month: Meter;
+  total_spent_usd: number;
+  projects: number;
+  runs: number;
+};
+export type AdminProject = {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+  owner_id: string | null;
+  owner_name: string | null;
+  owner_email: string | null;
+  members: number;
+  runs: number;
+  budget: Meter;
+  limit_usd: number | null;
+  run_limit_usd: number | null;
+  effective_run_limit_usd: number | null;
+};
+export type AdminRun = {
+  id: string;
+  project_id: string;
+  project_name: string;
+  status: RunStatus;
+  started_at: string;
+  limit_usd: number | null;
+  budget: RunBudget;
+};
+export type AdminOverview = {
+  month: string;
+  month_spent_usd: number;
+  total_spent_usd: number;
+  users: number;
+  admins: number;
+  disabled_users: number;
+  projects: number;
+  runs: number;
+  open_runs: number;
+  blocked_runs: AdminRun[];
+  settings: AdminSettings;
+};
+export type UserPatch = { is_admin?: boolean; disabled?: boolean; monthly_limit_usd?: number | null };
+export type ProjectPatch = { limit_usd?: number | null; run_limit_usd?: number | null };
