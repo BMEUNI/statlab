@@ -87,6 +87,8 @@ Check data integrity before the split and apply only safe, reported fixes.
 - Mark reported placeholder texts (such as "?" or "unknown") as missing when they clearly stand for a missing value; keep numeric sentinels unless the column cannot take that value.
 - Merge spelling variants only when they clearly name the same category.
 - Report duplicates, conflicting labels and rare levels; the split and preprocessing handle them.
+- Columns empty where the target is missing are probably measured only afterwards: name them in the findings as likely leakage.
+- A target that follows the row order means a random split overstates the scores: say so in the findings.
 
 ### Tools
 check_data_quality

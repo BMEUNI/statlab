@@ -121,7 +121,10 @@ def test_clean_frame_passes_every_check(run_paths: RunPaths) -> None:
     frame = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "y": ["p", "q"] * 3})
     res = check_data_quality(run_paths, _save(run_paths, frame), target="y", min_class_rows=2)
     for name, check in _dict(res.summary["checks"]).items():
-        assert _dict(check)["status"] == "pass", name
+        expected = (
+            "skipped" if name in ("missing_without_target", "target_follows_row_order") else "pass"
+        )
+        assert _dict(check)["status"] == expected, name
     assert res.summary["passed"] is True
     assert res.warnings == ()
 
@@ -222,3 +225,99 @@ def test_plain_text_merge_keeps_text_dtype(run_paths: RunPaths) -> None:
     assert out["sex"].tolist() == ["Male", "Male"]
     assert not isinstance(out["sex"].dtype, pd.CategoricalDtype)
     assert res.summary["merged"] == {"sex": {"male ": "Male"}}
+
+
+def test_missing_without_target_flags_columns_empty_on_unlabelled_rows(run_paths: RunPaths) -> None:
+    frame = pd.DataFrame(
+        {
+            "leak": [float(i) for i in range(20)] + [None] * 20,
+            "plan": [float(i) for i in range(40)],
+            "partial": [float(i) for i in range(30)] + [None] * 10,
+            "y": [0.0, 1.0] * 10 + [None] * 20,
+        }
+    )
+    res = check_data_quality(run_paths, _save(run_paths, frame), target="y")
+    assert _check(res, "missing_without_target") == {
+        "status": "warn",
+        "rows": 20,
+        "columns": ["leak"],
+        "details": [{"column": "leak", "labelled_present": 1.0, "unlabelled_present": 0.0}],
+    }
+    assert "missing_without_target check status is warn" in res.warnings
+    res = check_data_quality(run_paths, _save(run_paths, frame), target="y", id_columns=("leak",))
+    assert _check(res, "missing_without_target") == {
+        "status": "pass",
+        "rows": 0,
+        "columns": [],
+        "details": [],
+    }
+    res = check_data_quality(run_paths, _save(run_paths, frame.iloc[:39]), target="y")
+    assert _check(res, "missing_without_target") == {
+        "status": "skipped",
+        "rows": 0,
+        "columns": [],
+        "details": {"reason": "fewer than 20 rows without a target"},
+    }
+
+
+def test_target_follows_row_order_class_and_continuous(run_paths: RunPaths) -> None:
+    x = [float(i) for i in range(200)]
+    res = check_data_quality(
+        run_paths,
+        _save(run_paths, pd.DataFrame({"x": x, "y": ([0] * 20 + [1] * 20) * 5})),
+        target="y",
+    )
+    assert _check(res, "target_follows_row_order") == {
+        "status": "warn",
+        "rows": 0,
+        "columns": ["y"],
+        "details": {"same_as_previous": 0.955, "expected": 0.5},
+    }
+    res = check_data_quality(
+        run_paths,
+        _save(run_paths, pd.DataFrame({"x": x, "y": [0] * 100 + [1] * 100})),
+        target="y",
+    )
+    assert _check(res, "target_follows_row_order") == {
+        "status": "pass",
+        "rows": 0,
+        "columns": [],
+        "details": {"same_as_previous": 0.995, "expected": 0.5},
+    }
+    res = check_data_quality(
+        run_paths, _save(run_paths, pd.DataFrame({"x": x, "y": [0, 1] * 100})), target="y"
+    )
+    assert _check(res, "target_follows_row_order")["status"] == "pass"
+    res = check_data_quality(
+        run_paths,
+        _save(
+            run_paths,
+            pd.DataFrame({"x": x, "y": [float(i % 50) for i in range(200)]}),
+        ),
+        target="y",
+    )
+    assert _check(res, "target_follows_row_order") == {
+        "status": "warn",
+        "rows": 0,
+        "columns": ["y"],
+        "details": {"lag1_correlation": 0.91},
+    }
+    res = check_data_quality(
+        run_paths,
+        _save(run_paths, pd.DataFrame({"x": x, "y": [float(i) for i in range(200)]})),
+        target="y",
+    )
+    assert _check(res, "target_follows_row_order")["status"] == "pass"
+    res = check_data_quality(
+        run_paths,
+        _save(
+            run_paths, pd.DataFrame({"x": [float(i) for i in range(99)], "y": [0] * 50 + [1] * 49})
+        ),
+        target="y",
+    )
+    assert _check(res, "target_follows_row_order") == {
+        "status": "skipped",
+        "rows": 0,
+        "columns": [],
+        "details": {"reason": "fewer than 100 rows with a target"},
+    }

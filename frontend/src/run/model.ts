@@ -108,6 +108,8 @@ export const QUALITY_LABELS: Record<string, string> = {
   rare_categories: 'Very rare categories',
   target_health: 'Target problems',
   duplicate_columns: 'Duplicate columns',
+  missing_without_target: 'Columns empty where the target is missing',
+  target_follows_row_order: 'Target follows the row order',
 };
 
 export const QUALITY_STATUS_LABELS: Record<QualityStatus, string> = { pass: 'Passed', warn: 'Warning', fail: 'Failed', skipped: 'Skipped' };
@@ -161,6 +163,15 @@ export function qualityNote(name: string, details: JsonValue | undefined): strin
     }
     case 'duplicate_columns':
       return (Array.isArray(one.pairs) ? one.pairs : []).map((p) => texts(p).join(' = ')).join(', ');
+    case 'missing_without_target':
+      if (one.reason !== undefined) return text(one.reason);
+      return `${items.map((i) => `${text(i.column)} (filled in ${percent(i.labelled_present)} of rows with a target, ${percent(i.unlabelled_present)} without)`).join('; ')}. These are probably not known when you predict; exclude them unless they are.`;
+    case 'target_follows_row_order': {
+      if (one.reason !== undefined) return text(one.reason);
+      const tail = 'A random split puts near-copies of a row in training and test, so the scores may be too good.';
+      if (typeof one.lag1_correlation === 'number') return `Neighbouring rows have similar targets (lag-1 correlation ${text(one.lag1_correlation)}). ${tail}`;
+      return `${percent(one.same_as_previous)} of rows have the same class as the previous row (${percent(one.expected)} if shuffled). ${tail}`;
+    }
     default:
       return '';
   }

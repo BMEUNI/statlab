@@ -69,6 +69,24 @@ ID_LIKE_SHARE: Final = 0.5
 EXAMPLES: Final = 5
 """How many example values or rows a detail lists at most."""
 
+UNLABELLED_MIN_ROWS: Final = 20
+"""Fewer rows without a target than this skips the missing_without_target check."""
+
+UNLABELLED_PRESENT_MAX: Final = 0.01
+"""A column filled on at most this share of rows without a target is flagged."""
+
+LABELLED_PRESENT_MIN: Final = 0.5
+"""...and on at least this share of rows with a target."""
+
+ORDER_MIN_ROWS: Final = 100
+"""Fewer rows with a target than this skips the row-order check."""
+
+ORDER_LIFT: Final = 0.15
+"""How far the same-class-as-previous share must exceed the shuffled expectation."""
+
+ORDER_CORRELATION: Final = 0.5
+"""Lag-1 autocorrelation from which a continuous target follows the row order."""
+
 _Status = Literal["pass", "warn", "fail", "skipped"]
 _Target = Annotated[str, Field(min_length=1, description="The target column.")]
 
@@ -131,12 +149,13 @@ def check_data_quality(
         ),
     ] = 5,
 ) -> ToolSuccess:
-    """Run nine integrity checks on a frame before the split and report each one's status.
+    """Run eleven integrity checks on a frame before the split and report each one's status.
 
     Checks: disguised missing values, mixed types, category spelling variants, duplicate rows,
     conflicting labels, near-constant columns, rare categories, target health, duplicate
-    columns. Each check reports `pass`, `warn`, `fail` or `skipped` with the rows and columns it
-    touches. Nothing is changed; `fix_data_quality` applies the two safe fixes it proposes.
+    columns, columns empty where the target is missing, target following the row order. Each
+    check reports `pass`, `warn`, `fail` or `skipped` with the rows and columns it touches.
+    Nothing is changed; `fix_data_quality` applies the two safe fixes it proposes.
     """
     data = load_dataframe(paths.artifact(frame, "dataframe"))
     require_columns(data, (target, *id_columns), "columns")
@@ -332,6 +351,77 @@ def check_data_quality(
     results["duplicate_columns"] = _check(
         "warn" if pairs else "pass", 0, json_list(pair_names), dup_col_details
     )
+
+    # 10. missing_without_target
+    unlabelled = target_series.isna().to_numpy()
+    missing_rows = int(unlabelled.sum())
+    if missing_rows < UNLABELLED_MIN_ROWS:
+        results["missing_without_target"] = _check(
+            "skipped", 0, [], {"reason": "fewer than 20 rows without a target"}
+        )
+    else:
+        details = []
+        columns = []
+        for c in features:
+            labelled_present = (
+                float(data[c][~unlabelled].notna().mean()) if n - missing_rows > 0 else 0.0
+            )
+            unlabelled_present = float(data[c][unlabelled].notna().mean())
+            if (
+                unlabelled_present <= UNLABELLED_PRESENT_MAX
+                and labelled_present >= LABELLED_PRESENT_MIN
+            ):
+                columns.append(c)
+                details.append(
+                    {
+                        "column": c,
+                        "labelled_present": round(labelled_present, 3),
+                        "unlabelled_present": round(unlabelled_present, 3),
+                    }
+                )
+        results["missing_without_target"] = _check(
+            "warn" if details else "pass",
+            missing_rows if details else 0,
+            json_list(columns),
+            details,
+        )
+
+    # 11. target_follows_row_order
+    labelled = target_series.dropna()
+    if len(labelled) < ORDER_MIN_ROWS:
+        results["target_follows_row_order"] = _check(
+            "skipped", 0, [], {"reason": "fewer than 100 rows with a target"}
+        )
+    elif is_class_target(labelled):
+        order_values = labelled.to_numpy()
+        same = float((order_values[1:] == order_values[:-1]).mean())
+        changes = int((order_values[1:] != order_values[:-1]).sum())
+        shares = observed_counts(labelled) / len(labelled)
+        expected = float((shares**2).sum())
+        follows = same - expected >= ORDER_LIFT and changes > len(shares) - 1
+        results["target_follows_row_order"] = _check(
+            "warn" if follows else "pass",
+            0,
+            json_list([target]) if follows else [],
+            {"same_as_previous": round(same, 3), "expected": round(expected, 3)},
+        )
+    else:
+        target_numeric = labelled.astype("float64")
+        sorted_target = (
+            target_numeric.is_monotonic_increasing or target_numeric.is_monotonic_decreasing
+        )
+        correlation = target_numeric.autocorr(lag=1)
+        follows = (
+            not sorted_target
+            and not pd.isna(correlation)
+            and float(correlation) >= ORDER_CORRELATION
+        )
+        results["target_follows_row_order"] = _check(
+            "warn" if follows else "pass",
+            0,
+            json_list([target]) if follows else [],
+            {"lag1_correlation": None if pd.isna(correlation) else round(float(correlation), 3)},
+        )
 
     fixable: dict[str, JsonValue] = {
         "mark_missing": mark_plan,

@@ -52,6 +52,8 @@ _QUALITY_LABELS: dict[str, str] = {
     "rare_categories": "Very rare categories",
     "target_health": "Target problems",
     "duplicate_columns": "Duplicate columns",
+    "missing_without_target": "Columns empty where the target is missing",
+    "target_follows_row_order": "Target follows the row order",
 }
 _QUALITY_RESULTS: dict[str, str] = {
     "pass": "passed",

@@ -613,6 +613,10 @@ test('qualityNote explains each finding', () => {
   assert.equal(qualityNote('conflicting_labels', { groups: 2, example_rows: [] }), '2 groups of identical rows with different targets');
   assert.equal(qualityNote('duplicate_columns', { pairs: [['a', 'b']] }), 'a = b');
   assert.equal(qualityNote('disguised_missing', [{ column: 'x', count: 7, values: ['1', '2', '3', '4', '5', '6', '7'] }]), 'x: 1, 2, 3, 4, 5');
+  assert.equal(qualityNote('missing_without_target', [{ column: 'ke', labelled_present: 1, unlabelled_present: 0 }]), 'ke (filled in 100.0% of rows with a target, 0.0% without). These are probably not known when you predict; exclude them unless they are.');
+  assert.equal(qualityNote('missing_without_target', { reason: 'fewer than 20 rows without a target' }), 'fewer than 20 rows without a target');
+  assert.equal(qualityNote('target_follows_row_order', { same_as_previous: 0.835, expected: 0.55 }), '83.5% of rows have the same class as the previous row (55.0% if shuffled). A random split puts near-copies of a row in training and test, so the scores may be too good.');
+  assert.equal(qualityNote('target_follows_row_order', { lag1_correlation: 0.91 }), 'Neighbouring rows have similar targets (lag-1 correlation 0.91). A random split puts near-copies of a row in training and test, so the scores may be too good.');
   assert.equal(qualityNote('near_constant', 'not a list'), '');
   assert.equal(qualityNote('unknown', []), '');
 });
