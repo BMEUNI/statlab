@@ -10,6 +10,8 @@ import {
   previewArtifact,
   getValidation,
   parseValidationPage,
+  parsePredictionPreview,
+  predictUnlabelled,
   answerGate,
   checkGateEdits,
   createProject,
@@ -598,4 +600,24 @@ test('parseValidationPage rejects a bad task and a row whose values are not an o
   assert.equal(parseValidationPage(page).task, 'regression');
   assert.throws(() => parseValidationPage({ ...page, task: 'other' }), ApiError);
   assert.throws(() => parseValidationPage({ ...page, rows: [{ row: 1, actual: 1, predicted: 1, confidence: null, error: 0, correct: null, values: 'x' }] }), ApiError);
+});
+
+test('predictUnlabelled POSTs and parses the preview', async () => {
+  const body = { task: 'classification', rows: 3, columns: ['row', 'x', 'prediction'], head: [{ row: 4, x: 1, prediction: 'a' }] };
+  await withFetch(body, async (requests) => {
+    const preview = await predictUnlabelled('r1');
+    assert.equal(requests[0]?.input, '/api/runs/r1/predictions');
+    assert.equal(requests[0]?.init?.method, 'POST');
+    assert.equal(new Headers(requests[0]?.init?.headers).get('X-Statlab-Csrf'), '1');
+    assert.deepEqual(preview, body);
+  });
+});
+
+test('parsePredictionPreview rejects a bad task, columns and head', () => {
+  const preview = { task: 'regression', rows: 0, columns: [], head: [] };
+  assert.equal(parsePredictionPreview(preview).task, 'regression');
+  assert.throws(() => parsePredictionPreview({ ...preview, task: 'other' }), ApiError);
+  assert.throws(() => parsePredictionPreview({ ...preview, columns: [1] }), ApiError);
+  assert.throws(() => parsePredictionPreview({ ...preview, head: ['x'] }), ApiError);
+  assert.throws(() => parsePredictionPreview({ ...preview, rows: 'many' }), ApiError);
 });

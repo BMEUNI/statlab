@@ -196,6 +196,7 @@ export type ValidationPage = {
   columns: string[];
   rows: ValidationRow[];
 };
+export type PredictionPreview = { task: 'classification' | 'regression'; rows: number; columns: string[]; head: JsonObject[] };
 
 export type AuthUser = { id: string; email: string; name: string; is_admin: boolean };
 export type AuthConfig = { signup_open: boolean; has_users: boolean };

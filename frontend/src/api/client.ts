@@ -12,6 +12,7 @@ import type {
   ProjectPatch,
   RunBudget,
   UserPatch,
+  PredictionPreview,
   ValidationPage,
   ValidationRow,
   ChatTurn,
@@ -954,6 +955,21 @@ export async function getValidation(
   return parseValidationPage(
     await request(`${runPath(runId)}/validation?${params.toString()}`, { method: 'GET', signal }),
   );
+}
+
+export function parsePredictionPreview(value: unknown): PredictionPreview {
+  if (!isJsonObject(value)) throw invalidResponse();
+  if (value.task !== 'classification' && value.task !== 'regression') throw invalidResponse();
+  return {
+    task: value.task,
+    rows: requiredNumber(value, 'rows'),
+    columns: stringArray(value.columns),
+    head: objectArray(value.head),
+  };
+}
+
+export async function predictUnlabelled(runId: string, signal?: AbortSignal): Promise<PredictionPreview> {
+  return parsePredictionPreview(await request(`${runPath(runId)}/predictions`, { method: 'POST', signal }));
 }
 
 export function artifactUrl(id: string): string {

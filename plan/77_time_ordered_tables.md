@@ -930,3 +930,95 @@ meaningless, as expected. Scratch servers stopped, scratch directory deleted.
 
 `make check` (`check77c.log`, temporary) exit 0: coverage 100 % (TOTAL 13637 stmts, 0
 missed), mypy 212 files, Ruff clean.
+
+## Stage 77d (detailed spec): run-page Predictions tab
+
+Goal: on a run page, a "Predictions" tab calls 77c's `POST /api/runs/{run_id}/predictions`,
+previews the first rows and links `GET /api/runs/{run_id}/files/predictions.csv` for download.
+Non-goals: uploaded files (77e), paging beyond the 20-row head, a chat shortcut. Contract
+editing of `features.lags` already works: the schema form renders it as a column→list map
+(`SchemaForm.tsx` `MapControl`, `list-map`), and the backend coerces `"96"` to `96` (checked).
+
+Owned files: `frontend/src/api/types.ts`, `frontend/src/api/client.ts`,
+`frontend/src/run/PredictionsView.tsx` (new), `frontend/src/pages/RunPage.tsx`,
+`frontend/tests/client.test.ts`. Not alone: preserve others' edits.
+
+1. `types.ts`, directly after `ValidationPage`:
+   `export type PredictionPreview = { task: 'classification' | 'regression'; rows: number;
+   columns: string[]; head: JsonObject[] };`
+2. `client.ts`: add `PredictionPreview` to the `import type` list directly before
+   `ValidationPage`. Directly after `getValidation`:
+   - `export function parsePredictionPreview(value: unknown): PredictionPreview`: throw
+     `invalidResponse()` unless `isJsonObject(value)`; throw unless `value.task` is
+     `'classification'` or `'regression'`; return `{ task: value.task, rows:
+     requiredNumber(value, 'rows'), columns: stringArray(value.columns), head:
+     objectArray(value.head) }`.
+   - `export async function predictUnlabelled(runId: string, signal?: AbortSignal):
+     Promise<PredictionPreview>` returning `parsePredictionPreview(await
+     request(\`${runPath(runId)}/predictions\`, { method: 'POST', signal }))`.
+3. New `src/run/PredictionsView.tsx`, default export `PredictionsView({ runId, ready }: {
+   runId: string; ready: boolean })`:
+   - Imports: `useMutation` from `@tanstack/react-query`; `predictUnlabelled`, `runFileUrl`
+     from `../api/client.ts`; `errorText` from `../ui/format.ts`; `cellText` from
+     `./compare.ts`.
+   - `const predict = useMutation({ mutationFn: () => predictUnlabelled(runId) });` (before
+     any return).
+   - If `!ready`: return `<p className="secondary-line">Predictions are available once the run
+     has chosen its champion model.</p>`.
+   - Otherwise `const d = predict.data;` and return a `<section className="validation"
+     aria-label="Predictions">` containing, in order:
+     a. `<p className="help">The champion model predicts every row of your dataset whose
+        target is empty. Rows removed before the split (duplicates, rows with too many missing
+        values) are not included.</p>`
+     b. `<div className="validation-bar">` with a `<button type="button" className="primary"
+        disabled={predict.isPending} onClick={() => predict.mutate()}>` whose text is
+        `predict.isPending ? 'Predicting…' : 'Predict rows without a target'`, and, when `d`
+        is defined, `<a className="button" href={runFileUrl(runId, 'predictions.csv')}
+        download>Download CSV</a>`.
+     c. When `predict.isError`: `<p role="alert">{errorText(predict.error)}</p>`.
+     d. When `d` is defined: `<p className="secondary-line">` with text
+        `` `${d.rows} rows predicted.` `` followed by, when `d.rows > d.head.length`, the text
+        `` ` The first ${d.head.length} are shown; download the CSV for all of them.` ``; then
+        `<div className="table-wrap"><table className="validation-table">` with
+        `<caption>Predicted rows</caption>`, a `<thead><tr>` of `<th scope="col"
+        key={c}>{c}</th>` for each `c` in `d.columns`, and a `<tbody>` with one `<tr
+        key={cellText(r.row ?? null)}>` per `r` in `d.head`, holding `<td key={c}>{cellText(r[c]
+        ?? null)}</td>` for each `c` in `d.columns`.
+4. `RunPage.tsx`:
+   - Import `Sparkles` from `lucide-react` (add to the existing import, alphabetical) and
+     `PredictionsView from '../run/PredictionsView.tsx'` directly after the `ValidationView`
+     import.
+   - `tab` state union gains `'predictions'`.
+   - `tabs` gains, last: `{ id: 'predictions' as const, label: 'Predictions', Icon: Sparkles as
+     LucideIcon }`.
+   - Panel, after the validation line: `{tab === 'predictions' && <PredictionsView
+     runId={runId} ready={top !== null} />}`.
+5. `tests/client.test.ts`: import `predictUnlabelled` and `parsePredictionPreview`. After the
+   `parseValidationPage` test add:
+   - `test('predictUnlabelled POSTs and parses the preview', ...)`: body `{ task:
+     'classification', rows: 3, columns: ['row', 'x', 'prediction'], head: [{ row: 4, x: 1,
+     prediction: 'a' }] }`; inside `withFetch`: `const preview = await
+     predictUnlabelled('r1');` assert `requests[0]?.input === '/api/runs/r1/predictions'`,
+     `requests[0]?.init?.method === 'POST'`, `new Headers(requests[0]?.init?.headers).get(
+     'X-Statlab-Csrf') === '1'`, and `assert.deepEqual(preview, body)`.
+   - `test('parsePredictionPreview rejects a bad task, columns and head', ...)`: `const
+     preview = { task: 'regression', rows: 0, columns: [], head: [] };` assert
+     `parsePredictionPreview(preview).task === 'regression'`; `assert.throws(() =>
+     parsePredictionPreview({ ...preview, task: 'other' }), ApiError)`; same for `columns:
+     [1]`, `head: ['x']` and `rows: 'many'`.
+
+Checks (from `frontend/`): `npm run typecheck`, `npm test`, `npm run build`. Stop and report on
+any failure or gap. Main then: review, browser check on scratch ports (preview a predictions
+tab against a scratch copy), `make check` not needed for frontend-only edits beyond these
+(frontend gates are `typecheck`/`test`/`build`), commit, then write 77e.
+
+## Stage 77d acceptance receipt (2026-10-10)
+
+Implementer: `npm run typecheck`, `npm test` (115 pass, 0 fail), `npm run build` exit 0. Main
+reviewed the diff (matches the recipe; the result block sits in a fragment, mechanical) and
+reran the three frontend gates: exit 0, 115/115. Browser (scratch copy as in 77c, vite 5174, API
+8766, MCP 8767): signed in, opened run `r_f5e9364ca69378fa`, Predictions tab → "Predict rows
+without a target" showed "17952 rows predicted. The first 20 are shown; download the CSV for all
+of them.", the 20-row table and Download CSV (`.playwright-mcp/77d-predictions-tab.png`). Only
+console errors were pre-login (favicon 404, `/api/auth/me` 401). Scratch servers stopped and
+directory deleted. Python is unchanged, so 77c's `make check` evidence holds.
