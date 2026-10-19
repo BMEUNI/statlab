@@ -121,12 +121,13 @@ def test_h10_calibrate_affects_hash() -> None:
     assert a.spec_hash != b.spec_hash
 
 
-# --- H11: each FeatureSpec field affects the hash, parametrised over all 7 --------------------
+# --- H11: each FeatureSpec field affects the hash, parametrised over all 8 --------------------
 
 _FEATURE_SPEC_VARIANTS: tuple[tuple[str, FeatureSpec], ...] = (
     ("encoding", FeatureSpec(encoding="target")),
     ("scaling", FeatureSpec(scaling="robust")),
     ("max_cardinality", FeatureSpec(max_cardinality=50)),
+    ("text_encoding", FeatureSpec(text_encoding="tfidf")),
     ("interactions", FeatureSpec(interactions=(("a", "b"),))),
     ("datetime_parts", FeatureSpec(datetime_parts={"d": ("year",)})),
     ("binned", FeatureSpec(binned={"x": 3})),
@@ -234,3 +235,11 @@ def test_h18_numeric_type_ceiling_is_real() -> None:
         estimator=EstimatorSpec(name="logistic_regression", params={"C": 1.0})
     )
     assert int_variant.spec_hash != float_variant.spec_hash
+
+
+def test_h19_default_text_encoding_is_left_out_of_the_hash() -> None:
+    a = _candidate(features=FeatureSpec())
+    b = _candidate(features=FeatureSpec(text_encoding="categorical"))
+    c = _candidate(features=FeatureSpec(text_encoding="drop"))
+    assert a.spec_hash == b.spec_hash
+    assert c.spec_hash != a.spec_hash

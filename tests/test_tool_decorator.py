@@ -1116,6 +1116,7 @@ _TRANSFORM_ONLY_TOOLS: frozenset[str] = frozenset(
         "apply_onehot_encoder",
         "apply_ordinal_encoder",
         "apply_target_encoder",
+        "apply_text_vectorizer",
         "apply_scaler",
         "apply_binner",
         "drop_columns",
@@ -1126,10 +1127,10 @@ _TRANSFORM_ONLY_TOOLS: frozenset[str] = frozenset(
         "add_ratio_feature",
     }
 )
-"""The exact 13 transform-only tools (chunk 17 D-a). Node 12 replays each on a test-derived frame,
-so chunk 21's lineage lock and the skeleton's `check_lineage` read `meta.transform_only` for this
-set rather than matching name prefixes -- which already missed `drop_columns` and the row-wise
-constructors."""
+"""The exact 14 transform-only tools (chunk 17 D-a; chunk 82 adds apply_text_vectorizer). Node 12
+replays each on a test-derived frame, so chunk 21's lineage lock and the skeleton's `check_lineage`
+read `meta.transform_only` for this set rather than matching name prefixes -- which already missed
+`drop_columns` and the row-wise constructors."""
 
 
 def _real_registry() -> object:

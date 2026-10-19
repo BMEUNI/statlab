@@ -26,6 +26,7 @@ from statlab_contracts.vocabulary import (
     OutlierPolicy,
     ParamValue,
     ScalingMethod,
+    TextEncoding,
     VariationDimension,
     tunable_param_errors,
 )
@@ -97,6 +98,13 @@ class FeatureSpec(BaseModel):
     encoding: CategoricalEncoding = "onehot"
     scaling: ScalingMethod = "standard"
     max_cardinality: int = Field(default=30, ge=2)
+    text_encoding: TextEncoding = Field(
+        default="categorical",
+        description="How text-role columns become numbers: 'categorical' encodes them like "
+        "categories (default), 'drop' removes them, 'lexicon' counts class keywords learned on "
+        "train (classification only), 'tfidf' weights words and word pairs, 'hashed_chars' "
+        "hashes character 3-5-grams.",
+    )
     interactions: tuple[tuple[str, str], ...] = ()
     datetime_parts: dict[str, tuple[DatetimePart, ...]] = Field(default_factory=dict)
     binned: dict[str, int] = Field(default_factory=dict)  # column -> n_bins
@@ -194,6 +202,11 @@ is also logreg+onehot, that is a duplicate regardless of which one carries the f
 the flag in identity would let the same approach be proposed twice and both get trained.
 """
 
+_LEGACY_TEXT: Final[dict[str, set[str]]] = {"features": {"text_encoding"}}
+"""Left out of the hash at its default `categorical` (chunk 82): that value is the behaviour
+from before the field existed, so every earlier spec keeps its hash (H17).
+"""
+
 
 class CandidateSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -242,7 +255,10 @@ class CandidateSpec(BaseModel):
         ponytail: numeric-identity ceiling; upgrade path is a per-param type table from the
         registry (chunk 13) if it ever bites.
         """
-        payload: dict[str, JsonValue] = self.model_dump(mode="json")
+        payload: dict[str, JsonValue] = self.model_dump(
+            mode="json",
+            exclude=_LEGACY_TEXT if self.features.text_encoding == "categorical" else None,
+        )
         for field in _UNHASHED_FIELDS:
             payload.pop(field)
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -274,6 +290,10 @@ def changed_dimensions(
         "features.max_cardinality": (
             baseline.features.max_cardinality,
             candidate.features.max_cardinality,
+        ),
+        "features.text_encoding": (
+            baseline.features.text_encoding,
+            candidate.features.text_encoding,
         ),
         "features.interactions": (baseline.features.interactions, candidate.features.interactions),
         "features.datetime_parts": (

@@ -21,6 +21,10 @@ ImputationStrategy = Literal["mean", "median", "most_frequent", "constant", "dro
 OutlierPolicy = Literal["none", "clip_iqr", "winsorize", "flag_only"]
 ScalingMethod = Literal["none", "standard", "minmax", "robust"]
 CategoricalEncoding = Literal["onehot", "ordinal", "target", "frequency"]
+TextEncoding = Literal["categorical", "drop", "lexicon", "tfidf", "hashed_chars"]
+"""How a candidate turns text-role columns into numbers (chunk 82, D37). `categorical` is the
+behaviour from before the field existed: text goes through `encoding` like a category. `drop`
+removes text columns; the other three call `fit_text_vectorizer`."""
 
 ClassificationMetric = Literal[
     "accuracy",
@@ -86,6 +90,7 @@ VariationDimension = Literal[
     "encoding",
     "scaling",
     "cardinality_handling",
+    "text_features",
     "derived_features",
     "feature_selection",
     "estimator",
@@ -103,6 +108,7 @@ DIMENSION_FOR_FIELD: dict[str, VariationDimension] = {
     "features.encoding": "encoding",
     "features.scaling": "scaling",
     "features.max_cardinality": "cardinality_handling",
+    "features.text_encoding": "text_features",
     "features.interactions": "derived_features",
     "features.datetime_parts": "derived_features",
     "features.binned": "derived_features",

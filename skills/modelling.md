@@ -142,6 +142,8 @@ Declare candidates for comparison on the shared split.
 - Tie candidates to profiling evidence; diversify supported families and preprocessing, with at most two per family unless justified.
 - Specify transformations, estimator, parameters and bounds; deduplicate candidate specifications.
 - Use list_estimators as the authority on available models.
+- When a text-role column exists, compare features.text_encoding methods (drop, lexicon for classification, tfidf,
+  hashed_chars) as separate candidates; prefer the simplest one that meets the bar.
 
 ### Tools
 list_estimators
@@ -222,6 +224,7 @@ Fit candidate feature transforms on training data and apply them.
 - Scale regularized linear models when appropriate; consider target encoding only for justified high-cardinality non-ID features.
 - Use the encoder's out-of-fold training output and apply the fitted encoder to held-out rows.
 - Fit binning and selection on training data; require available-at-prediction-time inputs and domain rationale for derived features.
+- Turn text-role columns into numbers only with fit_text_vectorizer on train; its train output is the one to keep (the lexicon's is out-of-fold), and apply_text_vectorizer is for held-out rows.
 
 ### Tools
 fit_onehot_encoder
@@ -230,6 +233,8 @@ fit_ordinal_encoder
 apply_ordinal_encoder
 fit_target_encoder
 apply_target_encoder
+fit_text_vectorizer
+apply_text_vectorizer
 fit_scaler
 apply_scaler
 add_datetime_parts
@@ -358,6 +363,7 @@ apply_outlier_clipper
 apply_onehot_encoder
 apply_ordinal_encoder
 apply_target_encoder
+apply_text_vectorizer
 apply_scaler
 predict
 predict_proba

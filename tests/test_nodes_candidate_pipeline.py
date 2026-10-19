@@ -104,7 +104,7 @@ class CandidateTools(DesignTools):
             summary = self.registry
         elif tool.startswith("fit_"):
             artifacts = (self.artifact("transformer"),)
-            if tool == "fit_target_encoder":
+            if tool in ("fit_target_encoder", "fit_text_vectorizer"):
                 artifacts += (self.artifact("dataframe"),)
             if tool == "fit_imputer":
                 summary = {"dropped": [], "fills": {"x": 1}, "strategies": {"x": "median"}}
@@ -228,6 +228,8 @@ async def candidate_harness(
             "apply_ordinal_encoder",
             "fit_target_encoder",
             "apply_target_encoder",
+            "fit_text_vectorizer",
+            "apply_text_vectorizer",
             "fit_scaler",
             "apply_scaler",
             "select_by_variance",
@@ -442,6 +444,67 @@ async def test_target_encoding_keeps_oof_train_and_only_applies_to_validation(
     assert str(pipeline.train) == oof["ref"]
     applied = [params for name, params in calls if name == "apply_target_encoder"]
     assert len(applied) == 1 and applied[0]["frame"] != str(pipeline.train)
+
+
+@pytest.mark.asyncio
+async def test_text_vectorizer_replaces_text_before_categorical_encoding(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(
+        migrated_db, project, tmp_path, feature=FeatureSpec(text_encoding="tfidf", scaling="none")
+    )
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=h.runtime.contract.target,
+            objective=h.runtime.contract.objective,
+            features=FeatureRules(roles={"x": "text"}),
+        ),
+    )
+    await prepare_candidate(h)
+    calls = [(name, params) for _, name, params in tools.calls]
+    names = [name for name, _ in calls]
+    fit = next(params for name, params in calls if name == "fit_text_vectorizer")
+    assert fit["columns"] == ["x"]
+    assert fit["method"] == "tfidf"
+    assert fit["seed"] == h.runtime.contract.constraints.random_seed
+    assert names.index("apply_text_vectorizer") < names.index("fit_onehot_encoder")
+    pipeline = pipeline_from_state(h.state, h.state.branches[0])
+    applied = [params for name, params in calls if name == "apply_text_vectorizer"]
+    assert len(applied) == 1 and applied[0]["frame"] != str(pipeline.train)
+    assert [step.tool for step in pipeline.replay].index("apply_text_vectorizer") < [
+        step.tool for step in pipeline.replay
+    ].index("apply_onehot_encoder")
+
+
+@pytest.mark.asyncio
+async def test_text_drop_removes_text_and_keeps_it_out_of_categorical_encoding(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(
+        migrated_db,
+        project,
+        tmp_path,
+        feature=FeatureSpec(text_encoding="drop", encoding="target", scaling="none"),
+    )
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=h.runtime.contract.target,
+            objective=h.runtime.contract.objective,
+            features=FeatureRules(roles={"x": "text"}),
+        ),
+    )
+    await prepare_candidate(h)
+    calls = [(name, params) for _, name, params in tools.calls]
+    names = [name for name, _ in calls]
+    assert any(name == "drop_columns" and params["columns"] == ["x"] for name, params in calls)
+    assert "fit_text_vectorizer" not in names
+    assert "fit_target_encoder" not in names
 
 
 @pytest.mark.asyncio

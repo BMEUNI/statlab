@@ -1,7 +1,7 @@
-"""The eight encoding tools: `PLAN.md` §6.3's `encoding` phase, this chunk's spec
-(`12_tools_encoding.md`). Four `fit_*`/`apply_*` pairs -- one-hot, ordinal, target, scaler --
-that complete M4. Node 8 (`feature_engineering`) uses them to build a candidate's predictive
-matrix.
+"""The encoding tools: `PLAN.md` §6.3's `encoding` phase, this chunk's spec
+(`12_tools_encoding.md`) plus chunk 82's text vectorizer. Four `fit_*`/`apply_*` pairs -- one-hot,
+ordinal, target, scaler -- that complete M4. Node 8 (`feature_engineering`) uses them to build a
+candidate's predictive matrix.
 
 Same shape as `cleaning.py` (chunk 11, D-d): fitted state is a frozen dataclass pickled as kind
 `transformer`; `apply_*` type-checks the loaded object through `_frame.load_fitted`, so a wrong
@@ -29,12 +29,20 @@ per class; an unseen level transforms to the target mean (P3). A `bool` dummy is
 `is_numeric_column` (P4), so the scaler's default selection skips one-hot dummies and chunk 11's
 `__outlier` flags with no special case. `TargetEncoder` outputs `float64`; the one-hot dummies are
 plain `bool`; the scaler and ordinal encoder write `float64` (an `Int64` input is cast first, P1).
+
+Chunk 82 adds `fit_text_vectorizer` / `apply_text_vectorizer`: a text-role column becomes numeric
+columns (keyword lexicon, TF-IDF or hashed character n-grams). The fit returns the encoder and the
+transformed train, like target encoding; the lexicon's train output is out-of-fold because it reads
+the target.
 """
 
 from __future__ import annotations
 
+import math
+import re
+from collections import Counter
 from dataclasses import dataclass
-from typing import Annotated, Literal, cast
+from typing import Annotated, Final, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -557,6 +565,322 @@ def apply_target_encoder(
 
     summary: dict[str, JsonValue] = {"unseen": {col: json_scalar(n) for col, n in unseen.items()}}
     return ToolSuccess(summary=summary, artifacts=(save_frame(paths, out, "target_encoded"),))
+
+
+# --- text (chunk 82, D37) ------------------------------------------------------------------------
+
+TextMethod = Literal["lexicon", "tfidf", "hashed_chars"]
+"""The three text encodings: `lexicon` needs a class target; `tfidf` and `hashed_chars` do not."""
+
+_TOKEN: Final = re.compile(r"(?u)\b\w\w+\b")
+"""sklearn's default word token pattern, so the lexicon and TF-IDF see the same words."""
+
+# ponytail: fixed sizes; dense output is rows x size floats per text column, a parameter
+# if a real dataset needs more.
+_LEXICON_WORDS: Final = 25
+"""Keywords kept per class."""
+
+_TFIDF_TERMS: Final = 300
+"""TF-IDF vocabulary cap."""
+
+_HASH_BUCKETS: Final = 256
+"""Hashed bucket count per text column."""
+
+
+@dataclass(frozen=True)
+class FittedTextVectorizer:
+    """What `apply_text_vectorizer` replays, all learned on train. `method` picks the replay path.
+    `vectorizers` holds each column's fitted sklearn vectorizer (tfidf / hashed_chars). `keywords`
+    holds each column's learned class keywords (lexicon). `kept` holds the raw output indices that
+    survived the constant-on-train drop, and `output_columns` their names. `train_labels` is train's
+    index, so apply refuses train rows.
+
+    `vectorizers` is typed `object` for the same reason as `FittedTargetEncoder.encoder`: sklearn is
+    untyped here, and the field is narrowed with a `cast` at use.
+    """
+
+    target: str
+    method: str
+    columns: tuple[str, ...]
+    vectorizers: dict[str, object]
+    keywords: dict[str, dict[str, tuple[str, ...]]]
+    kept: dict[str, tuple[int, ...]]
+    output_columns: dict[str, tuple[str, ...]]
+    train_labels: pd.Index
+
+
+def _texts(series: pd.Series) -> list[str]:
+    """Each value's string form; a null is the empty text, which has no features."""
+    return [str(value) for value in as_str(series).fillna("")]
+
+
+def _learn_lexicon(
+    texts: list[str], labels: list[str], classes: tuple[str, ...]
+) -> dict[str, tuple[str, ...]]:
+    """Add-one (Laplace) smoothed log-odds of a word in the class versus the rest, per class; only
+    words in at least two train rows are candidates. Keys follow `classes` order."""
+    docs = [_TOKEN.findall(text.lower()) for text in texts]
+    document_frequency = Counter(word for tokens in docs for word in set(tokens))
+    vocabulary = {word for word, n in document_frequency.items() if n >= 2}
+    totals = Counter(word for tokens in docs for word in tokens if word in vocabulary)
+    size = len(vocabulary)
+    all_words = sum(totals.values())
+    found: dict[str, tuple[str, ...]] = {}
+    for cls in classes:
+        inside = Counter(
+            word
+            for tokens, label in zip(docs, labels, strict=True)
+            if label == cls
+            for word in tokens
+            if word in vocabulary
+        )
+        n_in = sum(inside.values())
+        n_out = all_words - n_in
+        scores = {
+            word: math.log((inside[word] + 1) / (n_in + size))
+            - math.log((totals[word] - inside[word] + 1) / (n_out + size))
+            for word in vocabulary
+        }
+        ranked = sorted(
+            (word for word, score in scores.items() if score > 0),
+            key=lambda word: (-scores[word], word),
+        )
+        found[cls] = tuple(ranked[:_LEXICON_WORDS])
+    return found
+
+
+def _lexicon_matrix(keywords: dict[str, tuple[str, ...]], texts: list[str]) -> np.ndarray:
+    """Per text, how many of its tokens are keywords of each class (one column per class)."""
+    sets = [set(words) for words in keywords.values()]
+    rows = [
+        [
+            float(sum(1 for token in _TOKEN.findall(text.lower()) if token in words))
+            for words in sets
+        ]
+        for text in texts
+    ]
+    return np.asarray(rows, dtype="float64").reshape(len(texts), len(sets))
+
+
+def _raw_features(
+    method: str, vectorizer: object, keywords: dict[str, tuple[str, ...]], texts: list[str]
+) -> np.ndarray:
+    """The unfiltered feature matrix for `texts`: lexicon counts, or a fitted vectorizer's
+    output."""
+    if method == "lexicon":
+        return _lexicon_matrix(keywords, texts)
+    # lazy, see fit_target_encoder (scipy)
+    from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
+
+    # `vectorizer` is what fit_text_vectorizer stored for this method: fit is its sole constructor,
+    # so the cast is not a runtime check (as in apply_target_encoder).
+    model = cast(TfidfVectorizer | HashingVectorizer, vectorizer)
+    return np.asarray(model.transform(texts).toarray(), dtype="float64")
+
+
+def _raw_names(method: str, column: str, vectorizer: object, classes: tuple[str, ...]) -> list[str]:
+    """Output names in the same order as `_raw_features`' columns."""
+    if method == "lexicon":
+        return [f"{column}__lex_{cls}" for cls in classes]
+    if method == "tfidf":
+        # lazy, see fit_target_encoder (scipy)
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        model = cast(TfidfVectorizer, vectorizer)
+        # a bigram's space becomes "+", which no word token contains, so names cannot collide
+        return [
+            f"{column}__tfidf_{term.replace(' ', '+')}" for term in model.get_feature_names_out()
+        ]
+    return [f"{column}__hash_{index}" for index in range(_HASH_BUCKETS)]
+
+
+@tool(phase="encoding", allow_in=_FIT_PHASES)
+def fit_text_vectorizer(
+    paths: RunPaths,
+    train: _Train,
+    target: _Target,
+    columns: Annotated[
+        tuple[str, ...], Field(min_length=1, description="Text-role columns to vectorize.")
+    ],
+    method: Annotated[
+        TextMethod,
+        Field(
+            description="lexicon: class keyword counts learned on train (class targets only); "
+            "tfidf: word 1-2-gram TF-IDF; hashed_chars: hashed character 3-5-grams."
+        ),
+    ],
+    seed: Annotated[int, Field(ge=0, description=ORCHESTRATOR_SUPPLIED)],
+) -> ToolSuccess:
+    """Turn each text-role column into numeric columns, learned on train only. `tfidf` is word
+    1-2-gram TF-IDF with a capped vocabulary; `hashed_chars` is hashed character 3-5-grams;
+    `lexicon` counts each class's learned keywords and needs a class target. The fit returns the
+    encoder and the transformed train: use that train, since `apply_text_vectorizer` is for valid
+    and test rows only. The lexicon's train output is out-of-fold (D34c). A null text is an empty
+    text. Output columns that are constant on train are dropped.
+    """
+    data = load_dataframe(paths.artifact(train, "dataframe"))
+    require_columns(data, columns, "columns")
+    _reject_target_in_columns(columns, target)
+
+    classes: tuple[str, ...] = ()
+    labels: list[str] = []
+    if method == "lexicon":
+        require_columns(data, (target,), "target")
+        if not is_class_target(data[target]):
+            raise ToolParamError(
+                "lexicon text features need a class target",
+                field_errors={"method": "lexicon needs a class target"},
+            )
+        labels = [str(value) for value in as_str(data[target])]
+        classes = tuple(sorted(set(labels)))
+        smallest = min(Counter(labels).values())
+        if smallest < _FOLDS:
+            raise ToolDataError(
+                f"the smallest target class has {smallest} rows in train, fewer than the "
+                f"{_FOLDS} cross-fitting folds; the lexicon cannot cross-fit it"
+            )
+
+    vectorizers: dict[str, object] = {}
+    keywords: dict[str, dict[str, tuple[str, ...]]] = {}
+    kept: dict[str, tuple[int, ...]] = {}
+    output_columns: dict[str, tuple[str, ...]] = {}
+    matrices: dict[str, np.ndarray] = {}
+    for column in columns:
+        texts = _texts(data[column])
+        vectorizer: object = None
+        if method == "lexicon":
+            keywords[column] = _learn_lexicon(texts, labels, classes)
+            # lazy, see fit_target_encoder (scipy)
+            from sklearn.model_selection import StratifiedKFold
+
+            raw = np.zeros((len(texts), len(classes)), dtype="float64")
+            for fit_rows, held_rows in StratifiedKFold(
+                _FOLDS, shuffle=True, random_state=seed
+            ).split(np.zeros(len(texts)), labels):
+                fold_words = _learn_lexicon(
+                    [texts[i] for i in fit_rows], [labels[i] for i in fit_rows], classes
+                )
+                raw[held_rows] = _lexicon_matrix(fold_words, [texts[i] for i in held_rows])
+        else:
+            # lazy, see fit_target_encoder (scipy)
+            from sklearn.feature_extraction.text import HashingVectorizer, TfidfVectorizer
+
+            if method == "tfidf":
+                model = TfidfVectorizer(
+                    ngram_range=(1, 2), min_df=2, max_features=_TFIDF_TERMS, sublinear_tf=True
+                )
+            else:
+                model = HashingVectorizer(
+                    analyzer="char_wb",
+                    ngram_range=(3, 5),
+                    n_features=_HASH_BUCKETS,
+                    alternate_sign=False,
+                )
+            try:
+                model.fit(texts)
+            except ValueError:
+                raise ToolDataError(
+                    f"text column {column!r} has no word that appears in at least 2 train rows"
+                ) from None
+            vectorizers[column] = model
+            vectorizer = model
+            raw = _raw_features(method, model, {}, texts)
+        names = _raw_names(method, column, vectorizer, classes)
+        indices = tuple(int(i) for i in np.flatnonzero(np.ptp(raw, axis=0) > 0))
+        if not indices:
+            raise ToolDataError(
+                f"text column {column!r} gives no feature that varies across train rows"
+            )
+        kept[column] = indices
+        output_columns[column] = tuple(names[i] for i in indices)
+        matrices[column] = raw[:, list(indices)]
+
+    # checked before any insert: pandas' own insert would otherwise raise its ValueError first
+    made = [name for names in output_columns.values() for name in names]
+    collisions = sorted(set(made) & (set(data.columns) - set(columns)))
+    if collisions:
+        raise ToolParamError(
+            f"generated text feature names collide with existing columns: {collisions!r}",
+            field_errors={"columns": f"name collision: {collisions!r}"},
+        )
+    encoded = data
+    for column in columns:
+        encoded = _replace_columns(
+            encoded,
+            (column,),
+            pd.DataFrame(matrices[column], columns=list(output_columns[column]), index=data.index),
+        )
+
+    fitted = FittedTextVectorizer(
+        target=target,
+        method=method,
+        columns=tuple(columns),
+        vectorizers=vectorizers,
+        keywords=keywords,
+        kept=kept,
+        output_columns=output_columns,
+        train_labels=data.index,
+    )
+    meta = _save_transformer(paths, fitted, "text_vectorizer")
+    summary: dict[str, JsonValue] = {
+        "method": method,
+        "columns": {column: json_scalar(len(output_columns[column])) for column in columns},
+        "output_columns": json_scalar(len(made)),
+        "keywords": {
+            column: {cls: json_list(words) for cls, words in found.items()}
+            for column, found in keywords.items()
+        },
+    }
+    return ToolSuccess(
+        summary=summary,
+        artifacts=(meta, save_frame(paths, encoded, "text_vectorized_train")),
+    )
+
+
+@tool(phase="encoding", allow_in=_APPLY_PHASES, transform_only=True)
+def apply_text_vectorizer(
+    paths: RunPaths,
+    vectorizer: Annotated[
+        ArtifactRef, Field(description="A fitted vectorizer from fit_text_vectorizer.")
+    ],
+    frame: _Frame,
+) -> ToolSuccess:
+    """Replace each fitted text column with the columns learned on train; nothing is relearned
+    here. For valid/test only: a frame row sharing a label with train is refused. Unseen words give
+    zeros; a null is an empty text. Works with or without the target.
+    """
+    fitted = load_fitted(paths, vectorizer, FittedTextVectorizer, "vectorizer")
+    data = load_dataframe(paths.artifact(frame, "dataframe"))
+    require_columns(data, fitted.columns, "frame")
+
+    overlap = data.index.intersection(fitted.train_labels)
+    if len(overlap) > 0:
+        raise ToolParamError(
+            f"{len(overlap)} frame rows share a label with the vectorizer's train; apply is for "
+            f"valid/test only -- use fit_text_vectorizer's transformed train",
+            field_errors={"frame": f"{len(overlap)} rows overlap train labels"},
+        )
+
+    out = data
+    for column in fitted.columns:
+        raw = _raw_features(
+            fitted.method,
+            fitted.vectorizers.get(column),
+            fitted.keywords.get(column, {}),
+            _texts(data[column]),
+        )
+        out = _replace_columns(
+            out,
+            (column,),
+            pd.DataFrame(
+                raw[:, list(fitted.kept[column])],
+                columns=list(fitted.output_columns[column]),
+                index=data.index,
+            ),
+        )
+
+    summary: dict[str, JsonValue] = {"columns": json_list(fitted.columns)}
+    return ToolSuccess(summary=summary, artifacts=(save_frame(paths, out, "text_vectorized"),))
 
 
 # --- 3.5 scaler ([v1]) ---------------------------------------------------------------------------

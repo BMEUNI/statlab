@@ -189,6 +189,15 @@ class DesignInferenceExecutor:
                     f"interaction columns {bad!r} are not numeric; "
                     "interactions need numeric columns"
                 )
+            text = candidate.features.text_encoding
+            if text != "categorical" and not any(
+                roles.get(column) == "text" for column in eligible
+            ):
+                raise _RefusalError(
+                    "text_encoding needs an eligible text-role column; keep 'categorical'"
+                )
+            if text == "lexicon" and problem.task != "classification":
+                raise _RefusalError("lexicon text features need a classification target")
         for family, count in families.items():
             if count > 2 and not decision.family_justifications.get(family, "").strip():
                 raise _RefusalError(
@@ -221,7 +230,10 @@ class DesignInferenceExecutor:
             "Do not fit or probe parameters. Estimator params hold single fixed values "
             "(empty for defaults); never put tuning grids or lists there, grids are chosen "
             "later at model_training. Interactions only between numeric-role columns. "
-            + VARIATION_RULE,
+            "features.text_encoding applies only to text-role columns: 'categorical' (default) "
+            "encodes them like categories, 'drop' removes them, 'lexicon' (classification only), "
+            "'tfidf' and 'hashed_chars' turn them into numeric columns; when a text column "
+            "exists, compare text methods as separate candidates. " + VARIATION_RULE,
             check=_rejecting(
                 lambda d: self.validate_design(invocation, d, registry.summary, problem)
             ),

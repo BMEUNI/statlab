@@ -43,6 +43,7 @@ _DIMENSION_VARIANTS: dict[str, CandidateSpec] = {
     "features.encoding": make_candidate(features=FeatureSpec(encoding="target")),
     "features.scaling": make_candidate(features=FeatureSpec(scaling="robust")),
     "features.max_cardinality": make_candidate(features=FeatureSpec(max_cardinality=50)),
+    "features.text_encoding": make_candidate(features=FeatureSpec(text_encoding="tfidf")),
     "features.interactions": make_candidate(features=FeatureSpec(interactions=(("a", "b"),))),
     "features.datetime_parts": make_candidate(
         features=FeatureSpec(datetime_parts={"d": ("year",)})
@@ -62,7 +63,7 @@ _DIMENSION_VARIANTS: dict[str, CandidateSpec] = {
 def test_g2_each_single_field_change_maps_to_its_dimension(
     path: str, dimension: VariationDimension
 ) -> None:
-    """G2: parametrised over all 13 DIMENSION_FOR_FIELD keys."""
+    """G2: parametrised over all 14 DIMENSION_FOR_FIELD keys."""
     baseline = make_candidate(label="baseline")
     candidate = _DIMENSION_VARIANTS[path]
     assert changed_dimensions(baseline, candidate) == frozenset({dimension})

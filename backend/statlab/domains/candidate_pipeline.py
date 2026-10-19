@@ -192,7 +192,7 @@ class CandidatePipelineExecutor:
             pipeline,
             apply,
             {key: str(_artifact(output, "transformer"))},
-            train_output=output if fit == "fit_target_encoder" else None,
+            train_output=output if fit in ("fit_target_encoder", "fit_text_vectorizer") else None,
         )
         transforms = prepared.feature_manifest.get("transforms")
         if not isinstance(transforms, list):
@@ -221,7 +221,7 @@ class CandidatePipelineExecutor:
         # Carried fitted objects remain live as this step's artifacts.
         evidence.refs.extend((pipeline.train, pipeline.valid))
         for step in pipeline.replay:
-            for key in ("imputer", "clipper", "encoder", "scaler", "binner"):
+            for key in ("imputer", "clipper", "encoder", "scaler", "binner", "vectorizer"):
                 if key in step.parameters:
                     evidence.refs.append(_ref(step.parameters, key))
         return evidence.result("completed", summary)
@@ -424,10 +424,41 @@ class CandidatePipelineExecutor:
                             "imputer drops",
                         )
                     )
+        text_columns = sorted(
+            column
+            for column in available
+            if roles.get(column) == "text"
+            and column not in feature.datetime_parts
+            and column not in feature.binned
+        )
+        if text_columns and feature.text_encoding == "drop":
+            pipeline = await self._transform(
+                invocation, evidence, pipeline, "drop_columns", {"columns": list(text_columns)}
+            )
+        elif text_columns and feature.text_encoding != "categorical":
+            pipeline = await self._fit_apply(
+                invocation,
+                evidence,
+                pipeline,
+                "fit_text_vectorizer",
+                "apply_text_vectorizer",
+                "vectorizer",
+                {
+                    "columns": list(text_columns),
+                    "method": feature.text_encoding,
+                    "seed": self.runtime.contract.constraints.random_seed,
+                },
+            )
+        # Text goes through the categorical encoder only under the legacy 'categorical' choice.
+        encoded_roles = (
+            ("categorical", "ordinal", "text")
+            if feature.text_encoding == "categorical"
+            else ("categorical", "ordinal")
+        )
         categorical = sorted(
             column
             for column in available
-            if roles.get(column) in ("categorical", "ordinal", "text")
+            if roles.get(column) in encoded_roles
             and column not in feature.datetime_parts
             and column not in feature.binned
         )

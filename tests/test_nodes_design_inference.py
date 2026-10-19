@@ -314,6 +314,8 @@ async def test_approved_design_and_durable_initial_planner(
         "explicit",
         "pool",
         "interaction_type",
+        "text_column",
+        "lexicon",
     ],
 )
 async def test_candidate_set_valid_external_refusals(
@@ -351,6 +353,18 @@ async def test_candidate_set_valid_external_refusals(
         candidates[0]["features"]["interactions"] = [["x", "y"]]
     elif violation == "interaction_type":
         candidates[0]["features"]["interactions"] = [["x", "excluded"]]
+    elif violation == "text_column":
+        candidates[0]["features"]["text_encoding"] = "tfidf"
+    elif violation == "lexicon":
+        h.runtime = replace(
+            h.runtime,
+            contract=DataContract(
+                target=h.runtime.contract.target,
+                objective=h.runtime.contract.objective,
+                features=FeatureRules(roles={"x": "text"}),
+            ),
+        )
+        candidates[0]["features"]["text_encoding"] = "lexicon"
     elif violation == "explicit":
         h.runtime = replace(
             h.runtime,
@@ -378,6 +392,27 @@ async def test_candidate_set_valid_external_refusals(
         and output.error.error_class == "data"
     )
     assert len(tools.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_encoding_design_accepts_text_column(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _tools = await prepared(migrated_db, project, tmp_path, target_type="binary")
+    h.runtime = replace(
+        h.runtime,
+        contract=DataContract(
+            target=h.runtime.contract.target,
+            objective=h.runtime.contract.objective,
+            features=FeatureRules(roles={"x": "text"}),
+        ),
+    )
+    proposed = shortlist("logistic_regression").model_dump(mode="json")
+    proposed["candidate_set"]["candidates"][0]["features"]["text_encoding"] = "lexicon"
+    h.llm.responses[DesignDecision] = DesignDecision.model_validate(proposed)
+    output = await design(h)
+    assert output.status == "completed"
+    assert candidate_set_from_state(h.state).candidates[0].features.text_encoding == "lexicon"
 
 
 @pytest.mark.asyncio
