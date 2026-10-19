@@ -44,7 +44,7 @@ from statlab_contracts.contract import (
     PreprocessingRules,
     TargetSpec,
 )
-from statlab_contracts.envelope import Failure, ToolSuccess
+from statlab_contracts.envelope import ErrorClass, Failure, ToolSuccess
 from statlab_contracts.vocabulary import ParamValue, TargetType
 
 from tests.test_nodes_foundation import TEST, TRAIN, VALID, Harness, OfflineTools, harness
@@ -137,6 +137,8 @@ class DesignTools(OfflineTools):
         super().__init__(conn)
         self.registry = registry()
         self.converged = True
+        self.failure_class: ErrorClass = "data"
+        self.fail_once = False
 
     async def call(
         self,
@@ -152,7 +154,11 @@ class DesignTools(OfflineTools):
         if tool == self.cancel_tool:
             raise asyncio.CancelledError
         if tool == self.failure_tool:
-            raise ToolCallError(tool, Failure(error_class="data", message="fit refused"))
+            if self.fail_once:
+                self.failure_tool = None
+            raise ToolCallError(
+                tool, Failure(error_class=self.failure_class, message="fit refused")
+            )
         if tool == "list_estimators":
             return ToolSuccess(summary=self.registry, warnings=("Registry warning",))
         if tool == "assemble_inference_matrix":
@@ -670,7 +676,11 @@ async def test_inference_gate_refusal_cancellation_and_nonconvergence(
     h.state = h.state.model_copy(update={"mode": "autonomous"})
     tools.failure_tool = "fit_ols"
     refused = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
-    assert refused.error is not None and refused.error.error_class == "data"
+    assert refused.status == "skipped"
+    assert refused.skip_reason == (
+        "The inferential model could not be fitted (fit refused), so no coefficients are reported."
+    )
+    assert refused.artifacts == ()
     tools.failure_tool, tools.cancel_tool = None, "fit_ols"
     with pytest.raises(asyncio.CancelledError):
         await DesignInferenceExecutor(h.runtime)(h.invocation(5))
@@ -679,6 +689,57 @@ async def test_inference_gate_refusal_cancellation_and_nonconvergence(
     assert output.status == "completed" and any(
         "did not converge" in warning for warning in output.warnings
     )
+
+
+@pytest.mark.asyncio
+async def test_inference_refits_without_controls_then_skips(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await prepared(migrated_db, project, tmp_path)
+    await design(h)
+    h.llm.responses[InferenceDecision] = InferenceDecision(
+        model="ols",
+        predictors=("x", "excluded"),
+        reference_levels={"excluded": "a"},
+        rationale="Goal plus a control.",
+    )
+    tools.failure_tool, tools.fail_once = "fit_ols", True
+    refit = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
+    assert refit.status == "completed"
+    assert (
+        "Inferential fit with exploratory controls failed (fit refused); "
+        "refitted with the goal predictors x only"
+    ) in refit.warnings
+    assert [
+        (params["predictors"], params["reference_levels"])
+        for _, name, params in tools.calls
+        if name == "assemble_inference_matrix"
+    ][-2:] == [(["x", "excluded"], {"excluded": "a"}), (["x"], {})]
+    tools.calls.clear()
+    tools.failure_tool, tools.fail_once = "fit_ols", False
+    skipped = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
+    assert skipped.status == "skipped"
+    assert skipped.skip_reason == (
+        "The inferential model could not be fitted (fit refused), so no coefficients are reported."
+    )
+    assert sum(name == "fit_ols" for _, name, _ in tools.calls) == 2
+    assert not any(name == "coefficient_table" for _, name, _ in tools.calls)
+    tools.failure_tool, tools.fail_once, tools.failure_class = "fit_ols", False, "bug"
+    failed = await DesignInferenceExecutor(h.runtime)(h.invocation(5))
+    assert failed.status == "failed"
+    assert failed.error is not None and failed.error.error_class == "bug"
+    assert failed.error.message == "fit refused"
+
+
+def test_design_decision_lifts_nested_family_justifications() -> None:
+    payload = shortlist("linear_regression").model_dump(mode="json")
+    del payload["family_justifications"]
+    payload["candidate_set"]["family_justifications"] = {"linear": "Why three."}
+    assert DesignDecision.model_validate(payload).family_justifications == {"linear": "Why three."}
+    both = shortlist("linear_regression").model_dump(mode="json")
+    both["candidate_set"]["family_justifications"] = {"linear": "Nested."}
+    with pytest.raises(ValidationError):
+        DesignDecision.model_validate(both)
 
 
 @pytest.mark.asyncio

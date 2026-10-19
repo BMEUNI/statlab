@@ -183,6 +183,27 @@ class DesignDecision(Decision):
     candidate_set: CandidateSet
     family_justifications: dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_family_justifications(cls, data: object) -> object:
+        """Accept family_justifications nested in candidate_set, a common LLM shape (live S09,
+        chunk 85), instead of failing the step."""
+        if (
+            isinstance(data, dict)
+            and (nested := data.get("candidate_set"))
+            and isinstance(nested, dict)
+            and "family_justifications" in nested
+            and "family_justifications" not in data
+        ):
+            return {
+                **data,
+                "candidate_set": {
+                    key: value for key, value in nested.items() if key != "family_justifications"
+                },
+                "family_justifications": nested["family_justifications"],
+            }
+        return data
+
 
 class InferenceDecision(Decision):
     model: str = Field(min_length=1)

@@ -1,7 +1,7 @@
 ---
-status: in_progress
+status: completed
 dependencies: [83]
-completion_date: null
+completion_date: 2026-10-19
 implementation_notes: "interpretation drops unusable choices; grid accepts fixed params; two LLM repairs; S10/S11 match current behaviour"
 ---
 
@@ -188,3 +188,8 @@ PASS (`20261019T161733Z-offline`), offline S20 PASS 16/16 (`20261019T161846Z-off
 Main reviewed the source diff (matches recipe + addenda A-C). `make check` (`check84b.log`,
 temporary) exit 0: coverage 100% (TOTAL 13944 stmts, 0 missed, 3940 branches), mypy 213 files,
 Ruff clean, 222 files formatted. Live re-run of the failed scenarios follows.
+
+## Live re-run (2026-10-19)
+
+`integration/out/20261019T185155Z-live` ($0.3388): S04, S07, S10, S11, S15, S16, S18, S19, S20
+PASS. S12 and S09 failed on new causes, handled in chunk 85.

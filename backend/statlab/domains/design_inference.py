@@ -337,23 +337,68 @@ class DesignInferenceExecutor:
         entry, tool = self._validate_inference(invocation, approved, registry, problem)
         summary["decision"] = approved.model_dump(mode="json")
         split = shared_result(invocation.state, "data_splitting").summary
-        matrix_output = await self._call(
-            invocation,
-            evidence,
-            "assemble_inference_matrix",
-            {
-                "train": str(_ref(split, "train")),
-                "valid": str(_ref(split, "valid")),
-                "target": problem.target,
-                "predictors": list(approved.predictors),
-                "reference_levels": approved.model_dump(mode="json")["reference_levels"],
-            },
-        )
-        matrix, manifest = _artifact(matrix_output, "dataframe"), _artifact(matrix_output, "table")
-        params: dict[str, JsonValue] = {"matrix": str(matrix), "target": problem.target}
-        if entry.get("family") is not None:
-            params["family"] = entry["family"]
-        fit_output = await self._call(invocation, evidence, tool, params)
+        fixed = {column for goal in problem.inference_goals for column in goal.predictors}
+        attempts: list[InferenceDecision] = [approved]
+        if any(column not in fixed for column in approved.predictors):
+            attempts.append(
+                approved.model_copy(
+                    update={
+                        "predictors": tuple(
+                            column for column in approved.predictors if column in fixed
+                        ),
+                        "reference_levels": {
+                            column: level
+                            for column, level in approved.reference_levels.items()
+                            if column in fixed
+                        },
+                    }
+                )
+            )
+        reason = ""
+        # A refused fit is not fatal (chunk 85): refit without exploratory controls, else skip.
+        for attempt in attempts:
+            matrix_output = await self._call(
+                invocation,
+                evidence,
+                "assemble_inference_matrix",
+                {
+                    "train": str(_ref(split, "train")),
+                    "valid": str(_ref(split, "valid")),
+                    "target": problem.target,
+                    "predictors": list(attempt.predictors),
+                    "reference_levels": attempt.model_dump(mode="json")["reference_levels"],
+                },
+            )
+            matrix, manifest = (
+                _artifact(matrix_output, "dataframe"),
+                _artifact(matrix_output, "table"),
+            )
+            params: dict[str, JsonValue] = {"matrix": str(matrix), "target": problem.target}
+            if entry.get("family") is not None:
+                params["family"] = entry["family"]
+            try:
+                fit_output = await self._call(invocation, evidence, tool, params)
+            except ToolCallError as exc:
+                if exc.failure.error_class != "data":
+                    raise
+                reason = exc.failure.message
+                continue
+            if attempt is not approved:
+                evidence.warnings.append(
+                    f"Inferential fit with exploratory controls failed ({reason}); refitted with "
+                    f"the goal predictors {', '.join(attempt.predictors)} only"
+                )
+            break
+        else:
+            return NodeResult(
+                status="skipped",
+                summary={**summary, "tools": evidence.tools},
+                warnings=tuple(evidence.warnings),
+                skip_reason=(
+                    f"The inferential model could not be fitted ({reason}), so no coefficients "
+                    "are reported."
+                ),
+            )
         fit = _artifact(fit_output, "inferential_fit")
         coefficient = await self._call(
             invocation,
