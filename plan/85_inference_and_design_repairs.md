@@ -1,8 +1,8 @@
 ---
-status: in_progress
+status: completed
 dependencies: [84]
-completion_date: null
-implementation_notes: ""
+completion_date: 2026-10-19
+implementation_notes: "refused inferential fit refits on goal predictors, else skips; DesignDecision lifts nested family_justifications"
 ---
 
 # Chunk 85 — the last two live-suite failures (S12, S09)
@@ -156,3 +156,6 @@ reviewed the source diff (matches the recipe + addendum A). First `make check` e
 addendum A); second `make check` (`check85b.log`, temporary) exit 0: coverage 100% (TOTAL 13966
 stmts, 0 missed, 3950 branches), mypy 213 files, Ruff clean, 222 files formatted. Live re-run
 of S12/S09 follows.
+
+Live `integration/out/20261019T191846Z-live` ($0.0726): S12 PASS 26/26 (soft: x4 rejected, a
+data fact), S09 PASS 22/22.
