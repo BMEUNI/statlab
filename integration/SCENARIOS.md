@@ -101,6 +101,7 @@ The harness only proves the backend runs, so it buys no answer quality:
 | D4 `species` | 450 | multiclass `species` (3 classes) | `x1`..`x4` | class means differ on `x1`, `x3`; `x4` is pure noise |
 | D5 `sales` | 365 | continuous `units` | `date` (daily 2025), `promo`, `temperature` | promo adds +20 units; weekly pattern; upward trend |
 | D6 `visits` | 480 | binary `responded` | `patient_id` (80 patients × 6 visits), `age`, `dose`, `biomarker` | response driven by `dose` and `biomarker`; rows of one patient must never span splits |
+| D7 `reviews` | 600 | binary `positive` (0/1) | `review_id`, `app_category` (games/tools/social), `rating_count`, `review` (2–8 words, ~10% typos) | sentiment comes only from the review words; `app_category` and `rating_count` have NO effect |
 | R1 `adult` | 32,561 | binary `income` (`<=50K` / `>50K`, 24% positive) | UCI Adult / Census Income: age, workclass, fnlwgt, education, education_num, marital_status, occupation, relationship, race, sex, capital gain/loss, hours_per_week, native_country | real data, no planted truth; `?` missing tokens in workclass/occupation/native_country; 41-level native_country |
 | R2 `autompg` | 398 | continuous `mpg` | UCI Auto MPG: cylinders, displacement, horsepower, weight, acceleration, model_year, origin (1/2/3), car_name | real data; 6 `?` horsepower values; 305 distinct car names (high-cardinality text) |
 
@@ -256,6 +257,15 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   Autonomous.
 - **Expect:** as S01 with `rmse` in the report; imputation tools appear in `tool_calls`.
 - **Soft:** test rmse ≤ 5.0.
+
+### S20 — Text column: compare text methods (chunk 82)
+- **Input:** D7; `review` declared text; binary target `positive` (positive class `1`), metric
+  `f1`, stratified split, `review_id` excluded; candidate `logistic_regression`, inferential
+  `logit`, goal "Does app_category affect sentiment?" (`app_category`). Autonomous. Offline
+  hint: one logistic-regression candidate per text method (drop, lexicon, tfidf, hashed_chars).
+- **Expect:** completed, 4 candidates, champion, one test score, text tools used
+  (`fit_text_vectorizer`, `apply_text_vectorizer`, `drop_columns`), pipeline replay, manifest.
+- **Soft:** test f1 ≥ 0.7; category goal "not rejected".
 
 ## Offline UI stack
 

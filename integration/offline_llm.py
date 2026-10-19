@@ -15,6 +15,7 @@ from statlab_contracts.candidate import (
     CandidateSet,
     CandidateSpec,
     EstimatorSpec,
+    FeatureSpec,
     changed_dimensions,
 )
 from statlab_contracts.contract import DataContract
@@ -123,6 +124,43 @@ def _design(contract: DataContract, scenario: Scenario, user_text: str) -> dict[
         names = contract.modelling.candidates
     if not names:
         raise RuntimeError("offline provider: contract has no candidates")
+    encodings = scenario.offline.text_encodings
+    if encodings:
+        specs = [
+            CandidateSpec(
+                label=f"{names[0]} {encoding}",
+                rationale=f"Offline stand-in text method {encoding}.",
+                is_baseline=index == 0,
+                features=FeatureSpec(text_encoding=encoding),
+                estimator=EstimatorSpec(name=names[0]),
+            )
+            for index, encoding in enumerate(encodings)
+        ]
+        candidate_set = CandidateSet(
+            candidates=(
+                specs[0],
+                *(
+                    spec.model_copy(
+                        update={
+                            "varies_from_baseline": tuple(
+                                sorted(changed_dimensions(specs[0], spec))
+                            )
+                        }
+                    )
+                    for spec in specs[1:]
+                ),
+            )
+        )
+        return {
+            "rationale": RATIONALE,
+            "candidate_set": candidate_set.model_dump(mode="json"),
+            "family_justifications": {
+                "linear": (
+                    "Offline stand-in: the candidates differ only in the text method, "
+                    "so one family is the point."
+                )
+            },
+        }
     base = CandidateSpec(
         label=names[0],
         rationale=f"Offline stand-in candidate {names[0]}.",

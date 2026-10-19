@@ -917,3 +917,55 @@ test_scored = true
 
 [scenario.offline]
 reference_levels = {plan = "premium", region = "north"}
+
+[[scenario]]
+id = "S20"
+title = "Text column: compare text methods (course integration, chunk 82)"
+dataset = "reviews"
+mode = "autonomous"
+max_cost_usd = 0.40
+
+[scenario.contract.target]
+column = "positive"
+type = "binary"
+positive_class = 1
+
+[scenario.contract.features]
+id_columns = ["review_id"]
+roles = {review = "text"}
+
+[scenario.contract.objective]
+task = "classification"
+primary_metric = "f1"
+
+[[scenario.contract.objective.inference_goals]]
+question = "Does app_category affect sentiment?"
+predictors = ["app_category"]
+
+[scenario.contract.split]
+strategy = "stratified"
+seed = 42
+
+[scenario.contract.modelling]
+candidates = ["logistic_regression"]
+inferential_model = "logit"
+
+[scenario.expect]
+status = "completed"
+candidate_count = 4
+min_candidates_completed = 4
+no_gates = true
+champion = true
+test_scored = true
+pipeline_replay = true
+manifest = true
+tools_used = ["fit_text_vectorizer", "apply_text_vectorizer", "drop_columns"]
+
+[scenario.soft]
+metric_min = 0.7
+
+[scenario.soft.inference]
+"Does app_category affect sentiment?" = "not rejected"
+
+[scenario.offline]
+text_encodings = ["drop", "lexicon", "tfidf", "hashed_chars"]

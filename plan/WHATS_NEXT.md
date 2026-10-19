@@ -26,6 +26,13 @@ B7 plus B8 prove M8a and M8b, including shared inference overlapping real candid
 three identical split consumers, and exactly one selected champion test score. Routing/skills
 are M9 prerequisites; B9–B11 domain/control behavior still needs runtime acceptance.
 
+## Done 2026-10-19: chunk 82 (text columns, course integration)
+
+Candidates choose `features.text_encoding` (categorical default, drop, lexicon, tfidf,
+hashed_chars; PLAN D37). New tools `fit_text_vectorizer` / `apply_text_vectorizer`. Offline S20
+compares the four methods on synthetic app reviews. See [chunk 82](./82_text_features.md).
+Open: live S20 needs the user's explicit go-ahead; word vectors deferred.
+
 ## Done 2026-10-10: chunk 77 (time-ordered tables and predictions)
 
 Temporal split with forward-in-time CV, lag features, and predictions with a finished run's

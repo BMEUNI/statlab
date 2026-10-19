@@ -1,7 +1,7 @@
 ---
-status: in_progress
+status: completed
 dependencies: [81]
-completion_date: null
+completion_date: 2026-10-19
 implementation_notes: "82a text vectorizer tools; 82b candidate field, design checks, pipeline wiring; 82c offline app-review scenario"
 ---
 
@@ -520,9 +520,142 @@ Batch acceptance on `faf26e1` + this chunk's uncommitted diff: `make check` exit
 prints no summary line), coverage 100% (TOTAL 13932 stmts, 0 missed, 3940 branches, 0
 partial), mypy 213 files clean, Ruff check clean, 222 files formatted.
 
-## Stage 82c (outline)
+## Stage 82c (detailed spec) — offline app-review scenario S20
 
-Offline integration scenario: a synthetic app-review dataset (review text + rating count +
-category, binary sentiment target) in `integration/datasets.py` and `scenarios.toml`, the
-offline LLM proposing one candidate per text method; checks that the run completes and the
-comparison table has a row per method.
+Goal: prove end to end (real API, real MCP, offline stand-in LLM, no cost) that a run with a
+text column trains one candidate per text method, picks a champion, scores test once and
+replays `pipeline.py`. Non-goals: live run (needs the user's explicit go-ahead), changing the
+offline stand-in's behaviour for any other scenario, checks.py changes (existing `expect` keys
+suffice).
+
+Owned files: `integration/model.py`, `integration/datasets.py`, `integration/offline_llm.py`,
+`integration/scenarios.toml`, `integration/SCENARIOS.md`. Not alone: preserve others' edits.
+
+1. `integration/model.py`:
+   - `DatasetKey`: add `"reviews"` after `"visits"`.
+   - Import `TextEncoding` from `statlab_contracts.vocabulary`.
+   - `OfflineHints`: add `text_encodings: tuple[TextEncoding, ...] = ()` after
+     `revised_candidates`.
+2. `integration/datasets.py`: after `_visits`, add module constants and a generator:
+   - `_POSITIVE = ("great", "love", "excellent", "smooth", "helpful", "fast", "perfect",
+     "awesome")`, `_NEGATIVE = ("crash", "bug", "slow", "useless", "awful", "broken", "laggy",
+     "refund")`, `_NEUTRAL = ("app", "update", "phone", "screen", "version", "feature",
+     "account", "today")`, `_TYPOS = {"crash": "crashs", "great": "grate", "awful": "awfull"}`.
+   - `def _reviews() -> Table:` `rng = random.Random(107)` (same `noqa: S311` comment as its
+     neighbours); for `i` in `range(1, 601)`: `category = rng.choice(["games", "tools",
+     "social"])`; `rating_count = rng.randint(1, 5000)`; `positive = 1 if rng.random() < 0.5
+     else 0`; `own, other = (_POSITIVE, _NEGATIVE) if positive else (_NEGATIVE, _POSITIVE)`;
+     `words = [rng.choice(own) for _ in range(rng.randint(1, 3))]`; `if rng.random() < 0.25:
+     words.append(rng.choice(other))`; `words += [rng.choice(_NEUTRAL) for _ in
+     range(rng.randint(2, 4))]`; `words = [_TYPOS.get(word, word) if rng.random() < 0.1 else
+     word for word in words]`; `rng.shuffle(words)`; append `(f"R{i:04d}", category,
+     str(rating_count), " ".join(words), str(positive))`. Return `(("review_id",
+     "app_category", "rating_count", "review", "positive"), tuple(rows))`.
+   - `generate`: add `if key == "reviews": return _reviews()` after the `visits` branch.
+3. `integration/offline_llm.py` `_design`: add `FeatureSpec` to the candidate import. After
+   `names` is resolved and the empty check, insert: `encodings =
+   scenario.offline.text_encodings`; `if encodings:` build `specs = [CandidateSpec(label=
+   f"{names[0]} {encoding}", rationale=f"Offline stand-in text method {encoding}.",
+   is_baseline=index == 0, features=FeatureSpec(text_encoding=encoding),
+   estimator=EstimatorSpec(name=names[0])) for index, encoding in enumerate(encodings)]`; then
+   `candidate_set = CandidateSet(candidates=(specs[0], *(spec.model_copy(update=
+   {"varies_from_baseline": tuple(sorted(changed_dimensions(specs[0], spec)))}) for spec in
+   specs[1:])))`; `return {"rationale": RATIONALE, "candidate_set":
+   candidate_set.model_dump(mode="json")}`. The existing path below is unchanged.
+4. `integration/scenarios.toml`: append scenario:
+   ```
+   [[scenario]]
+   id = "S20"
+   title = "Text column: compare text methods (course integration, chunk 82)"
+   dataset = "reviews"
+   mode = "autonomous"
+   max_cost_usd = 0.40
+
+   [scenario.contract.target]
+   column = "positive"
+   type = "binary"
+   positive_class = 1
+
+   [scenario.contract.features]
+   id_columns = ["review_id"]
+   roles = {review = "text"}
+
+   [scenario.contract.objective]
+   task = "classification"
+   primary_metric = "f1"
+
+   [[scenario.contract.objective.inference_goals]]
+   question = "Does app_category affect sentiment?"
+   predictors = ["app_category"]
+
+   [scenario.contract.split]
+   strategy = "stratified"
+   seed = 42
+
+   [scenario.contract.modelling]
+   candidates = ["logistic_regression"]
+   inferential_model = "logit"
+
+   [scenario.expect]
+   status = "completed"
+   candidate_count = 4
+   min_candidates_completed = 4
+   no_gates = true
+   champion = true
+   test_scored = true
+   pipeline_replay = true
+   manifest = true
+   tools_used = ["fit_text_vectorizer", "apply_text_vectorizer", "drop_columns"]
+
+   [scenario.soft]
+   metric_min = 0.7
+
+   [scenario.soft.inference]
+   "Does app_category affect sentiment?" = "not rejected"
+
+   [scenario.offline]
+   text_encodings = ["drop", "lexicon", "tfidf", "hashed_chars"]
+   ```
+5. `integration/SCENARIOS.md` (in the row below, `\`` means a plain backtick; write no
+   backslashes): datasets table, after the D6 row: `| D7 \`reviews\` | 600 |
+   binary \`positive\` (0/1) | \`review_id\`, \`app_category\` (games/tools/social),
+   \`rating_count\`, \`review\` (2–8 words, ~10% typos) | sentiment comes only from the review
+   words; \`app_category\` and \`rating_count\` have NO effect |`. Scenarios: after the S19
+   entry (before `## Offline UI stack`) add `### S20 — Text column:
+   compare text methods (chunk 82)` with Input (D7, `review` declared text, f1, stratified,
+   offline hint: one logistic-regression candidate per text method drop/lexicon/tfidf/
+   hashed_chars), Expect (completed, 4 candidates, champion, one test score, text tools used,
+   pipeline replay, manifest), Soft (test f1 ≥ 0.7; category goal "not rejected"). Same bullet
+   style as S18/S19.
+
+Checks (implementer runs exactly these):
+- `.venv/bin/python -m ruff format` then `--check`, and `ruff check`, on the four Python files.
+- `.venv/bin/python -m mypy integration/model.py integration/datasets.py integration/offline_llm.py`
+- `.venv/bin/python -m integration.run_scenarios --llm offline --only S20` (redirect to a
+  scratchpad log; report the exit, the printed result folder, and its `summary.md` S20 row).
+- Same with `--llm offline --only S01` (regression check that the default offline design is
+  unchanged).
+
+Stop and report on any failed check or scenario (quote the failing check id and message from
+`summary.md`; do not edit expectations or other code to pass). Receipt: changed files,
+commands, exits, result folders, deviations.
+
+### Addendum 82c-A (family cap)
+
+First offline S20 run (`integration/out/20261019T151540Z-offline`) cancelled at
+experiment_design: "more than two candidates in family 'linear' need a family_justifications
+entry" (D28 cap; spec gap, main's). Correction: the offline text branch also returns
+`family_justifications = {"linear": "Offline stand-in: the candidates differ only in the text
+method, so one family is the point."}`. A live LLM is already told to justify families above two.
+
+## Stage 82c acceptance receipt (2026-10-19)
+
+Implementer: Ruff format/check and mypy on the three integration Python files exit 0 (after
+the addendum fix and a literal split for E501). Offline S20 PASS 17/17
+(`integration/out/20261019T151623Z-offline`, gitignored): four logistic-regression candidates,
+validation f1 drop 0.55, lexicon 0.81, tfidf 0.90, hashed_chars 0.94 (champion c_04, test f1
+0.9916); category goal "not rejected" (p 0.1988), matching the planted truth; `pipeline.py`
+replays `fit_text_vectorizer` on train and `apply_text_vectorizer` on test. Offline S01 PASS
+25/25 (`20261019T151659Z-offline`): default offline design unchanged. Main reviewed the diff and
+the S20 report. Main: `make typecheck lint` exit 0 (213 files, 222 formatted); product code
+unchanged since the 82a+82b `make check` acceptance, so no product gate rerun. No live run.

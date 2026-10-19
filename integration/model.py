@@ -9,9 +9,18 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from statlab.persistence.models import RunMode, RunStatus
 from statlab_contracts.gates import GateAction
+from statlab_contracts.vocabulary import TextEncoding
 
 DatasetKey = Literal[
-    "churn", "houses", "churn_dirty", "species", "sales", "visits", "adult", "autompg"
+    "churn",
+    "houses",
+    "churn_dirty",
+    "species",
+    "sales",
+    "visits",
+    "reviews",
+    "adult",
+    "autompg",
 ]
 
 
@@ -110,6 +119,7 @@ class Setup(_Frozen):
 class OfflineHints(_Frozen):
     reference_levels: dict[str, str] = {}
     revised_candidates: tuple[str, ...] = ()
+    text_encodings: tuple[TextEncoding, ...] = ()
     proposed_contract: dict[str, JsonValue] = {}
 
 

@@ -204,6 +204,30 @@ def _visits() -> Table:
     return ("patient_id", "age", "dose", "biomarker", "responded"), tuple(rows)
 
 
+_POSITIVE = ("great", "love", "excellent", "smooth", "helpful", "fast", "perfect", "awesome")
+_NEGATIVE = ("crash", "bug", "slow", "useless", "awful", "broken", "laggy", "refund")
+_NEUTRAL = ("app", "update", "phone", "screen", "version", "feature", "account", "today")
+_TYPOS = {"crash": "crashs", "great": "grate", "awful": "awfull"}
+
+
+def _reviews() -> Table:
+    rng = random.Random(107)  # noqa: S311 - synthetic data, not cryptographic.
+    rows: list[tuple[str, ...]] = []
+    for i in range(1, 601):
+        category = rng.choice(["games", "tools", "social"])
+        rating_count = rng.randint(1, 5000)
+        positive = 1 if rng.random() < 0.5 else 0
+        own, other = (_POSITIVE, _NEGATIVE) if positive else (_NEGATIVE, _POSITIVE)
+        words = [rng.choice(own) for _ in range(rng.randint(1, 3))]
+        if rng.random() < 0.25:
+            words.append(rng.choice(other))
+        words += [rng.choice(_NEUTRAL) for _ in range(rng.randint(2, 4))]
+        words = [_TYPOS.get(word, word) if rng.random() < 0.1 else word for word in words]
+        rng.shuffle(words)
+        rows.append((f"R{i:04d}", category, str(rating_count), " ".join(words), str(positive)))
+    return ("review_id", "app_category", "rating_count", "review", "positive"), tuple(rows)
+
+
 def fetch_zip(key: str) -> bytes:
     url, digest, _ = REAL_SOURCES[key]
     path = CACHE_DIR / f"{key}.zip"
@@ -289,6 +313,8 @@ def generate(key: DatasetKey) -> Table:
         return _sales()
     if key == "visits":
         return _visits()
+    if key == "reviews":
+        return _reviews()
     if key == "adult":
         return _adult()
     return _autompg()
