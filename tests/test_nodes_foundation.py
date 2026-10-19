@@ -104,6 +104,8 @@ class OfflineTools(ToolBoundary):
         self.roles: dict[str, JsonValue] = {"x": "numeric", "y": "boolean"}
         self.rows_dropped = 2
         self.x_dtype = "float64"
+        self.x_nulls = 0
+        self.extra_columns: dict[str, JsonValue] = {}
         self.id_candidates: list[JsonValue] = [{"column": "id"}]
         self.leak_suspects: list[JsonValue] = [{"column": "x"}]
         self.split_count = 3
@@ -146,12 +148,14 @@ class OfflineTools(ToolBoundary):
         if tool == "profile_schema":
             return ToolSuccess(
                 summary={
+                    "rows": 240,
                     "columns": {
-                        "x": {"dtype": self.x_dtype},
-                        "id": {"dtype": "str"},
-                        "excluded": {"dtype": "str"},
-                        "y": {"dtype": "bool"},
-                    }
+                        "x": {"dtype": self.x_dtype, "n_unique": 10, "n_null": self.x_nulls},
+                        "id": {"dtype": "str", "n_unique": 240, "n_null": 0},
+                        "excluded": {"dtype": "str", "n_unique": 3, "n_null": 0},
+                        "y": {"dtype": "bool", "n_unique": 2, "n_null": 0},
+                        **self.extra_columns,
+                    },
                 }
             )
         if tool == "summarize_target":
@@ -736,6 +740,50 @@ async def test_profile_keeps_usable_choices(foundation: Harness) -> None:
     ]
     assert len(categorical_calls) == 1 and categorical_calls[0]["columns"] == ["excluded"]
     assert not any(tool == "compute_correlations" for _, tool, _ in foundation.tools.calls)
+
+
+@pytest.mark.asyncio
+async def test_profile_drops_correlation_without_two_varying_columns(
+    foundation: Harness,
+) -> None:
+    foundation.tools.extra_columns = {"w": {"dtype": "float64", "n_unique": 1, "n_null": 0}}
+    foundation.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="one varying", correlations=("x", "w")
+    )
+    await foundation.advance(2)
+    result = await foundation.step()
+    assert result.status == "completed"
+    assert "ignored 2 profiling choice(s) that were not usable columns" in result.warnings
+    assert not any(tool == "compute_correlations" for _, tool, _ in foundation.tools.calls)
+
+
+@pytest.mark.asyncio
+async def test_profile_correlates_two_varying_columns(foundation: Harness) -> None:
+    foundation.tools.extra_columns = {"z": {"dtype": "int64", "n_unique": 5, "n_null": 0}}
+    foundation.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="two varying", correlations=("x", "z")
+    )
+    await foundation.advance(2)
+    result = await foundation.step()
+    assert result.status == "completed"
+    assert not any(warning.startswith("ignored") for warning in result.warnings)
+    correlation_calls = [
+        params for _, tool, params in foundation.tools.calls if tool == "compute_correlations"
+    ]
+    assert len(correlation_calls) == 1 and correlation_calls[0]["columns"] == ["x", "z"]
+
+
+@pytest.mark.asyncio
+async def test_profile_drops_plot_of_empty_column(foundation: Harness) -> None:
+    foundation.tools.x_nulls = 240
+    foundation.llm.responses[ProfileDecision] = ProfileDecision(
+        rationale="empty plot", plots=(ProfilePlot(kind="distribution", column="x"),)
+    )
+    await foundation.advance(2)
+    result = await foundation.step()
+    assert result.status == "completed"
+    assert "ignored 1 profiling choice(s) that were not usable columns" in result.warnings
+    assert not any(tool == "plot_distribution" for _, tool, _ in foundation.tools.calls)
 
 
 @pytest.mark.asyncio

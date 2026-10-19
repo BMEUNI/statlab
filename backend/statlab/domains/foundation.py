@@ -468,18 +468,27 @@ class FoundationExecutor:
         target: str,
     ) -> ProfileDecision:
         """Keep only usable column choices; drop the rest with a warning instead of
-        failing the step (chunk 80)."""
+        failing the step (chunk 80). A correlation request needs two varying numeric columns
+        and a plot a column that is not entirely empty (chunk 83)."""
         columns, numeric = self._profile_columns(schema)
+        counts = {
+            name: _object(columns[name], "profile column").get("n_unique") for name in numeric
+        }
+        varying = {name for name, n in counts.items() if isinstance(n, int) and n > 1}
+        rows = schema.get("rows")
         allowed = self.runtime.skill.node(invocation.spec.name).allowed
         dropped = 0
         update: dict[str, object] = {}
         for name, selected, tool, compatible in (
             ("numeric", decision.numeric, "summarize_numeric", numeric),
             ("categorical", decision.categorical, "summarize_categorical", set(columns) - numeric),
-            ("correlations", decision.correlations, "compute_correlations", numeric),
+            ("correlations", decision.correlations, "compute_correlations", varying),
             ("outliers", decision.outliers, "detect_outliers", numeric),
         ):
             usable = tuple(entry for entry in selected if entry in compatible)
+            if name == "correlations" and len(usable) < 2:
+                # compute_correlations needs two varying numeric columns (chunk 83).
+                usable = ()
             dropped += len(selected) - len(usable)
             if usable and tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")
@@ -489,8 +498,10 @@ class FoundationExecutor:
             tool = f"plot_{plot.kind}"
             if tool not in allowed:
                 raise _RefusalError(f"{tool} is unavailable in this node skill")
-            if plot.column not in columns or (
-                plot.kind == "target_relation" and plot.column == target
+            if (
+                plot.column not in columns
+                or (plot.kind == "target_relation" and plot.column == target)
+                or _object(columns[plot.column], "profile column").get("n_null") == rows
             ):
                 dropped += 1
             else:
