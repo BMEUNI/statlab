@@ -123,7 +123,7 @@ class CandidateTools(DesignTools):
         elif tool == "train_estimator":
             artifacts = (self.artifact("model"),)
         elif tool == "get_model_params":
-            summary = {"params": {"fit_intercept": False, "n_jobs": 1}}
+            summary = {"params": {"fit_intercept": False, "n_jobs": 1}, "feature_names": ["x"]}
         elif tool in ("predict", "predict_proba"):
             artifacts = (self.artifact("predictions"),)
         elif tool.startswith("score_"):

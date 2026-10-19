@@ -673,6 +673,7 @@ async def test_two_invalid_streams_raise_output_error_after_one_repair(
     stream_list = [
         FakeStream((chunk('{"text":""}'), chunk(None, usage=True))),
         FakeStream((chunk('{"text":""}'), chunk(None, usage=True))),
+        FakeStream((chunk('{"text":""}'), chunk(None, usage=True))),
     ]
     streams = iter(stream_list)
     prompts: list[object] = []
@@ -693,8 +694,8 @@ async def test_two_invalid_streams_raise_output_error_after_one_repair(
             output=StreamResult,
             sink=lambda text, reset: _record_sink(seen, text, reset),
         )
-    assert seen.count(("", True)) == 2
-    assert len(prompts) == len(_rows(conn)) == 2
+    assert seen.count(("", True)) == 3
+    assert len(prompts) == len(_rows(conn)) == 3
     assert "Repair the output" in str(prompts[1])
     assert all(stream.closed for stream in stream_list)
 

@@ -91,7 +91,7 @@ class LlmCallError(StatlabError):
 
 
 class LlmOutputError(LlmCallError):
-    """A response remained invalid after the single repair request."""
+    """A response remained invalid after the repair requests (two, chunk 84)."""
 
 
 class ToolNotAllowedError(StatlabError):

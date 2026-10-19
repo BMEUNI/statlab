@@ -195,7 +195,7 @@ async def test_setup_completion_rejects_two_invalid_answers_without_audit(
             messages=[{"role": "user", "content": "setup"}],
             output=Result,
         )
-    assert calls == 2 and _rows(conn) == before
+    assert calls == 3 and _rows(conn) == before
 
 
 @pytest.mark.asyncio
@@ -538,7 +538,7 @@ async def test_semantic_check_rejected_twice_is_output_error(
             check=check,
         )
     assert error.value.failure.field_errors == {"output": "never"}
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
@@ -830,7 +830,7 @@ async def test_second_invalid_answer_is_tool_param_without_foreign_text(
     assert error.value.error_class == "tool_param"
     assert error.value.retry_budget == 2
     assert error.value.failure.field_errors
-    assert len(_rows(conn)) == 2
+    assert len(_rows(conn)) == 3
 
 
 @pytest.mark.asyncio
@@ -1783,7 +1783,7 @@ async def test_request_recovery_does_not_restart_output_repair(
             output=Result,
             recovery=recovery,
         )
-    assert len(calls) == 3 and delays == [1.0]
+    assert len(calls) == 4 and delays == [1.0]
     assert calls[1]["messages"] == calls[2]["messages"]
     assert calls[0]["messages"] != calls[1]["messages"]
-    assert len(_rows(conn)) == 3
+    assert len(_rows(conn)) == 4

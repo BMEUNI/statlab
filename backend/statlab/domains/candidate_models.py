@@ -31,6 +31,7 @@ from statlab.domains.foundation import (
     _ref,
     _RefusalError,
     _rejecting,
+    _strings,
     problem_from_state,
     resolved_metric,
 )
@@ -46,6 +47,9 @@ CV_CAVEAT = (
 SELECTION_CAVEAT = (
     "Validation is used for candidate/parameter/threshold selection; validation scores "
     "and bootstrap intervals do not remove selection bias."
+)
+_COEFFICIENT_ESTIMATORS = frozenset(
+    {"linear_regression", "ridge", "lasso", "elastic_net", "logistic_regression"}
 )
 
 
@@ -75,8 +79,6 @@ def _validate_training(
     ):
         raise _RefusalError("initial direct parameters differ from approved candidate")
     if decision.method == "grid":
-        if decision.params:
-            raise _RefusalError("grid decision must put fixed parameters in param_grid")
         if decision.param_grid is None and estimator.params:
             raise _RefusalError("approved parameters require an explicit grid")
     elif decision.param_grid is not None:
@@ -555,6 +557,36 @@ class CandidateModelExecutor:
             )
         if problem.target_type == "multiclass" and problem.primary_metric == "brier":
             raise _RefusalError("multiclass Brier permutation scorer is unsupported")
+        features = set(
+            _strings(
+                _object(trained.get("model_summary"), "model summary").get("feature_names"),
+                "model features",
+            )
+        )
+        estimator = branch.spec.estimator
+        linear = estimator.name in _COEFFICIENT_ESTIMATORS and not estimator.calibrate
+        usable = decision.model_copy(
+            update={
+                "coefficients": decision.coefficients and linear,
+                "partial_dependence": tuple(
+                    c for c in decision.partial_dependence if c in features
+                ),
+                "error_by": tuple(c for c in decision.error_by if c in features),
+            }
+        )
+        dropped = (
+            int(decision.coefficients and not linear)
+            + len(decision.partial_dependence)
+            - len(usable.partial_dependence)
+            + len(decision.error_by)
+            - len(usable.error_by)
+        )
+        if dropped:
+            # Unusable choices are dropped, not fatal (chunk 84; chunk 80 pattern).
+            evidence.warnings.append(
+                f"ignored {dropped} interpretation choice(s) the model cannot use"
+            )
+        decision = usable
         importance = await self._call(
             invocation,
             evidence,
@@ -568,20 +600,6 @@ class CandidateModelExecutor:
         )
         diagnostics: dict[str, JsonValue] = {"permutation_importance": importance.summary}
         if decision.coefficients:
-            if (
-                branch.spec.estimator.name
-                not in (
-                    "linear_regression",
-                    "ridge",
-                    "lasso",
-                    "elastic_net",
-                    "logistic_regression",
-                )
-                or branch.spec.estimator.calibrate
-            ):
-                raise _RefusalError(
-                    "coefficient importance requires supported uncalibrated linear estimator"
-                )
             coefficients = await self._call(
                 invocation,
                 evidence,

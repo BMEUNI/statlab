@@ -245,7 +245,12 @@ async def test_draft_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     async with _open_assistant_api(tmp_path, monkeypatch, replies) as (client, _, _, project, _):
         dataset_id = await upload(client, str(project["id"]))
         replies.extend(
-            [{"reply": "ok", "action": "set_target", "target": "a"}, "not json", "not json"]
+            [
+                {"reply": "ok", "action": "set_target", "target": "a"},
+                "not json",
+                "not json",
+                "not json",
+            ]
         )
         response = await turn(client, "a", {"project_id": project["id"], "dataset_id": dataset_id})
         assert response.status_code == 200

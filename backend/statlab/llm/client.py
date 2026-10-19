@@ -11,7 +11,7 @@ import sqlite3
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Protocol
+from typing import Final, Protocol
 
 from pydantic import BaseModel, JsonValue, ValidationError
 from pydantic_core import from_json
@@ -39,6 +39,9 @@ from statlab.persistence.repository import record_llm_call
 _LOGGER = logging.getLogger(__name__)
 _TRANSCRIPT = logging.getLogger("statlab.llm.transcript")
 _REQUEST_TIMEOUT = 180
+_REPAIRS: Final = 2
+"""An invalid answer is repaired up to twice (chunk 84): a repair often fixes one
+error and makes another."""
 
 
 def _without_trailing_closers(content: str) -> str:
@@ -118,7 +121,7 @@ class LlmClient:
         recovery: CallRecovery | None = None,
         check: Callable[[T], None] | None = None,
     ) -> T:
-        """Return a validated model, repairing one invalid response exactly once."""
+        """Return a validated model, repairing an invalid response up to twice."""
         _verify_execution(conn, run_id, node_execution_id)
 
         return await self._complete(
@@ -216,11 +219,11 @@ class LlmClient:
 
         prior_content = ""
         validation_errors: dict[str, str] = {}
-        repaired = False
+        repairs = 0
         while True:
             request_messages = (
                 _repair_messages(base_messages, prior_content, validation_errors)
-                if repaired
+                if repairs
                 else base_messages
             )
 
@@ -245,7 +248,7 @@ class LlmClient:
                 node_execution_id or "-",
                 output.__name__,
                 model,
-                2 if repaired else 1,
+                repairs + 1,
                 _render_messages(request_messages),
             )
             response = await request() if recovery is None else await recovery(request)
@@ -255,7 +258,7 @@ class LlmClient:
                 run_id or "setup",
                 node_execution_id or "-",
                 output.__name__,
-                2 if repaired else 1,
+                repairs + 1,
                 prior_content,
             )
             try:
@@ -272,19 +275,19 @@ class LlmClient:
                     run_id or "setup",
                     node_execution_id or "-",
                     output.__name__,
-                    2 if repaired else 1,
+                    repairs + 1,
                     json.dumps(validation_errors, sort_keys=True),
                 )
-                if repaired:
+                if repairs == _REPAIRS:
                     raise LlmOutputError(
                         Failure(
                             error_class="tool_param",
-                            message="LLM output remained invalid after one repair",
+                            message="LLM output remained invalid after two repairs",
                             field_errors=validation_errors,
                         ),
                         cause=exc,
                     ) from exc
-                repaired = True
+                repairs += 1
             except Exception as exc:
                 raise LlmCallError(
                     Failure(error_class="bug", message="LLM output validation failed"),

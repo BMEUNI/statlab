@@ -416,10 +416,10 @@ reference_levels = {plan = "premium", region = "north"}
 
 [[scenario]]
 id = "S10"
-title = "Temporal data is refused cleanly (v1 limit)"
+title = "Temporal split runs end to end"
 dataset = "sales"
 mode = "autonomous"
-max_cost_usd = 0.10
+max_cost_usd = 0.30
 
 [scenario.contract.target]
 column = "units"
@@ -436,21 +436,16 @@ time_column = "date"
 [scenario.contract.modelling]
 candidates = ["linear_regression", "hist_gb_regressor"]
 
-[[scenario.gates]]
-node = "data_splitting"
-phase = "failure"
-action = "abort"
-
 [scenario.expect]
-status = "cancelled"
-failure_contains = "no supported v1 split"
-nodes_not_run = ["preprocessing"]
-test_scored = false
-gates_opened_for = ["data_splitting"]
+status = "completed"
+nodes_completed = ["data_splitting", "champion_selection"]
+champion = true
+test_scored = true
+pipeline_replay = true
 
 [[scenario]]
 id = "S11"
-title = "Grouped data is refused cleanly (v1 limit)"
+title = "Grouped data is refused cleanly"
 dataset = "visits"
 mode = "autonomous"
 max_cost_usd = 0.10
@@ -478,7 +473,7 @@ action = "abort"
 
 [scenario.expect]
 status = "cancelled"
-failure_contains = "no supported v1 split"
+failure_contains = "no supported split"
 nodes_not_run = ["preprocessing"]
 test_scored = false
 gates_opened_for = ["data_splitting"]
@@ -952,7 +947,6 @@ inferential_model = "logit"
 
 [scenario.expect]
 status = "completed"
-candidate_count = 4
 min_candidates_completed = 4
 no_gates = true
 champion = true

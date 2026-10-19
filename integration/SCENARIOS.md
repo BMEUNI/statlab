@@ -186,19 +186,17 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   test set has been scored N time(s) in prior runs"); child inherits shared results before
   `experiment_design` (no execution of intake..data_splitting in the child).
 
-### S10 — Temporal data is refused cleanly (v1 limit)
+### S10 — Temporal split runs end to end
 - **Input:** D5; target `units` continuous, metric `mae`, split strategy `temporal`, time column
   `date`, candidates `linear_regression`, `hist_gb_regressor`. Autonomous.
-- **Expect (by design, v1 has no temporal split):** `data_splitting` refuses with a data-class
-  error containing "temporal/grouped dependence has no supported v1 split". In autonomous mode a
-  refusal escalates to a failure gate (PLAN §8: "no gates except escalation") offering
-  `abort`/`rewind`; the harness answers `abort`, so the run ends `cancelled`. No candidate
-  executions; no test scoring; no ERROR log (a designed refusal is not a crash).
+- **Expect:** the temporal split (chunk 77) orders train/valid/test by `date`; the run
+  completes with a champion, one test score and a replayable `pipeline.py`.
 
-### S11 — Grouped data is refused cleanly (v1 limit)
+### S11 — Grouped data is refused cleanly
 - **Input:** D6; binary `responded`, metric `roc_auc`, split `grouped`, group column
   `patient_id`, candidates `logistic_regression`, `random_forest_classifier`. Autonomous.
-- **Expect:** same as S10 (designed refusal at `data_splitting`, failure gate, `abort` → `cancelled`).
+- **Expect:** `data_splitting` refuses with a data-class error containing "no supported split";
+  failure gate, `abort` → `cancelled`; no candidate executions, no test scoring.
 
 ### S12 — Multiclass
 - **Input:** D4; target `species` multiclass, metric `balanced_accuracy`, stratified,
@@ -263,7 +261,7 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   `f1`, stratified split, `review_id` excluded; candidate `logistic_regression`, inferential
   `logit`, goal "Does app_category affect sentiment?" (`app_category`). Autonomous. Offline
   hint: one logistic-regression candidate per text method (drop, lexicon, tfidf, hashed_chars).
-- **Expect:** completed, 4 candidates, champion, one test score, text tools used
+- **Expect:** completed, at least 4 completed candidates (offline proposes exactly one per text method; a live LLM may add more), champion, one test score, text tools used
   (`fit_text_vectorizer`, `apply_text_vectorizer`, `drop_columns`), pipeline replay, manifest.
 - **Soft:** test f1 ≥ 0.7; category goal "not rejected".
 

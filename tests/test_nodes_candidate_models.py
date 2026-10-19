@@ -468,10 +468,6 @@ async def test_training_refusals(
     )
     _failed(await _run(h, 8), "initial direct parameters differ from approved candidate")
     h.llm.responses[TrainingDecision] = TrainingDecision(
-        rationale="Grid with fixed params", method="grid", params={"fit_intercept": True}
-    )
-    _failed(await _run(h, 8), "grid decision must put fixed parameters in param_grid")
-    h.llm.responses[TrainingDecision] = TrainingDecision(
         rationale="Grid without explicit grid", method="grid"
     )
     _failed(await _run(h, 8), "approved parameters require an explicit grid")
@@ -489,6 +485,16 @@ async def test_training_refusals(
     )
     names = [name for _, name, _ in tools.calls]
     assert "train_estimator" not in names and "tune_estimator" not in names
+    h.llm.responses[TrainingDecision] = TrainingDecision(
+        rationale="Grid with fixed params",
+        method="grid",
+        params={"fit_intercept": True},
+        param_grid={"positive": (True, False)},
+    )
+    accepted = await _run(h, 8)
+    assert accepted.status == "completed"
+    tuned = [params for _, name, params in tools.calls if name == "tune_estimator"]
+    assert tuned[-1]["param_grid"] == {"fit_intercept": [True], "positive": [True, False]}
     check = h.llm.checks[TrainingDecision]
     assert check(TrainingDecision(rationale="r")) is None
     with pytest.raises(DecisionRejectedError, match="initial direct parameters differ"):
@@ -691,9 +697,10 @@ async def test_interpretation_guided_skip_coefficients_and_unscaled_pdp(
     h.llm.responses[InterpretationDecision] = InterpretationDecision(
         rationale="Coefficients", coefficients=True
     )
-    _failed(
-        await _run(h, 10), "coefficient importance requires supported uncalibrated linear estimator"
-    )
+    dropped = await _run(h, 10)
+    assert dropped.status == "completed"
+    assert "ignored 1 interpretation choice(s) the model cannot use" in dropped.warnings
+    assert not any(name == "coefficient_importance" for _, name, _ in tools.calls)
     h.llm.responses[InterpretationDecision] = InterpretationDecision(
         rationale="PDP", partial_dependence=("x",)
     )
@@ -701,6 +708,30 @@ async def test_interpretation_guided_skip_coefficients_and_unscaled_pdp(
     pdp = [params for _, name, params in tools.calls if name == "partial_dependence"]
     assert len(pdp) == 1
     assert set(pdp[0]) == {"model", "frame", "column"}
+
+
+@pytest.mark.asyncio
+async def test_interpretation_drops_columns_the_model_does_not_have(
+    migrated_db: sqlite3.Connection,
+    project: ProjectRow,
+    tmp_path: Path,
+) -> None:
+    h, tools = await candidate_harness(migrated_db, project, tmp_path)
+    await prepare_candidate(h)
+    await _run_save(h, 8)
+    await _run_save(h, 9)
+    h.llm.responses[InterpretationDecision] = InterpretationDecision(
+        rationale="Raw columns", partial_dependence=("x", "plan"), error_by=("region",)
+    )
+    result = await _run(h, 10)
+    assert result.status == "completed"
+    assert "ignored 2 interpretation choice(s) the model cannot use" in result.warnings
+    assert [
+        params["column"] for _, name, params in tools.calls if name == "partial_dependence"
+    ] == ["x"]
+    assert not any(name == "analyze_errors" for _, name, _ in tools.calls)
+    decision = result.summary["decision"]
+    assert isinstance(decision, dict) and decision["error_by"] == []
 
 
 @pytest.mark.asyncio
