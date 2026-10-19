@@ -36,3 +36,6 @@ integration/out/
 integration/.cache/
 .playwright-mcp/
 /documents/test_dataframes/
+
+# BME course slides: no publication outside BME
+documents/integrated_course/
