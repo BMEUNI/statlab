@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef
+from statlab_contracts.candidate import CandidateSpec
 from statlab_contracts.layout import RunPaths
 from statlab_contracts.vocabulary import SplitRole
 
@@ -179,7 +180,7 @@ def validate_checkpoint_ownership(
                 if (
                     candidate is None
                     or candidate["run_id"] != execution["run_id"]
-                    or candidate["spec_json"] != branch.spec.model_dump_json()
+                    or CandidateSpec.model_validate_json(candidate["spec_json"]) != branch.spec
                 ):
                     raise PersistenceError("checkpoint candidate ownership mismatch")
         retained = tuple(get_artifact(conn, str(ref)) for ref in sorted(checkpoint.retained_refs))

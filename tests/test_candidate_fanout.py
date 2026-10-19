@@ -1057,9 +1057,23 @@ async def test_checkpoint_candidate_spec_tamper_is_rejected(world: World) -> Non
     )
     assert state.status == "completed"
     validate_checkpoint_ownership(world.conn, state.run_id, state)
+    rows = world.conn.execute(
+        "SELECT spec_json FROM candidates WHERE run_id = ?", (state.run_id,)
+    ).fetchall()
+    assert len(rows) == 1
+    original = rows[0]["spec_json"]
     with transaction(world.conn):
         world.conn.execute(
-            "UPDATE candidates SET spec_json = '{}' WHERE run_id = ?", (state.run_id,)
+            "UPDATE candidates SET spec_json = json_set(spec_json, '$.label', 'tampered') "
+            "WHERE run_id = ?",
+            (state.run_id,),
         )
     with pytest.raises(PersistenceError, match="checkpoint candidate ownership mismatch"):
         validate_checkpoint_ownership(world.conn, state.run_id, state)
+    with transaction(world.conn):
+        world.conn.execute(
+            "UPDATE candidates SET spec_json = json_remove(?, '$.features.text_encoding') "
+            "WHERE run_id = ?",
+            (original, state.run_id),
+        )
+    validate_checkpoint_ownership(world.conn, state.run_id, state)

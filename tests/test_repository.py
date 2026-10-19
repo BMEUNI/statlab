@@ -929,6 +929,28 @@ def test_candidate_wave_identity_and_status(
     )
     with pytest.raises(PersistenceError, match="identity"):
         ensure_candidate(migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=1)
+    with transaction(migrated_db):
+        migrated_db.execute(
+            "UPDATE candidates SET spec_json = json_remove(spec_json, '$.features.text_encoding') "
+            "WHERE id = ?",
+            (created.id,),
+        )
+    legacy_row = migrated_db.execute(
+        "SELECT spec_json FROM candidates WHERE id = ?", (created.id,)
+    ).fetchone()
+    assert "text_encoding" not in legacy_row["spec_json"]
+    assert (
+        ensure_candidate(migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=2).id
+        == created.id
+    )
+    with pytest.raises(PersistenceError, match="identity"):
+        ensure_candidate(
+            migrated_db,
+            candidate_id=created.id,
+            run_id=run.id,
+            spec=spec.model_copy(update={"label": "Other"}),
+            wave=2,
+        )
     update_candidate_status(migrated_db, created.id, "completed")
     updated = ensure_candidate(
         migrated_db, candidate_id=created.id, run_id=run.id, spec=spec, wave=2

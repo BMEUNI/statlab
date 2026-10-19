@@ -885,9 +885,11 @@ def ensure_candidate(
                 row = conn.execute(
                     "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
                 ).fetchone()
+            # Parsed, not string, comparison: an added spec field with a default matches rows
+            # saved before it (chunk 86).
             elif (
                 row["run_id"] != run_id
-                or row["spec_json"] != spec.model_dump_json()
+                or CandidateSpec.model_validate_json(row["spec_json"]) != spec
                 or row["wave"] != wave
             ):
                 raise PersistenceError("candidate identity mismatch")
