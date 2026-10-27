@@ -36,6 +36,7 @@ from statlab.storage import create_artifact
 from statlab_contracts.artifacts import ArtifactKind, ArtifactMeta, ArtifactRef
 from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
 from statlab_contracts.envelope import Failure, ToolFailure, ToolSuccess
+from statlab_contracts.reporting import ReportSection
 from statlab_contracts.vocabulary import TargetType
 
 from tests.test_nodes_candidate_pipeline import (
@@ -386,6 +387,9 @@ async def test_champion_selects_before_exact_replay_and_one_task_score(
     assert report["coefficient_table"] is None
     assert "not comparable" in str(report["sections"])
     assert "Data quality" not in str(report["sections"])
+    assert "Number check" not in str(report["sections"])
+    assert "Earlier runs used when designing candidates: none." in str(report["sections"])
+    assert output.summary["grounding"] == {"checked_sections": 0, "removed": []}
     assert output.summary["candidate_id"] == "c_01"
 
 
@@ -453,6 +457,106 @@ async def test_report_lists_data_quality_checks_and_fixes(
     assert "x" * 39 + "…" in body
     assert "and 2 more" in body
     assert line in body
+
+
+@pytest.mark.asyncio
+async def test_report_cuts_section_numbers_missing_from_evidence(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    h.llm.responses[ChampionChoice] = ChampionChoice(
+        candidate_id="c_01",
+        rationale="Validation and simplicity",
+        sections=(
+            ReportSection(
+                heading="Why c_01",
+                body="c_01 was simpler. Its test AUC was 0.987654. Two candidates competed.",
+            ),
+            ReportSection(heading="Gain of 98.7654%", body="x"),
+        ),
+    )
+    output = await ChampionExecutor(h.runtime)(tail_invocation(h))
+    assert output.status == "completed"
+    report = next(arguments for _, name, arguments in tools.calls if name == "assemble_report")
+    sections = report["sections"]
+    assert isinstance(sections, list)
+    assert sections[0] == {
+        "heading": "Why c_01",
+        "body": "c_01 was simpler. Two candidates competed.",
+    }
+    assert "Gain of 98.7654%" not in str(sections)
+    last = sections[-1]
+    assert isinstance(last, dict)
+    assert "Number check: 2 sentence(s) were cut" in str(last["body"])
+    assert output.summary["grounding"] == {
+        "checked_sections": 2,
+        "removed": ["Its test AUC was 0.987654.", "heading: Gain of 98.7654%"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_report_confirms_grounded_sections(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    h.llm.responses[ChampionChoice] = ChampionChoice(
+        candidate_id="c_01",
+        rationale="Validation and simplicity",
+        sections=(ReportSection(heading="Why c_01", body="c_01 was simpler."),),
+    )
+    output = await ChampionExecutor(h.runtime)(tail_invocation(h))
+    assert output.status == "completed"
+    report = next(arguments for _, name, arguments in tools.calls if name == "assemble_report")
+    sections = report["sections"]
+    assert isinstance(sections, list)
+    assert sections[0] == {"heading": "Why c_01", "body": "c_01 was simpler."}
+    last = sections[-1]
+    assert isinstance(last, dict)
+    assert "Number check: every number in the LLM-written sections appears" in str(last["body"])
+    assert output.summary["grounding"] == {"checked_sections": 1, "removed": []}
+
+
+@pytest.mark.asyncio
+async def test_report_names_earlier_runs_the_design_used(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, tools = await champion_harness(migrated_db, project, tmp_path)
+    boundary = next(
+        item for item in reversed(h.state.shared_results) if item.node_name == "experiment_design"
+    )
+    decision = boundary.result.summary["decision"]
+    assert isinstance(decision, dict)
+    replacement = BoundaryResult(
+        node_name=boundary.node_name,
+        execution_id=boundary.execution_id,
+        result=boundary.result.model_copy(
+            update={
+                "summary": {
+                    **boundary.result.summary,
+                    "decision": {**decision, "memory_used": ["r_old", 3]},
+                }
+            }
+        ),
+    )
+    h.state = h.state.model_copy(
+        update={
+            "shared_results": tuple(
+                replacement if item is boundary else item for item in h.state.shared_results
+            )
+        }
+    )
+    output = await ChampionExecutor(h.runtime)(tail_invocation(h))
+    assert output.status == "completed"
+    report = next(arguments for _, name, arguments in tools.calls if name == "assemble_report")
+    sections = report["sections"]
+    assert isinstance(sections, list)
+    last = sections[-1]
+    assert isinstance(last, dict)
+    body = str(last["body"])
+    line = "Earlier runs used when designing candidates: r_old."
+    assert line in body
+    if "Number check" in body:
+        assert body.index(line) < body.index("Number check")
 
 
 @pytest.mark.asyncio

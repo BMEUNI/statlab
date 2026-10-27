@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 
 from pydantic import JsonValue, ValidationError
 from statlab_contracts.artifacts import ArtifactRef
@@ -26,6 +27,7 @@ from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, ToolCallError
 from statlab.graph.engine import NodeInvocation
 from statlab.graph.state import RunState
+from statlab.persistence.models import MemoryRow
 
 VARIATION_RULE: str = (
     "varies_from_baseline lists exactly the dimensions in which a candidate differs from the "
@@ -34,6 +36,16 @@ VARIATION_RULE: str = (
     "params dict is not identical to the baseline's params dict, even across estimators. "
     "Estimator params use only that estimator's tunable keys."
 )
+
+
+def _known_runs(decision: DesignDecision, memory: Sequence[MemoryRow]) -> DesignDecision:
+    """Keep only memory_used IDs that are in this run's memory snapshot (chunk 88);
+    unknown IDs are dropped, not fatal (chunk 84 pattern)."""
+    known = {row.source_run_id for row in memory if row.source_run_id is not None}
+    used = tuple(dict.fromkeys(run for run in decision.memory_used if run in known))
+    if used == decision.memory_used:
+        return decision
+    return decision.model_copy(update={"memory_used": used})
 
 
 def candidate_set_from_state(state: RunState) -> CandidateSet:
@@ -233,12 +245,15 @@ class DesignInferenceExecutor:
             "features.text_encoding applies only to text-role columns: 'categorical' (default) "
             "encodes them like categories, 'drop' removes them, 'lexicon' (classification only), "
             "'tfidf' and 'hashed_chars' turn them into numeric columns; when a text column "
-            "exists, compare text methods as separate candidates. " + VARIATION_RULE,
+            "exists, compare text methods as separate candidates. "
+            "List in memory_used the source_run_id of each earlier run in memory that shaped "
+            "this shortlist. " + VARIATION_RULE,
             check=_rejecting(
                 lambda d: self.validate_design(invocation, d, registry.summary, problem)
             ),
         )
         self.validate_design(invocation, decision, registry.summary, problem)
+        decision = _known_runs(decision, self.runtime.memory)
         summary: dict[str, JsonValue] = {
             "decision": decision.model_dump(mode="json"),
             "candidate_set": decision.candidate_set.model_dump(mode="json"),
@@ -248,6 +263,7 @@ class DesignInferenceExecutor:
         if approved is None:
             return evidence.result("awaiting_user", summary)
         self.validate_design(invocation, approved, registry.summary, problem)
+        approved = _known_runs(approved, self.runtime.memory)
         summary.update(
             decision=approved.model_dump(mode="json"),
             candidate_set=approved.candidate_set.model_dump(mode="json"),

@@ -28,6 +28,7 @@ from statlab.domains.foundation import (
     problem_from_state,
     shared_result,
 )
+from statlab.domains.grounding import ground_sections
 from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
@@ -168,6 +169,61 @@ def eligible_candidates(
     return tuple(eligible), excluded
 
 
+def _selection_evidence(
+    branches: Sequence[CandidateProgress],
+    comparison: dict[str, JsonValue],
+    ranking: dict[str, JsonValue],
+    excluded: dict[str, JsonValue],
+    waves: int,
+) -> tuple[JsonValue, ...]:
+    """The evidence the champion decision sees; also the grounding source for its sections (D38)."""
+    return (
+        comparison,
+        ranking,
+        {
+            "candidates": [
+                {
+                    "id": branch.public_id,
+                    "methodology": branch.spec.model_dump(mode="json"),
+                    "wave": branch.wave,
+                    "retune_count": branch.retune_count,
+                    "validation": candidate_result(branch, "model_evaluation").summary,
+                }
+                for branch in branches
+            ],
+            "excluded": excluded,
+            "n_waves": waves,
+            "selection_bias": SELECTION_CAVEAT,
+            "fit_timing": TIMING_CAVEAT,
+        },
+    )
+
+
+def _earlier_runs(state: RunState) -> str:
+    """Caveat line naming the earlier runs the design used (chunk 88)."""
+    boundary = _completed(state, "experiment_design")
+    design = boundary.summary.get("decision") if boundary is not None else None
+    used = design.get("memory_used") if isinstance(design, dict) else None
+    names = [run for run in used if isinstance(run, str)] if isinstance(used, list) else []
+    listed = ", ".join(names) if names else "none"
+    return f"\n\nEarlier runs used when designing candidates: {listed}."
+
+
+def _number_check(checked: int, removed: int) -> str:
+    """Caveat line stating how many LLM-written sentences were cut for ungrounded numbers."""
+    if checked == 0:
+        return ""
+    if removed == 0:
+        return (
+            "\n\nNumber check: every number in the LLM-written sections appears in the run's "
+            "validation evidence."
+        )
+    return (
+        f"\n\nNumber check: {removed} sentence(s) were cut from the LLM-written sections because "
+        "their numbers do not appear in the run's validation evidence."
+    )
+
+
 class ChampionExecutor:
     def __init__(self, runtime: DomainRuntime) -> None:
         self.runtime = runtime
@@ -280,31 +336,15 @@ class ChampionExecutor:
             choice = await self.runtime.decide(
                 invocation,
                 ChampionChoice,
-                evidence=(
-                    comparison.summary,
-                    ranked.summary,
-                    {
-                        "candidates": [
-                            {
-                                "id": branch.public_id,
-                                "methodology": branch.spec.model_dump(mode="json"),
-                                "wave": branch.wave,
-                                "retune_count": branch.retune_count,
-                                "validation": candidate_result(branch, "model_evaluation").summary,
-                            }
-                            for branch in branches
-                        ],
-                        "excluded": excluded,
-                        "n_waves": state.wave,
-                        "selection_bias": SELECTION_CAVEAT,
-                        "fit_timing": TIMING_CAVEAT,
-                    },
+                evidence=_selection_evidence(
+                    branches, comparison.summary, ranked.summary, excluded, state.wave
                 ),
                 question="Choose a checkpointed public candidate ID from eligible "
                 "validation ranking. "
                 "Use observed validation/CIs, complexity and interpretability only. Never use test "
                 "or fit timing. Narrative sections explain methodology and caveats; do not invent "
-                "numbers, a test outcome or a different winner.",
+                "numbers, a test outcome or a different winner. Every number in a section must be "
+                "copied from this evidence; sentences with other numbers are cut from the report.",
             )
             self._chosen(branches, choice, ranked)
             approved = await self.runtime.approve(invocation, choice, tuple(evidence.tools))
@@ -427,12 +467,25 @@ class ChampionExecutor:
             and row.pruned_at is None
             and self.runtime.paths.artifact(ArtifactRef(ref), "plot").is_file()
         ]
+        grounding = ground_sections(
+            choice.sections,
+            (
+                *_selection_evidence(
+                    branches, comparison_summary, ranked.summary, excluded, state.wave
+                ),
+                *(boundary.result.summary for boundary in state.shared_results),
+                self.runtime.contract.model_dump(mode="json"),
+                *(row.value() for row in self.runtime.memory),
+            ),
+        )
         caveats = ReportSection(
             heading="Selection and execution caveats",
             body=f"{SELECTION_CAVEAT}\n\n{TIMING_CAVEAT}\n\n"
             f"Search waves: {state.wave}. Candidate retunes: "
             + ", ".join(f"{item.public_id}={item.retune_count}" for item in state.branches)
-            + f". Excluded branches: {json.dumps(excluded, sort_keys=True)}.",
+            + f". Excluded branches: {json.dumps(excluded, sort_keys=True)}."
+            + _earlier_runs(state)
+            + _number_check(len(choice.sections), len(grounding.removed)),
         )
         report = await self._call(
             invocation,
@@ -447,7 +500,7 @@ class ChampionExecutor:
                 "plots": plots,
                 "sections": [
                     section.model_dump(mode="json")
-                    for section in (*choice.sections, *_quality_sections(state), caveats)
+                    for section in (*grounding.sections, *_quality_sections(state), caveats)
                 ],
             },
             trusted={"prior_test_scorings": prior, "n_waves": state.wave},
@@ -464,6 +517,10 @@ class ChampionExecutor:
                 "test_score": str(test_score),
                 "test_metrics": scored.summary,
                 "report": report.summary,
+                "grounding": {
+                    "checked_sections": len(choice.sections),
+                    "removed": list(grounding.removed),
+                },
                 "comparison": comparison_summary,
                 "ranking": ranked.summary,
                 "prior_test_scorings": prior,

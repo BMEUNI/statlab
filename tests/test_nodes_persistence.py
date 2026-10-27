@@ -14,11 +14,11 @@ from pydantic import BaseModel, JsonValue, TypeAdapter
 from statlab.domains.base import NodeResult
 from statlab.domains.champion import ChampionExecutor
 from statlab.domains.decisions import PersistenceDecision
-from statlab.domains.persistence import PersistenceExecutor, _atomic_manifest
+from statlab.domains.persistence import PersistenceExecutor, _atomic_manifest, _remembered
 from statlab.domains.rewind import champion_provenance, publish_retained_report
 from statlab.errors import EngineError, PersistenceError
 from statlab.graph.engine import NodeInvocation
-from statlab.graph.state import BoundaryResult, RunState
+from statlab.graph.state import BoundaryResult, CandidateProgress, RunState
 from statlab.mcp_client import logged_calls
 from statlab.persistence.ids import new_id
 from statlab.persistence.models import ProjectRow
@@ -30,6 +30,8 @@ from statlab.persistence.repository import (
 )
 from statlab.storage import create_artifact, ensure_run_layout
 from statlab_contracts.artifacts import ArtifactMeta, new_artifact_ref
+from statlab_contracts.candidate import CandidateSpec, EstimatorSpec
+from statlab_contracts.envelope import Failure
 from statlab_contracts.layout import RunPaths
 
 from tests.test_nodes_champion import ChampionTools, champion_harness, tail_invocation, with_mode
@@ -204,6 +206,23 @@ async def test_preserves_real_calls_target_hashes_models_and_idempotent_memory(
     memory = list_memory(migrated_db, project.id)
     assert len(memory) == 1 and memory[0].source_run_id == h.state.run_id
     assert "selection_bias" in json.loads(memory[0].value_json)
+    fact = json.loads(memory[0].value_json)
+    assert fact["dataset_sha256"] == h.runtime.dataset
+    assert [entry["candidate"] for entry in fact["candidates"]] == [
+        branch.public_id for branch in h.state.branches
+    ]
+    for entry in fact["candidates"]:
+        assert {"label", "estimator", "features", "status"} <= set(entry)
+
+    def keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return set(value) | {key for item in value.values() for key in keys(item)}
+        if isinstance(value, list):
+            return {key for item in value for key in keys(item)}
+        return set()
+
+    # D32: no test-metric key may enter memory, except the existing prior-scoring count.
+    assert {key for key in keys(fact) if "test" in key} <= {"prior_test_scorings"}
     assert len(h.llm.calls) == llm_count
 
 
@@ -424,3 +443,34 @@ async def test_publish_retained_report_copies_plots_and_rejects_changed_report(
         PersistenceError, match="retained report hash disagrees with committed champion"
     ):
         await publish_retained_report(parent, child, h.state)
+
+
+def test_memory_entry_records_a_failed_candidate_without_validation() -> None:
+    branch = CandidateProgress(
+        public_id="c_03",
+        spec=CandidateSpec(
+            label="Failed fit",
+            rationale="Fixture candidate that fails to train.",
+            estimator=EstimatorSpec(name="ridge"),
+        ),
+        status="failed",
+        results=(
+            BoundaryResult(
+                node_name="model_training",
+                execution_id="e1",
+                result=NodeResult(
+                    status="failed", error=Failure(error_class="data", message="fit diverged")
+                ),
+            ),
+        ),
+    )
+    entry = _remembered(branch, "rmse")
+    assert entry["status"] == "failed"
+    assert entry["failure"] == "fit diverged"
+    assert "validation" not in entry
+    assert entry["estimator"] == {
+        "name": "ridge",
+        "params": {},
+        "class_weight": "none",
+        "calibrate": False,
+    }

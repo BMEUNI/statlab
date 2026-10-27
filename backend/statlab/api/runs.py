@@ -59,7 +59,7 @@ from statlab.graph.router import ControlRouter, InterruptClass
 from statlab.graph.state import RunState, SpineEntry
 from statlab.llm.routing import check_provider_environment
 from statlab.llm.skills import load_run_skill, snapshot_skill
-from statlab.memory import read_memory
+from statlab.memory import read_memory, recall_memory
 from statlab.persistence.accounts import UserRow
 from statlab.persistence.models import ContractRow, GateRow, MemoryRow, RunMode, RunRow
 from statlab.persistence.repository import (
@@ -571,7 +571,11 @@ class RunRegistry:
             if self.closing:
                 raise HTTPException(503, "application is closing")
             self._capacity()
-            memory = read_memory(self.resources.conn, project.id)
+            memory = recall_memory(
+                read_memory(self.resources.conn, project.id),
+                dataset_sha256=dataset.sha256,
+                target=contract.target.column,
+            )
             session = create_session(self.resources.conn, project_id=project.id, title=project.name)
             config = RunConfig(
                 dataset_id=dataset.id,

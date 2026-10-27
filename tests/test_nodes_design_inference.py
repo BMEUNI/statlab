@@ -26,7 +26,7 @@ from statlab.graph.state import BoundaryResult, CandidateProgress
 from statlab.llm.client import DecisionRejectedError
 from statlab.llm.skills import NodeSkill, SkillPolicy
 from statlab.mcp_client import CallContext, Repair
-from statlab.persistence.models import ProjectRow, RunMode
+from statlab.persistence.models import MemoryRow, ProjectRow, RunMode
 from statlab_contracts.artifacts import ArtifactMeta, ArtifactRef
 from statlab_contracts.candidate import (
     CandidateSet,
@@ -465,6 +465,37 @@ async def test_explicit_preprocessing_and_feature_pool_constrain_design(
         proposal["candidate_set"]["candidates"][0]["features"]["binned"] = {"x": 3}
         h.llm.responses[DesignDecision] = DesignDecision.model_validate(proposal)
     assert (await design(h)).status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_design_keeps_only_remembered_runs(
+    migrated_db: sqlite3.Connection, project: ProjectRow, tmp_path: Path
+) -> None:
+    h, _ = await prepared(migrated_db, project, tmp_path)
+    h.runtime = replace(
+        h.runtime,
+        memory=(
+            MemoryRow(
+                id="m1",
+                project_id=project.id,
+                key="run_outcome",
+                value_json="{}",
+                source_run_id="r_old",
+                ts="t",
+            ),
+        ),
+    )
+    base = shortlist()
+    h.llm.responses[DesignDecision] = DesignDecision(
+        rationale=base.rationale,
+        candidate_set=base.candidate_set,
+        memory_used=("r_old", "r_missing", "r_old"),
+    )
+    output = await design(h)
+    assert output.status == "completed"
+    decision = output.summary["decision"]
+    assert isinstance(decision, dict)
+    assert decision["memory_used"] == ["r_old"]
 
 
 @pytest.mark.asyncio

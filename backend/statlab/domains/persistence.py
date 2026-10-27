@@ -26,6 +26,7 @@ from statlab.domains.rewind import champion_provenance
 from statlab.domains.runtime import DomainRuntime
 from statlab.errors import EngineError, PersistenceError, ToolCallError
 from statlab.graph.engine import NodeInvocation
+from statlab.graph.state import CandidateProgress
 from statlab.mcp_client import logged_calls
 from statlab.persistence.repository import remember_run_outcome, require_run
 
@@ -46,6 +47,42 @@ def _atomic_manifest(path: Path, manifest: dict[str, JsonValue]) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _remembered(branch: CandidateProgress, metric: str | None) -> dict[str, JsonValue]:
+    """What one candidate was and how it did on validation, for later runs (chunk 88).
+    Never a test metric."""
+    entry: dict[str, JsonValue] = {
+        "candidate": branch.public_id,
+        "label": branch.spec.label,
+        "estimator": branch.spec.estimator.model_dump(mode="json"),
+        "features": branch.spec.features.model_dump(mode="json"),
+        "status": branch.status,
+    }
+    evaluated = next(
+        (
+            boundary.result
+            for boundary in reversed(branch.results)
+            if boundary.node_name == "model_evaluation" and boundary.result.status == "completed"
+        ),
+        None,
+    )
+    if evaluated is not None:
+        metrics = evaluated.summary.get("metrics")
+        entry["validation"] = (
+            metrics.get(metric) if isinstance(metrics, dict) and metric is not None else None
+        )
+    failure = next(
+        (
+            boundary.result.error
+            for boundary in reversed(branch.results)
+            if boundary.result.error is not None
+        ),
+        None,
+    )
+    if failure is not None:
+        entry["failure"] = failure.message
+    return entry
 
 
 class PersistenceExecutor:
@@ -201,6 +238,10 @@ class PersistenceExecutor:
             "n_waves": champion.get("n_waves"),
             "validation_ranking": champion.get("ranking"),
             "excluded": champion.get("excluded"),
+            "dataset_sha256": runtime.dataset,
+            "candidates": [
+                _remembered(branch, problem.primary_metric) for branch in invocation.state.branches
+            ],
         }
         memory = remember_run_outcome(
             runtime.conn, project_id=run.project_id, run_id=run.id, value=fact

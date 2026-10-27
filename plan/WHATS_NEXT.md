@@ -47,6 +47,13 @@ Temporal split with forward-in-time CV, lag features, and predictions with a fin
 champion (rows without a target, or an uploaded file; Predictions tab, CSV download). See
 [chunk 77](./77_time_ordered_tables.md) for receipts and how to set the contract.
 
+## Done 2026-10-27: chunks 87-88 (iLLM course integration)
+
+Course mapping: [`ILLM_COURSE.md`](../ILLM_COURSE.md). [87](./87_grounded_report_numbers.md) cuts
+ungrounded numbers from LLM report sections (D38); [88](./88_run_memory_retrieval.md) records
+per-candidate outcomes, recalls at most 3 relevant runs, names them in design and report (D39).
+make check 3347 passed, 100%. Offline/live scenarios not re-run.
+
 ## Next: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
 
 Chunk [71](./71_accounts_and_budgets.md) accepted 2026-10-10: register/sign in (scrypt, HttpOnly

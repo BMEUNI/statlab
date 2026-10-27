@@ -1,5 +1,6 @@
 """Append-only project facts and provenance at the SQL boundary."""
 
+import json
 import math
 import sqlite3
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 from statlab.errors import PersistenceError
-from statlab.memory import read_memory, remember
+from statlab.memory import read_memory, recall_memory, remember
 from statlab.persistence.models import MemoryRow
 from statlab.persistence.repository import create_contract, create_project, create_run
 from statlab_contracts.contract import DataContract
@@ -31,6 +32,31 @@ def test_append_order_isolation_and_snapshot(
     assert snapshot == (first,)
     assert read_memory(migrated_db, project.id) == (first, second)
     assert read_memory(migrated_db, other.id) == ()
+
+
+def test_recall_keeps_notes_and_three_most_relevant_outcomes() -> None:
+    def row(id_: str, key: str, value: JsonValue, ts: str) -> MemoryRow:
+        return MemoryRow(
+            id=id_,
+            project_id="p",
+            key=key,
+            value_json=json.dumps(value),
+            source_run_id=None,
+            ts=ts,
+        )
+
+    note = row("note", "fact", 1, "t0")
+    old = row("old", "run_outcome", {"target": "y"}, "t1")
+    d1 = row("d1", "run_outcome", {"dataset_sha256": "s", "target": "y"}, "t2")
+    d2 = row("d2", "run_outcome", {"dataset_sha256": "s", "target": "y"}, "t3")
+    d3 = row("d3", "run_outcome", {"dataset_sha256": "s", "target": "y"}, "t4")
+    d4 = row("d4", "run_outcome", {"dataset_sha256": "s", "target": "y"}, "t5")
+    other = row("other", "run_outcome", {"dataset_sha256": "x", "target": "z"}, "t6")
+    scalar = row("scalar", "run_outcome", 3, "t7")
+    rows = (note, old, d1, d2, d3, d4, other, scalar)
+    assert recall_memory(rows, dataset_sha256="s", target="y") == (note, d2, d3, d4)
+    assert recall_memory(rows, dataset_sha256="none", target="y") == (note, d2, d3, d4)
+    assert recall_memory(rows, dataset_sha256="none", target="z") == (note, other)
 
 
 def test_provenance(

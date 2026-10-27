@@ -182,6 +182,11 @@ class UnavailableDecision(BaseModel):
 class DesignDecision(Decision):
     candidate_set: CandidateSet
     family_justifications: dict[str, str] = Field(default_factory=dict)
+    memory_used: tuple[str, ...] = Field(
+        default=(),
+        description="source_run_id of each earlier run in memory whose outcome shaped this "
+        "shortlist; empty if none.",
+    )
 
     @model_validator(mode="before")
     @classmethod
