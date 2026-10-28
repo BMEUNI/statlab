@@ -30,6 +30,7 @@ dev = [
     "ruff==0.16.6",
     "pandas-stubs==3.0.5.260730",
 ]
+itest = ["deepeval==4.3.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -52,7 +53,7 @@ package = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-q --strict-markers --strict-config"
+addopts = "-q --strict-markers --strict-config -p no:deepeval -p no:xdist -p no:xdist.looponfail -p no:rerunfailures -p no:repeat"
 asyncio_mode = "strict"
 filterwarnings = ["error"]
 
@@ -100,3 +101,4 @@ ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S104"]
+"integration/tests/*" = ["S101"]

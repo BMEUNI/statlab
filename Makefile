@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 SHELL := /bin/bash
 
-.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev share db-reset
+.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev share db-reset itest-offline itest-offline-rich
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -48,6 +48,12 @@ dev: ## Run all three processes; one Ctrl-C stops everything
 share: ## Serve a built UI on 4173 for a Tailscale Funnel (Secure cookies)
 	cd frontend && node node_modules/vite/bin/vite.js build
 	STATLAB_COOKIE_SECURE=true $(PY) scripts/dev.py share
+
+itest-offline: ## Integration suite under pytest, offline canned LLM
+	$(PY) -m pytest -c integration/pytest.ini integration/tests --llm offline
+
+itest-offline-rich: ## Integration suite under pytest, offline rich LLM
+	$(PY) -m pytest -c integration/pytest.ini integration/tests --llm offline-rich
 
 db-reset: ## Delete the database (chunk 05+)
 	rm -f statlab.db statlab.db-wal statlab.db-shm

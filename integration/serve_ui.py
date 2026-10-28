@@ -16,8 +16,8 @@ from statlab.llm.client import LlmClient
 from integration.datasets import write_csv
 from integration.model import Scenario, load_scenarios
 from integration.offline_llm import OfflineProvider
-from integration.run_scenarios import _setup_logging
 from integration.services import ApiServer, McpProcess, build_settings
+from integration.session import setup_logging
 
 
 def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -35,7 +35,7 @@ async def _serve(args: argparse.Namespace, scenario: Scenario) -> None:
     (root / "samples").mkdir(parents=True)
     for key in ("churn", "churn_dirty", "houses", "species"):
         write_csv(key, root / "samples" / f"{key}.csv")
-    _setup_logging(root / "api.log")
+    setup_logging(root / "api.log")
     token = secrets.token_urlsafe(32)
     mcp = McpProcess(data_dir=(root / "data").resolve(), token=token, log_path=root / "mcp.log")
     server: ApiServer | None = None
