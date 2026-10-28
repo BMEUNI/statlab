@@ -798,7 +798,11 @@ class RunLoop:
                     break
                 wave = self._latest.wave + 1
                 await self.events.append("search.started", {"wave": wave})
-                proposal = await self.candidate_planner(self._latest, wave)
+                try:
+                    proposal = await self.candidate_planner(self._latest, wave)
+                except BoundaryStopError:
+                    self._lifecycle_stop = True
+                    return await self._finish_fanout()
                 await self.events.append("search.finished", {"wave": wave, "added": len(proposal)})
                 if not proposal:
                     break

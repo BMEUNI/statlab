@@ -869,6 +869,32 @@ async def test_planner_empty_or_pause(world: World, pause: bool) -> None:
 
 
 @pytest.mark.asyncio
+async def test_planner_stop_inside_search_decision_pauses(world: World) -> None:
+    nodes = (node("design"), node("fit", candidate=True), node("tail"))
+    control = RunControl()
+    seen: list[str] = []
+
+    async def execute(inv: NodeInvocation) -> NodeResult:
+        seen.append(inv.spec.name)
+        return NodeResult(status="completed")
+
+    async def planner(state: RunState, wave: int) -> tuple[CandidateSpec, ...]:
+        assert wave == 2
+        control.request_pause()
+        control.check()
+        return ()
+
+    runner = loop(
+        world, nodes, execute, traversal=TraversalPlan(design_node="design"), control=control
+    )
+    runner.candidate_planner = planner
+    result = await runner.run(initial(world, nodes))
+    assert result.status == "paused" and result.wave == 1
+    assert len(result.branches) == 3 and "tail" not in seen
+    assert runner.checkpointer.load(spine_id="synthetic", spine=result.spine) == result
+
+
+@pytest.mark.asyncio
 async def test_initial_planner_after_design_commits_branches_before_launch(world: World) -> None:
     nodes = (node("design"), node("companion"), node("fit", candidate=True), node("tail"))
     traversal = TraversalPlan(design_node="design", overlap_shared="companion")
