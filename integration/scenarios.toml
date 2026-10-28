@@ -631,6 +631,9 @@ seed = 42
 candidates = ["logistic_regression", "random_forest_classifier", "hist_gb_classifier"]
 inferential_model = "logit"
 
+[scenario.contract.constraints]
+max_total_fit_seconds = 3600
+
 [scenario.expect]
 status = "completed"
 nodes_completed = ["intake", "problem_definition", "data_profiling", "data_quality", "data_splitting", "experiment_design", "inferential_analysis", "champion_selection", "artifact_persistence"]

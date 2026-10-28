@@ -54,15 +54,14 @@ ungrounded numbers from LLM report sections (D38); [88](./88_run_memory_retrieva
 per-candidate outcomes, recalls at most 3 relevant runs, names them in design and report (D39).
 make check 3347 passed, 100%. Offline/live scenarios not re-run.
 
-## In progress: chunk 89 (integration suite on pytest + DeepEval)
+## Done: chunk 89 (integration suite on pytest + DeepEval), 2026-10-28
 
-89a done 2026-10-27: scenarios run under `make itest-offline` / `make itest-offline-rich`
-(pytest, parity with the old runner). Chunk 90 fixed the wave-2 search stop race S16 exposed.
-89b (record/replay cassettes) and 89c (DeepEval judge metrics) done 2026-10-28: `make itest-replay`
-replays the recorded run with no network calls. Next: 89d retire the old runner, docs. See
-[89](./89_integration_tests_pytest.md).
+`make itest-offline` / `itest-offline-rich` / `itest-replay` (free) and `itest-record` (paid).
+Judge metrics: tool correctness, faithfulness, rationale consistency. S07/S08/S16 are live/record
+only. The offline-rich regression is fixed (stand-in read the checkpointed set from the wrong
+message). See [89](./89_integration_tests_pytest.md).
 
-## Then: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression
+## Next: chunk 64 (cleanlab label noise)
 
 Chunk [71](./71_accounts_and_budgets.md) accepted 2026-10-10: register/sign in (scrypt, HttpOnly
 SameSite=Strict cookie, CSRF header), one access guard for every project/run/artifact route,

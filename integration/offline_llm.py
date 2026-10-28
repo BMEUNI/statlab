@@ -279,6 +279,14 @@ def _parts(first_user: str) -> tuple[dict[str, JsonValue], list[JsonValue]]:
     return state, evidence
 
 
+def _checkpointed(system: str) -> list[JsonValue]:
+    for part in system.split("\n\n"):
+        if part.startswith("{") and '"checkpointed_candidates"' in part:
+            shared = _obj(json.loads(part), "shared")
+            return _list(shared["checkpointed_candidates"], "checkpointed_candidates")
+    return []
+
+
 def _candidate(state: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return _obj(state.get("candidate"), "candidate")
 
@@ -573,7 +581,7 @@ class OfflineProvider:
         if title == "SetupAction":
             content = json.dumps(_setup_action(system, messages))
         else:
-            content = json.dumps(self._answer(title, user_text, first_user, scenario))
+            content = json.dumps(self._answer(title, user_text, first_user, system, scenario))
         if kwargs.get("stream") is True:
             return _Stream(content, model)
         return ModelResponse(
@@ -594,7 +602,7 @@ class OfflineProvider:
         )
 
     def _answer(
-        self, title: str, user_text: str, first_user: str, scenario: Scenario
+        self, title: str, user_text: str, first_user: str, system: str, scenario: Scenario
     ) -> dict[str, JsonValue]:
         contract = DataContract.model_validate(
             scenario.offline.proposed_contract or scenario.contract
@@ -628,9 +636,8 @@ class OfflineProvider:
         if title in _RATIONALE_ONLY:
             return {"rationale": RATIONALE}
         if title == "DesignDecision":
-            design_state, _ = _parts(first_user)
-            checkpointed = design_state.get("checkpointed_candidates")
-            if isinstance(checkpointed, list) and checkpointed:
+            checkpointed = _checkpointed(system)
+            if checkpointed:
                 note = "Offline stand-in confirmation of the checkpointed cumulative set."
                 return {
                     "rationale": RATIONALE,

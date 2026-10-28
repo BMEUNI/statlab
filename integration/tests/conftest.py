@@ -27,6 +27,8 @@ from integration.session import (
     write_summary,
 )
 
+REPLAY_SKIP = "timing-dependent lifecycle action; live or record only"
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
@@ -87,8 +89,10 @@ async def scenario_record(suite: Suite, scenario: Scenario) -> ScenarioRecord:
     cached = suite.records.get(scenario.id)
     if cached is not None and cached.result != "SKIPPED":
         return cached
-    if cached is not None or suite.stopped:
-        suite.records[scenario.id] = ScenarioRecord(scenario)
+    if cached is not None:
+        pytest.skip(cached.skip_reason or "suite budget reached")
+    if suite.stopped:
+        suite.records[scenario.id] = ScenarioRecord(scenario, skip_reason="suite budget reached")
         pytest.skip("suite budget reached")
     services = suite.services
     provider = services.provider
@@ -97,8 +101,8 @@ async def scenario_record(suite: Suite, scenario: Scenario) -> ScenarioRecord:
         and provider.mode == "replay"
         and not scenario.replayable
     ):
-        suite.records[scenario.id] = ScenarioRecord(scenario)
-        pytest.skip("timing-dependent lifecycle action; live or record only")
+        suite.records[scenario.id] = ScenarioRecord(scenario, skip_reason=REPLAY_SKIP)
+        pytest.skip(REPLAY_SKIP)
     if isinstance(provider, OfflineProvider):
         provider.scenario = scenario
     elif isinstance(provider, CassetteProvider):

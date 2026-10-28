@@ -5,18 +5,38 @@ server, real nodes, real LLM provider). Model accuracy is NOT the goal. Every ex
 is behavioural: which steps run, which gates open, what gets stored, which invariants hold.
 A few "soft" checks (planted signal found, metric in a plausible range) only produce warnings.
 
-Run it:
+Run it (pytest; run from the repository root):
 
 ```sh
-# offline dry-run: scripted stand-in LLM, no network, no cost
-.venv/bin/python -m integration.run_scenarios --llm offline
-# rich offline dry-run: same, but the stand-in also takes the optional branches
-.venv/bin/python -m integration.run_scenarios --llm offline-rich
-# live: real DeepSeek calls, stops the suite once total cost reaches $2.00
-.venv/bin/python -m integration.run_scenarios --llm live --budget-usd 2.0
-# subset
-.venv/bin/python -m integration.run_scenarios --llm live --only S01 S04
+make itest-offline        # scripted stand-in LLM, no network, no cost
+make itest-offline-rich   # same, but the stand-in also takes the optional branches
+make itest-replay         # replay the recorded LLM answers from cassettes, no network, no cost
+make itest-record         # PAID: real DeepSeek calls, recorded into integration/.cache/cassettes
+# one scenario, or any pytest selection
+.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm replay -k S01
 ```
+
+Options: `--llm {offline,offline-rich,record,replay,live}` (required), `--budget-usd 2.0`
+(the suite stops starting scenarios once spend reaches it), `--log-debug`, `--cassettes DIR`,
+`--record-missing` (replay only: call the real model for answers that are not recorded yet and
+store them; paid, but only for the missing calls).
+
+Test layers:
+
+- `test_behaviour.py`: the must and soft checks below, per scenario (every mode).
+- `test_judged.py`: LLM-as-judge quality checks with DeepEval, in record, replay and live modes.
+  Tool correctness (expected MCP tools were called; deterministic), faithfulness (the report's
+  claims are supported by the champion evidence) and rationale consistency (the champion choice
+  follows the validation ranking and claims no test score). The judge is the same provider seam,
+  so its answers are recorded and replayed too.
+- `test_judge_unit.py`: the judge adapter itself, offline.
+
+Replay serves each LLM call from `integration/.cache/cassettes/<scenario>/` by schema, step,
+candidate and call number; a missing answer fails the run with "cassette miss". A changed prompt
+still replays and shows as the soft check `H-drift`. S07, S08 and S16 trigger pause, cancel and
+an API restart on mid-run events, so which LLM calls happen depends on timing: they are skipped
+in replay and only run in live or record mode. `summary.md` in replay shows the recorded cost,
+not spend.
 
 Each invocation writes `integration/out/<UTC timestamp>-<mode>/` (gitignored):
 `summary.md` (one table, pass/fail per scenario and check), `api.log`, `mcp.log`, and per
@@ -34,7 +54,7 @@ of `report.md`, `pipeline.py`, `manifest.json` when produced.
 - every tool call with its arguments and duration (`Tool call ...`);
 - provider failures (`LLM request failed: <class> status=<code>`).
 
-Add `--verbose` to also log the full result of every tool call. The terminal prints one line per
+Add `--log-debug` to also log the full result of every tool call. The terminal prints one line per
 run event (step started or finished, gate, status) and a line when each scenario starts and ends.
 To follow a run in detail, run `tail -f integration/out/<folder>/api.log` in a second terminal.
 
@@ -245,7 +265,9 @@ families, inference questions, notes), the run mode, gate answers and chat messa
   inferential `logit`, goals "Does sex affect income?" (`sex`), "Does education_num affect
   income?" (`education_num`). Autonomous.
 - **Expect:** as S01 (completed, champion, one test score, report sections, pipeline replay,
-  manifest). Timeout 40 min (32k rows).
+  manifest). Timeout 40 min (32k rows). `max_total_fit_seconds` 3600: the fit budget counts wall
+  time of fit calls, so three parallel candidates on 32k rows can pass the default 1200 s on a
+  busy machine.
 - **Soft:** test roc_auc ≥ 0.8; sex goal "reject H0".
 
 ### S19 — Real data: UCI Auto MPG (regression, missing horsepower)

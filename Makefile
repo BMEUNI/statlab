@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 SHELL := /bin/bash
 
-.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev share db-reset itest-offline itest-offline-rich itest-replay
+.PHONY: help install check-env test test-fast check lint format typecheck api mcp ui dev share db-reset itest-offline itest-offline-rich itest-replay itest-record
 
 help:
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -57,6 +57,9 @@ itest-offline-rich: ## Integration suite under pytest, offline rich LLM
 
 itest-replay: ## Integration suite replayed from recorded cassettes (no spend)
 	$(PY) -m pytest -c integration/pytest.ini integration/tests --llm replay
+
+itest-record: ## Record a live run into the cassettes (paid; needs the provider key)
+	$(PY) -m pytest -c integration/pytest.ini integration/tests --llm record
 
 db-reset: ## Delete the database (chunk 05+)
 	rm -f statlab.db statlab.db-wal statlab.db-shm

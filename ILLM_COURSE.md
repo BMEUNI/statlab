@@ -91,6 +91,35 @@ grows.
 
 **Where to see it.** Experiment-design decision ("earlier runs used"), report caveats section.
 
+### 1d. Testing the agent: recorded runs and an LLM judge — L4, L7, AG, SV (chunk 89, done)
+
+**Problem.** The end-to-end tests checked that the pipeline runs (steps, gates, one test score),
+but not whether the LLM's text is any good. Every real-model run also cost money and gave a
+different answer each time, so a failure could not be repeated.
+
+**What we built.** The scenario suite runs under pytest with three layers:
+1. **Behaviour checks** (code): which steps ran, which gates opened, what was stored.
+2. **Judged quality** (DeepEval, an LLM-as-judge library): did the agent call the expected
+   tools; is every claim in the report supported by the evidence; does the champion choice
+   follow the validation ranking without claiming a test score.
+3. **Record and replay**: one paid run records every LLM answer (product and judge) at the
+   provider seam; later runs replay them for free and identically. A changed prompt shows as a
+   drift warning; a missing answer fails loudly.
+
+**Course ideas.**
+- L4: decoding is sampling, so the same prompt gives different answers; replay makes a run
+  repeatable. Fluent text is not evidence, so faithfulness is checked against the evidence.
+- L7: the harness around the model is engineering: evaluation belongs in it, not after it.
+- AG: tool selection is a skill the agent can get wrong; tool correctness measures it.
+- SV: claims must be traceable to evidence; the faithfulness judge checks exactly that.
+
+**How it helps.** A prompt change can be checked in minutes without spending money, and a
+quality regression (an unsupported claim, a wrong tool) fails a test instead of reaching a
+report.
+
+**Where to see it.** `integration/SCENARIOS.md`; `make itest-replay`; spec
+`plan/89_integration_tests_pytest.md`.
+
 ## 2. Course ideas the architecture already follows
 
 | Course idea | Where in Statlab |
@@ -115,3 +144,4 @@ grows.
 | 1a text methods (chunk 82) | done 2026-10-19 |
 | 1b report number check (chunk 87) | done 2026-10-27 |
 | 1c episodic memory (chunk 88) | done 2026-10-27 |
+| 1d recorded runs and LLM judge (chunk 89) | done 2026-10-28 |

@@ -48,6 +48,7 @@ class ScenarioRecord:
     duration: float = 0.0
     folder: Path | None = None
     budget_stopped: bool = False
+    skip_reason: str = ""
 
 
 def sql_scalar(db_path: Path, sql: str, params: tuple[str, ...] = ()) -> float:
@@ -285,7 +286,11 @@ def write_summary(
         f"- Commit: {git_head()}",
         f"- Started: {started}",
         f"- Ended: {ended}",
-        f"- Total cost USD: {total_cost:.4f} ({calls} LLM calls)",
+        (
+            f"- Recorded cost USD: {total_cost:.4f} ({calls} replayed LLM calls, no spend)"
+            if mode == "replay"
+            else f"- Total cost USD: {total_cost:.4f} ({calls} LLM calls)"
+        ),
         "",
         "| Scenario | Title | Result | Must | Soft warnings | Cost USD | Duration s |",
         "| --- | --- | --- | --- | --- | --- | --- |",

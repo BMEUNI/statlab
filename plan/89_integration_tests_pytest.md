@@ -1,8 +1,8 @@
 ---
-status: planned
+status: completed
 dependencies: [88]
-completion_date: null
-implementation_notes: "89a accepted 2026-10-27 (pytest parity); 89b accepted 2026-10-28 (cassettes); 89c accepted 2026-10-28 (DeepEval); 89d pending"
+completion_date: 2026-10-28
+implementation_notes: "89a accepted 2026-10-27 (pytest parity); 89b accepted 2026-10-28 (cassettes); 89c accepted 2026-10-28 (DeepEval); 89d accepted 2026-10-28 (old runner retired, offline-rich fixed)"
 ---
 
 # Chunk 89 — integration scenarios as a pytest + DeepEval suite with record/replay
@@ -824,3 +824,118 @@ Findings for later (not fixed in 89c):
    normally, 1371 s at load average 12–15 (all heavy tools ≈3× slower). A loaded machine can fail
    S18 even in replay. Candidate fix: per-scenario `max_total_fit_seconds` headroom or measuring
    CPU time; decide later.
+
+## Stage 89d (detailed spec) — retire the old runner, close known gaps
+
+User request (2026-10-28): do 89d and fix or address the known gaps. Prerequisite: 89c accepted
+(`4d8da84`). Non-goals: no product code change (`backend/`, `mcp_server/`, `contracts/`); no
+paid run; no change to cassette keying or judge metrics.
+
+Gaps and decisions:
+- **G-a skip reason.** Re-skipped records always say "suite budget reached" (receipt 89c-D/E
+  finding 1). Fix: the record carries its skip reason.
+- **G-b replay cost line.** `summary.md` "Total cost USD" in replay sums the *recorded* costs
+  (the backend prices replayed usage), which reads as spend. Fix: label it in replay mode.
+- **G-c S18 fit budget.** `FitBudget` sums wall time of heavy tool calls (product design, kept:
+  it is the user's budget). S18 (32k rows, 3 candidates in parallel) uses ≈450 s of the default
+  1200 s; at load average 12–15 it used 1371 s. Fix in the scenario: S18 sets
+  `max_total_fit_seconds = 3600` (S13 already sets constraints the same way). Live runs still
+  get `max_search_waves = 1`, `max_retune_loops = 0` (per-field `setdefault`,
+  `integration/driver.py:108`). Replay: the contract is in every prompt, so S18 replays with
+  soft H-drift (answers still served by slot); accepted, re-recorded with the next record run.
+- **G-d offline-rich regression (14 FAIL since `c0cc6de`).** Root cause (main, read-only):
+  `PromptContext` (`backend/statlab/llm/prompts.py:34-62`) puts `shared` — including
+  `checkpointed_candidates` (`domains/runtime.py:99-106`) — in the **system** prefix, as one
+  canonical JSON paragraph (`json.dumps(..., separators=(",", ":"))`, no literal newlines). The
+  stand-in's `DesignDecision` branch (`integration/offline_llm.py:630-640`) still reads
+  `checkpointed_candidates` from the first **user** message's state (`_parts(first_user)`), finds
+  nothing, and proposes a fresh shortlist at wave 2; the product correctly refuses ("approved
+  shortlist must match existing candidate specifications", `design_inference.py:225`). Harness
+  bug only; plain offline never reaches wave 2. Fix: read it from the system prompt.
+- **G-e S07/S08/S16 in replay.** Not fixable without making actions deterministic relative to
+  LLM calls; addressed by documenting them as live/record-only and adding `make itest-record`.
+
+Owned files (implementer): `integration/session.py`, `integration/tests/conftest.py`,
+`integration/offline_llm.py`, `integration/scenarios.toml`, `Makefile`; delete
+`integration/run_scenarios.py`. Main owns `integration/SCENARIOS.md`, `ILLM_COURSE.md`, plan
+files. Not alone: preserve others' edits.
+
+### Recipe
+
+1. **Delete** `integration/run_scenarios.py` (`git rm`). No other module imports it
+   (main checked: only its own `prog=` string references the name).
+2. `integration/session.py` `ScenarioRecord`: add field `skip_reason: str = ""` after
+   `budget_stopped`. `write_summary`: when `mode == "replay"`, the cost line reads
+   `f"- Recorded cost USD: {total_cost:.4f} ({calls} replayed LLM calls, no spend)"`; other modes
+   unchanged. Nothing else.
+3. `integration/tests/conftest.py` `scenario_record`:
+   - cached-record branch (`if cached is not None or suite.stopped:`) becomes two branches in
+     this order: `if cached is not None:` → `pytest.skip(cached.skip_reason or "suite budget
+     reached")` (do not overwrite the cached record); `if suite.stopped:` →
+     `suite.records[scenario.id] = ScenarioRecord(scenario, skip_reason="suite budget reached")`
+     then `pytest.skip(...)` with the same text.
+   - replay non-replayable branch: `ScenarioRecord(scenario, skip_reason=REPLAY_SKIP)` and
+     `pytest.skip(REPLAY_SKIP)`, with module constant `REPLAY_SKIP = "timing-dependent lifecycle
+     action; live or record only"`.
+4. `integration/offline_llm.py`:
+   - New private function after `_parts`: `_checkpointed(system: str) -> list[JsonValue]`:
+     for each `part` in `system.split("\n\n")`: if `part.startswith("{")` and
+     `'"checkpointed_candidates"' in part`: `shared = _obj(json.loads(part), "shared")`, return
+     `_list(shared["checkpointed_candidates"], "checkpointed_candidates")`. After the loop raise
+     `RuntimeError("offline provider: no shared state in system prompt")`.
+   - `_answer` gains parameter `system: str` (after `first_user`); the call site in `__call__`
+     passes the existing local `system`.
+   - `DesignDecision` branch: replace `design_state, _ = _parts(first_user)` and
+     `checkpointed = design_state.get("checkpointed_candidates")` with
+     `checkpointed = _checkpointed(system)`; keep `if checkpointed:` (drop the `isinstance`
+     test, the helper returns a list) and the rest unchanged.
+5. `integration/scenarios.toml` S18: insert before `[scenario.expect]` of S18:
+   `[scenario.contract.constraints]` / `max_total_fit_seconds = 3600`.
+6. `Makefile`: add `itest-record` to `.PHONY`; new target after `itest-replay`:
+   `itest-record: ## Record a live run into the cassettes (paid; needs the provider key)` with
+   recipe `$(PY) -m pytest -c integration/pytest.ini integration/tests --llm record`.
+
+### Checks (implementer)
+- `.venv/bin/python -m ruff check` / `ruff format --check` / `mypy` on `integration/session.py
+  integration/tests/conftest.py integration/offline_llm.py`.
+- `.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm offline-rich -k
+  "S01 or S20"` → S01 and S20 behaviour PASS (was FAIL at experiment_design wave 2).
+- `.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm replay -k "S07
+  or S18"` (free) → S07 tests all skip with the replay reason (no "suite budget reached");
+  S18 behaviour passes; `summary.md` shows "Recorded cost USD".
+- `make help` lists `itest-record`. Never run `itest-record`, record, live or `--record-missing`.
+
+Main acceptance: full `make itest-offline`, `make itest-offline-rich`, `make itest-replay`
+(all free), then `make check`.
+
+### Addendum 89d-A (acceptance finding, 2026-10-28)
+
+Full `make itest-offline` and `make itest-offline-rich`: same failure in both. `DesignDecision`
+is also asked through prompts without the shared JSON paragraph in the system message: the S16
+API restart (lifespan startup → `LlmCallError` → uvicorn `SystemExit: 3`, which broke the
+session loop so every later test errored) and the S05 guided-gate revision (502 "LLM request
+failed"). `_checkpointed` raised there; the old code fell through to a fresh design.
+Replay and `make check` passed (69 passed / 36 skipped; 100 %).
+
+Correction (owned: `integration/offline_llm.py` only): in `_checkpointed`, replace the final
+`raise RuntimeError(...)` with `return []` (no shared state → no checkpointed candidates, the
+pre-89d behaviour). Nothing else. Checks: Ruff check, Ruff format --check, mypy on the file;
+`--llm offline -k "S05 or S16"` and `--llm offline-rich -k "S01 or S05 or S16"` → all
+behaviour tests PASS, no `SystemExit`.
+
+### Acceptance receipt 89d (2026-10-28)
+
+Candidate: HEAD `4d8da84` + 89d and 89d-A working tree (`integration/run_scenarios.py` deleted;
+`session.py`, `tests/conftest.py`, `offline_llm.py`, `scenarios.toml`, `Makefile`; main's
+`SCENARIOS.md`, `ILLM_COURSE.md`).
+- `make itest-offline`: exit 0, 20/20 PASS (49 passed, 56 skipped).
+- `make itest-offline-rich`: exit 0, 20/20 PASS (49 passed, 56 skipped). The offline-rich
+  regression open since `c0cc6de` (14 FAIL) is fixed.
+- `make itest-replay` (before 89d-A, which touches only the offline stand-in): exit 0, 69 passed,
+  36 skipped, 0 cassette misses; S07/S08/S16 skip with the replay reason; summary shows
+  "Recorded cost USD … no spend"; S18 soft H-drift from the new constraint (expected).
+- `make check` (before 89d-A): exit 0, coverage 100.00 % (14106 statements, 3998 branches), mypy
+  "no issues found in 223 source files", Ruff "All checks passed!", "233 files already
+  formatted". 89d-A is a one-line change in `integration/offline_llm.py` (outside coverage);
+  implementer Ruff/format/mypy on it exit 0.
+No paid run in 89d.
