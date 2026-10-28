@@ -58,7 +58,8 @@ make check 3347 passed, 100%. Offline/live scenarios not re-run.
 
 89a done 2026-10-27: scenarios run under `make itest-offline` / `make itest-offline-rich`
 (pytest, parity with the old runner). Chunk 90 fixed the wave-2 search stop race S16 exposed.
-Next: 89b cassettes (record/replay), 89c DeepEval metrics, 89d retire the old runner. See
+89b (record/replay cassettes) and 89c (DeepEval judge metrics) done 2026-10-28: `make itest-replay`
+replays the recorded run with no network calls. Next: 89d retire the old runner, docs. See
 [89](./89_integration_tests_pytest.md).
 
 ## Then: chunk 64 (cleanlab label noise), then fix the offline-rich S01 regression

@@ -35,12 +35,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--cassettes", type=Path, default=Path("integration/.cache/cassettes"))
     parser.addoption("--budget-usd", type=float, default=2.0)
     parser.addoption("--log-debug", action="store_true")
+    parser.addoption("--record-missing", action="store_true")
     parser.addoption("--scenarios-file", type=Path, default=Path("integration/scenarios.toml"))
 
 
 def pytest_configure(config: pytest.Config) -> None:
     if config.getoption("llm") is None:
         raise pytest.UsageError("--llm is required: live, offline, offline-rich, record or replay")
+    if config.getoption("record_missing") and config.getoption("llm") != "replay":
+        raise pytest.UsageError("--record-missing requires --llm replay")
     lock = Path("uv.lock")
     if not lock.is_file() or lock.stat().st_size == 0:
         raise pytest.UsageError("run from the repository root")
@@ -66,6 +69,8 @@ async def suite(pytestconfig: pytest.Config) -> AsyncIterator[Suite]:
         budget_usd=pytestconfig.getoption("budget_usd"),
         cassettes=pytestconfig.getoption("cassettes"),
     ) as services:
+        if isinstance(services.provider, CassetteProvider):
+            services.provider.record_missing = pytestconfig.getoption("record_missing")
         session_suite = Suite(services, started)
         yield session_suite
     write_summary(
@@ -87,6 +92,13 @@ async def scenario_record(suite: Suite, scenario: Scenario) -> ScenarioRecord:
         pytest.skip("suite budget reached")
     services = suite.services
     provider = services.provider
+    if (
+        isinstance(provider, CassetteProvider)
+        and provider.mode == "replay"
+        and not scenario.replayable
+    ):
+        suite.records[scenario.id] = ScenarioRecord(scenario)
+        pytest.skip("timing-dependent lifecycle action; live or record only")
     if isinstance(provider, OfflineProvider):
         provider.scenario = scenario
     elif isinstance(provider, CassetteProvider):

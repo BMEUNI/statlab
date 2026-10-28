@@ -739,3 +739,88 @@ warnings are DeepEval-internal (tracing DeprecationWarning, loop.py SyntaxWarnin
 `make check` exit 0: 3355 passed, 1 designed skip, coverage 100.00 %, mypy "no issues found in
 224 source files", Ruff clean, "234 files already formatted". LLM-judged metrics unverified
 until the paid record run.
+
+### Addendum 89c-D (live findings, 2026-10-28)
+
+Paid record run (`integration/out/20261028T053710Z-record`, user-approved): 46m48s; product
+433 LLM calls, $0.7759 (`llm_calls`); judge 90 calls, 87,970 prompt + 210,704 completion tokens
+(≈$0.15–0.28 at Flash rates). 76 passed, 26 skipped, 3 failed: behaviour 20/20 PASS live;
+tool correctness 4/4; faithfulness 15/15; rationale consistency failed S05, S09, S15.
+Free replay (`20261028T062435Z-replay`): 0 network LLM calls; judge results identical (same
+three failures, deterministic); behaviour 17/20 — S07, S08, S16 fail on 7 cassette misses.
+
+Diagnosis:
+1. **Rationale failures are a test-design error.** The GEval input held only the ranking, but the
+   champion decision legitimately saw secondary metrics, training CV and its methodology
+   (`_selection_evidence`, chunk 87); the judge penalised true but unshown facts. In all three it
+   found no contradiction of the ranking and no test-set claim.
+2. **S07/S08/S16 are not replayable by nature**: their actions fire on mid-run events (pause at
+   `node.started`, cancel at `node.started`, API restart at `node.completed`). Where the action
+   lands among LLM calls depends on wall time; replay (no network latency) issues a different
+   call set. S09's action fires on `status = completed` and replays fine.
+
+Corrections (owned: `integration/model.py`, `integration/cassette.py`,
+`integration/tests/conftest.py`, `integration/tests/test_judged.py`,
+`tests/test_integration_cassette.py`):
+1. `Scenario.replayable` — derived `@property`: `not any(action.when.event is not None for action
+   in self.actions)` (no new TOML field). `scenario_record`: in replay mode, if not replayable,
+   store `ScenarioRecord(scenario)` (result `SKIPPED`) and `pytest.skip("timing-dependent
+   lifecycle action; live or record only")`; the existing skipped-record rule then skips the
+   scenario's other tests.
+2. `test_champion_rationale_consistent`: `input` = `json.dumps({"ranking": summary["ranking"],
+   "comparison": summary["comparison"]}, sort_keys=True)`; criteria replaced by: "Judge only
+   these three things. (1) The chosen candidate is the top eligible candidate in the ranking, or
+   the rationale states why it prefers another when the ranking marks the top two as not
+   distinguishable. (2) The rationale mentions no test-set result. (3) No statement contradicts
+   the ranking or comparison in the input. Facts the input does not mention (secondary metrics,
+   cross-validation, hyperparameters, simplicity) are neither rewarded nor penalised."
+   Threshold stays 0.6.
+3. **Record missing answers** (VCR `new_episodes`): `CassetteProvider` gains
+   `record_missing: bool = False`; in replay, a miss with `record_missing` true goes through the
+   record path (real `acompletion`, store, return) instead of raising; without it, unchanged.
+   `conftest`: option `--record-missing` (store_true), passed when `--llm replay`; usage error if
+   given with another mode. Unit test in `tests/test_integration_cassette.py`:
+   `test_replay_records_missing_when_enabled` (empty dir, fake acompletion called once, file
+   written, second replay of the same call served from disk without calling the fake).
+Checks: cassette unit tests; offline `-k "judge_unit or S01 or S07"` (S07 runs normally offline);
+`--llm replay -k "S07 or S08 or S16"` → all their tests skipped with the reason, no miss logged;
+Ruff/format/mypy on the five files. Main then runs (user yes, paid ≈ cents) `--llm replay
+--record-missing` for the new judge prompts, then a pure `--llm replay` for acceptance.
+
+### Addendum 89c-E (fill run, 2026-10-28)
+
+Fill run (`--llm replay --record-missing`, user-approved; `integration/out/20261028T075207Z-replay`):
+26 new judge answers recorded, no product LLM call; 68 passed, 36 skipped, 1 failed. S05 rationale
+scored 4/10 only because the rationale says the test set is scored once later; the judge read
+criterion (2) "mentions no test-set result" literally. S09 and S15 now pass.
+
+Correction (owned: `integration/tests/test_judged.py` only): in `test_champion_rationale_consistent`
+criteria, replace the sentence "(2) The rationale mentions no test-set result." with "(2) The
+rationale reports no test-set score or metric value; stating that the test set is scored once
+later is allowed." Nothing else changes. Checks: Ruff check, Ruff format --check, mypy on the file.
+
+### Acceptance receipt 89c-D/E (2026-10-28)
+
+Candidate: HEAD `5297ea5` + uncommitted 89c-D/E edits; sha256 prefixes `integration/cassette.py`
+a70e45df117a43b4, `integration/model.py` 8854b69f1e9422a2, `integration/tests/conftest.py`
+ef9f224a343e204f, `integration/tests/test_judged.py` 238967728e922a15,
+`tests/test_integration_cassette.py` 0c87214cf087537c.
+- `make check`: exit 0; coverage TOTAL 14106 stmts / 3998 branches, 100.00 %; mypy "no issues
+  found in 224 source files"; Ruff "All checks passed!", "234 files already formatted".
+- Fill runs (user-approved, judge-only network calls; product answers from cassettes):
+  `20261028T075207Z-replay` (26 judge answers; S05 false negative led to 89c-E),
+  `20261028T081313Z-replay` (all judge tests pass; S18 behaviour failed `Fit budget exhausted`
+  under machine load, see finding below), `-k S18` fill (4 passed, 1 skipped).
+- Pure replay `20261028T083100Z-replay`: 68 passed, 36 skipped, 1 failed (S18 rationale: its
+  judge answer was missing because S18 had no champion in the fill run); after the S18 fill, pure
+  replay `-k S18` (`20261028T084439Z-replay`): 4 passed, 1 skipped, 0 cassette misses. Together:
+  every replayable scenario passes behaviour and all judged metrics from disk, no network.
+- S07/S08/S16 skip in replay with "timing-dependent lifecycle action; live or record only".
+
+Findings for later (not fixed in 89c):
+1. Skipped-record re-skip says "suite budget reached" for non-replayable scenarios (89d, with
+   `session.py`: carry the skip reason on `ScenarioRecord`).
+2. S18 fit budget: `FitBudget` sums wall time of heavy tool calls; S18 uses ≈450 s of 1200 s
+   normally, 1371 s at load average 12–15 (all heavy tools ≈3× slower). A loaded machine can fail
+   S18 even in replay. Candidate fix: per-scenario `max_total_fit_seconds` headroom or measuring
+   CPU time; decide later.

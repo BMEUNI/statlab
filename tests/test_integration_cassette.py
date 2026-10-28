@@ -222,3 +222,19 @@ def test_judge_slot_is_content_keyed() -> None:
     assert slot.startswith("Verdicts__judge__")
     assert slot == slot_of(judge_messages("is it fit?"))
     assert slot != slot_of(judge_messages("is it safe?"))
+
+
+@pytest.mark.asyncio
+async def test_replay_records_missing_when_enabled(tmp_path: Path) -> None:
+    fake = Counting()
+    replay = CassetteProvider(mode="replay", root=tmp_path, acompletion=fake, record_missing=True)
+    replay.start("S01")
+    first = await replay(model="m", messages=decide_messages(), stream=False)
+    assert isinstance(first, ModelResponse)
+    assert fake.calls == 1
+    assert (tmp_path / "S01" / "T__fit__c_01__0.json").is_file()
+    replay.start("S01")
+    second = await replay(model="m", messages=decide_messages(), stream=False)
+    assert isinstance(second, ModelResponse)
+    assert second.choices[0].message.content == '{"a": 1}'
+    assert fake.calls == 1

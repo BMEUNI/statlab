@@ -121,6 +121,7 @@ class CassetteProvider:
     scenario_id: str | None = None
     counts: dict[str, int] = field(default_factory=dict)
     drift: list[str] = field(default_factory=list)
+    record_missing: bool = False
     acompletion: Callable[..., Awaitable[object]] = litellm.acompletion
 
     def start(self, scenario_id: str) -> None:
@@ -147,7 +148,7 @@ class CassetteProvider:
         slot = slot_of(messages)
         n = self.counts.get(slot, 0)
         path = self.root / scenario_id / f"{slot}__{n}.json"
-        if self.mode == "replay":
+        if self.mode == "replay" and (path.is_file() or not self.record_missing):
             if not path.is_file():
                 message = f"cassette miss: {scenario_id} {slot} #{n}; re-record"
                 _LOG.error(message)

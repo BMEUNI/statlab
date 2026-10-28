@@ -138,6 +138,10 @@ class Scenario(_Frozen):
     timeout_s: int = Field(default=1200, gt=0)
     max_cost_usd: float = Field(default=0.25, gt=0)
 
+    @property
+    def replayable(self) -> bool:
+        return not any(action.when.event is not None for action in self.actions)
+
 
 def load_scenarios(path: Path) -> tuple[Scenario, ...]:
     with path.open("rb") as handle:

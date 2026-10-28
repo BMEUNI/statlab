@@ -91,9 +91,14 @@ async def test_champion_rationale_consistent(
     metric = GEval(
         name="Rationale consistency",
         criteria=(
-            "The rationale must agree with the validation ranking in the input: it may only "
-            "claim a candidate is better where the ranking supports it, and it must not "
-            "mention any test-set result."
+            "Judge only these three things. (1) The chosen candidate is the top eligible "
+            "candidate in the ranking, or the rationale states why it prefers another when "
+            "the ranking marks the top two as not distinguishable. (2) The rationale reports "
+            "no test-set score or metric value; stating that the test set is scored once "
+            "later is allowed. (3) No statement contradicts the ranking or "
+            "comparison in the input. Facts the input does not mention (secondary metrics, "
+            "cross-validation, hyperparameters, simplicity) are neither rewarded nor "
+            "penalised."
         ),
         evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
         threshold=0.6,
@@ -103,7 +108,10 @@ async def test_champion_rationale_consistent(
     decision = summary["decision"]
     assert isinstance(decision, dict)
     case = LLMTestCase(
-        input=json.dumps(summary["ranking"], sort_keys=True),
+        input=json.dumps(
+            {"ranking": summary["ranking"], "comparison": summary["comparison"]},
+            sort_keys=True,
+        ),
         actual_output=str(decision["rationale"]),
     )
     provider = suite.services.provider
