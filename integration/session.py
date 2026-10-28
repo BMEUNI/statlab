@@ -14,8 +14,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
+from pydantic import JsonValue
 from statlab.llm.client import LlmClient
 from statlab.persistence.models import RunStatus
 
@@ -32,6 +34,9 @@ from integration.evidence import Evidence, collect
 from integration.model import Scenario
 from integration.offline_llm import OfflineProvider
 from integration.services import ApiServer, McpProcess, build_settings, free_port
+
+if TYPE_CHECKING:
+    import pytest
 
 
 @dataclass
@@ -389,3 +394,58 @@ async def open_services(
         if api is not None:
             await api.stop()
         mcp.stop()
+
+
+@dataclass
+class Suite:
+    services: SuiteServices
+    started: datetime
+    records: dict[str, ScenarioRecord] = field(default_factory=dict)
+    stopped: bool = False
+
+
+def judged_mode(config: pytest.Config) -> bool:
+    return config.getoption("llm") in ("record", "replay", "live")
+
+
+def _load_rows(path: Path) -> list[object]:
+    if not path.is_file():
+        return []
+    rows: object = json.loads(path.read_text(encoding="utf-8"))
+    return rows if isinstance(rows, list) else []
+
+
+def champion_summary(record: ScenarioRecord) -> dict[str, JsonValue] | None:
+    if record.folder is None:
+        return None
+    found: dict[str, JsonValue] | None = None
+    for row in _load_rows(record.folder / "node_executions.json"):
+        if not isinstance(row, dict):
+            continue
+        if row.get("node_name") != "champion_selection" or row.get("status") != "completed":
+            continue
+        summary = row.get("summary")
+        if isinstance(summary, str):
+            summary = json.loads(summary)
+        if isinstance(summary, dict):
+            found = summary
+    return found
+
+
+def tools_called(record: ScenarioRecord) -> list[str]:
+    if record.folder is None:
+        return []
+    names: list[str] = []
+    for row in _load_rows(record.folder / "tool_calls.json"):
+        name = row.get("tool_name") if isinstance(row, dict) else None
+        if isinstance(name, str) and name not in names:
+            names.append(name)
+    return names
+
+
+def final_status(record: ScenarioRecord) -> str:
+    if record.folder is None or not (record.folder / "result.json").is_file():
+        return "unknown"
+    payload = json.loads((record.folder / "result.json").read_text(encoding="utf-8"))
+    status = payload.get("final_status") if isinstance(payload, dict) else None
+    return status if isinstance(status, str) else "unknown"

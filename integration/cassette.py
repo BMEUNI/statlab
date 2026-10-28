@@ -18,6 +18,7 @@ from openai.types.completion_usage import PromptTokensDetails
 
 _ID: Final = re.compile(r"\b[a-z]{1,3}_[0-9a-f]{16}\b")
 _LOG: Final = logging.getLogger(__name__)
+JUDGE_SYSTEM: Final = "Evaluation judge. Answer with one JSON object only."
 
 
 def _state(user: str) -> tuple[str | None, str | None]:
@@ -43,6 +44,8 @@ def slot_of(messages: list[dict[str, str]]) -> str:
     if index == -1:
         raise RuntimeError("cassette: request has no schema")
     title = str(json.loads(system[index + len(marker) :])["title"])
+    if system.startswith(JUDGE_SYSTEM):
+        return f"{title}__judge__{prompt_sha256(messages)[:16]}"
     user = next((m["content"] for m in messages if m["role"] == "user"), "")
     node, candidate = _state(user)
     return f"{title}__{node or '-'}__{candidate or '-'}"

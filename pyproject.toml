@@ -77,6 +77,7 @@ python_version = "3.14"
 plugins = ["pydantic.mypy"]
 strict = true
 warn_unreachable = true
+untyped_calls_exclude = ["deepeval"]
 warn_unused_ignores = true
 disallow_any_generics = true
 no_implicit_reexport = true

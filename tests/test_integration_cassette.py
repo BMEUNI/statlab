@@ -12,7 +12,7 @@ from litellm import ModelResponse
 from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices, Usage
 from openai.types.completion_usage import PromptTokensDetails
 
-from integration.cassette import CassetteProvider, prompt_sha256, slot_of
+from integration.cassette import JUDGE_SYSTEM, CassetteProvider, prompt_sha256, slot_of
 
 
 def system(title: str) -> str:
@@ -210,3 +210,15 @@ async def test_record_error_does_not_advance(tmp_path: Path) -> None:
     await record(model="m", messages=decide_messages(), stream=False)
     assert (tmp_path / "S01" / "T__fit__c_01__0.json").is_file()
     assert record.counts == {"T__fit__c_01": 1}
+
+
+def test_judge_slot_is_content_keyed() -> None:
+    judge_system = JUDGE_SYSTEM + '\nSchema: {"title": "Verdicts"}'
+
+    def judge_messages(text: str) -> list[dict[str, str]]:
+        return [{"role": "system", "content": judge_system}, {"role": "user", "content": text}]
+
+    slot = slot_of(judge_messages("is it fit?"))
+    assert slot.startswith("Verdicts__judge__")
+    assert slot == slot_of(judge_messages("is it fit?"))
+    assert slot != slot_of(judge_messages("is it safe?"))

@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+import litellm
 import pytest
 import pytest_asyncio
+from statlab.llm.routing import ModelRouter, load_routing_environment
 
 from integration.cassette import CassetteProvider
 from integration.checks import CheckResult
+from integration.judge import StatlabJudge, offline_acompletion
 from integration.model import Scenario, load_scenarios
 from integration.offline_llm import OfflineProvider
 from integration.session import (
     ScenarioRecord,
-    SuiteServices,
+    Suite,
     make_workspace,
     open_services,
     run_one,
@@ -48,14 +50,6 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if "scenario" in metafunc.fixturenames:
         scenarios = load_scenarios(Path(metafunc.config.getoption("scenarios_file")))
         metafunc.parametrize("scenario", scenarios, ids=lambda s: s.id)
-
-
-@dataclass
-class Suite:
-    services: SuiteServices
-    started: datetime
-    records: dict[str, ScenarioRecord] = field(default_factory=dict)
-    stopped: bool = False
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -118,3 +112,23 @@ async def scenario_record(suite: Suite, scenario: Scenario) -> ScenarioRecord:
     suite.records[scenario.id] = record
     suite.stopped = record.budget_stopped
     return record
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def judge(suite: Suite, pytestconfig: pytest.Config) -> AsyncIterator[StatlabJudge]:
+    model = ModelRouter({}, load_routing_environment()).model_for("judge")
+    provider = suite.services.provider
+    acompletion: Callable[..., Awaitable[object]]
+    if isinstance(provider, CassetteProvider):
+        acompletion = provider
+    elif pytestconfig.getoption("llm") == "live":
+        acompletion = litellm.acompletion
+    else:
+        acompletion = offline_acompletion
+    instance = StatlabJudge(model, acompletion)
+    yield instance
+    print(
+        f"judge: {instance.calls} calls, {instance.prompt_tokens} prompt + "
+        f"{instance.completion_tokens} completion tokens",
+        flush=True,
+    )

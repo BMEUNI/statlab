@@ -2,7 +2,7 @@
 status: planned
 dependencies: [88]
 completion_date: null
-implementation_notes: "89a accepted 2026-10-27 (pytest parity); 89b accepted 2026-10-28 (cassettes); 89c-89d pending"
+implementation_notes: "89a accepted 2026-10-27 (pytest parity); 89b accepted 2026-10-28 (cassettes); 89c accepted 2026-10-28 (DeepEval); 89d pending"
 ---
 
 # Chunk 89 — integration scenarios as a pytest + DeepEval suite with record/replay
@@ -534,3 +534,208 @@ logged at ERROR, no `Any` in tests). Focused: 6 cassette tests pass; offline S01
 IntakeDecision__intake__- #0; re-record` in `api.log`. `make check` exit 0: 3354 passed,
 1 designed skip, coverage 100.00 %, mypy "no issues found in 221 source files", Ruff clean,
 "231 files already formatted". Paid record run not done (after 89c, needs user yes).
+
+## Stage 89c (detailed spec) — DeepEval metrics
+
+Prerequisite: 89b committed (`65736b0`). Read from deepeval 4.3.2 source (2026-10-28):
+`DeepEvalBaseLLM` (`deepeval/models/base_model.py`): abstract `load_model`, `generate`,
+`a_generate`, `get_model_name`, all `(*args, **kwargs)`; `__init__(model)` sets `self.name`
+and calls `load_model()`. Custom (non-native) judges are called as
+`a_generate(prompt, schema=<pydantic class>)` and may return a JSON string, which DeepEval parses
+(`deepeval/metrics/utils/generation.py`). `ToolCorrectnessMetric` without `available_tools` is
+deterministic (no LLM call) but still initialises its `model`, so always pass ours (the default
+would be an OpenAI model). Metrics expose `await metric.a_measure(test_case)`, `.score`,
+`.reason`, `.is_successful()`.
+
+Design decisions:
+- Judged tests call `await metric.a_measure(...)` and assert `metric.is_successful()` with
+  `metric.reason` as the message. **No `assert_test` / `deepeval test run`**: those need the
+  DeepEval pytest plugin and its own event loop (our tests run on the session loop); the plugin
+  stays blocked (`-p no:deepeval`) and telemetry off.
+- Judge calls go through the same seam as the product: the `CassetteProvider` in record/replay
+  (so judged scores replay for free), `litellm.acompletion` in live, and a function raising
+  `RuntimeError("judge unavailable offline")` in offline modes (LLM-judged tests skip there).
+- Judge requests are keyed by content, not occurrence: they run concurrently inside a metric and
+  their prompts carry no random IDs. Each scenario's judge calls use their own cassette folder
+  `<scenario>-judge`.
+- Judge model: `ModelRouter({}, load_routing_environment()).model_for("judge")` (default role;
+  provider names stay in `backend/statlab/llm/`, D18). Judge spend is not in `llm_calls`; the
+  judge counts prompt/completion tokens and the fixture prints the totals at session end. The
+  budget guard ignores judge spend (estimated well under $0.30 per suite).
+
+Owned files: `integration/judge.py` (new), `integration/cassette.py`,
+`integration/tests/conftest.py`, `integration/tests/test_judged.py` (new),
+`tests/test_integration_cassette.py`, `tests/test_integration_judge.py` (new). Not alone.
+
+### 1. `integration/cassette.py`
+
+- New constant `JUDGE_SYSTEM: Final = "Evaluation judge. Answer with one JSON object only."`
+- `slot_of`: after computing `title`, if `system.startswith(JUDGE_SYSTEM)` return
+  `f"{title}__judge__{prompt_sha256(messages)[:16]}"`; otherwise unchanged.
+
+### 2. `integration/judge.py` (new)
+
+Docstring: `"""DeepEval judge over the integration LLM seam (chunk 89c)."""` Before importing
+deepeval: `os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "1")` (top of module, after
+stdlib imports; add `# noqa: E402` only if Ruff requires it for the following imports).
+```
+class StatlabJudge(DeepEvalBaseLLM):
+    def __init__(self, model: str, acompletion: Callable[..., Awaitable[object]]) -> None
+```
+- `__init__`: store `self._acompletion = acompletion`, `self.prompt_tokens = 0`,
+  `self.completion_tokens = 0`, `self.calls = 0`, then `super().__init__(model)`.
+- `load_model(self, *args: object, **kwargs: object) -> StatlabJudge`: `return self`.
+- `get_model_name(self, *args: object, **kwargs: object) -> str`: `return str(self.name)`.
+- `generate(self, *args: object, **kwargs: object) -> str`: raise
+  `RuntimeError("StatlabJudge is async only")`.
+- `async a_generate(self, *args: object, **kwargs: object) -> str`:
+  1. `prompt = args[0]` must be `str`, else `TypeError("judge prompt must be text")`.
+  2. `schema = kwargs.get("schema")`; `schema_json = json.dumps(schema.model_json_schema() if
+     isinstance(schema, type) and issubclass(schema, BaseModel) else {"title": "Text"},
+     sort_keys=True)`.
+  3. `messages = [{"role": "system", "content": f"{JUDGE_SYSTEM}\nSchema: {schema_json}"},
+     {"role": "user", "content": prompt}]`.
+  4. `raw = await self._acompletion(model=self.name, messages=messages,
+     response_format={"type": "json_object"}, timeout=120, num_retries=2)`.
+  5. `raw` must be a litellm `ModelResponse` whose `choices[0]` is a `Choices`, else
+     `RuntimeError("judge: unexpected response")`; add `usage.prompt_tokens` /
+     `usage.completion_tokens` when `usage` is a `Usage`; `calls += 1`; return
+     `choices[0].message.content or ""`.
+- `def offline_acompletion(**kwargs: object) -> Awaitable[object]`: an `async def` raising
+  `RuntimeError("judge unavailable offline")`.
+
+### 3. `integration/tests/conftest.py`
+
+- Session fixture `judge(suite, pytestconfig) -> StatlabJudge` (async, session loop): model as in
+  the design decision; `acompletion` = `suite.services.provider` when it is a
+  `CassetteProvider`, `litellm.acompletion` for `live`, `offline_acompletion` otherwise.
+  Teardown prints `f"judge: {judge.calls} calls, {judge.prompt_tokens} prompt +
+  {judge.completion_tokens} completion tokens"`.
+- Helper `def judged_mode(config) -> bool`: `--llm` in `record`, `replay`, `live`.
+- Helper `def champion_summary(record: ScenarioRecord) -> dict[str, JsonValue] | None`: read
+  `record.folder / "node_executions.json"` (list of rows; `summary` is a JSON string or object),
+  newest row with `node_name == "champion_selection"` and `status == "completed"`; return its
+  parsed summary dict or `None` (no folder / file / row).
+- Helper `def tools_called(record) -> list[str]`: `tool_name` of every row in
+  `record.folder / "tool_calls.json"`, first-occurrence order, unique.
+
+### 4. `integration/tests/test_judged.py` (new)
+
+All `@pytest.mark.asyncio(loop_scope="session")`, take `scenario`, `scenario_record`, `judge`,
+`pytestconfig`. Imports from `deepeval.metrics` (`ToolCorrectnessMetric`, `FaithfulnessMetric`,
+`GEval`) and `deepeval.test_case` (`LLMTestCase`, `LLMTestCaseParams`, `ToolCall`).
+1. `test_tools_match_expectation` (all modes): skip (`pytest.skip("no expected tools")`) when
+   `scenario.expect.tools_used` is empty. `metric = ToolCorrectnessMetric(threshold=1.0,
+   model=judge, include_reason=True, async_mode=True)`; case `LLMTestCase(input=scenario.title,
+   actual_output=str(<final status from result.json or "unknown">), tools_called=[ToolCall(name=n)
+   for n in tools_called(record)], expected_tools=[ToolCall(name=n) for n in
+   scenario.expect.tools_used])`; `await metric.a_measure(case)`; assert `is_successful()`.
+2. `test_report_faithful_to_evidence`: skip unless `judged_mode`; `summary =
+   champion_summary(record)`; skip when `None` or `summary["decision"]["sections"]` is empty;
+   `actual_output = "\n\n".join(f"{s['heading']}\n{s['body']}" for s in sections)`;
+   `retrieval_context = [json.dumps(summary["ranking"], sort_keys=True),
+   json.dumps(summary["comparison"], sort_keys=True)]`; `FaithfulnessMetric(threshold=0.7,
+   model=judge, include_reason=True, async_mode=True)`; `input="Explain the champion choice"`.
+   Before measuring: `provider.start(f"{scenario.id}-judge")` when the provider is a
+   `CassetteProvider`.
+3. `test_champion_rationale_consistent`: skip unless `judged_mode` or no champion summary;
+   `GEval(name="Rationale consistency", criteria="The rationale must agree with the validation
+   ranking in the input: it may only claim a candidate is better where the ranking supports it,
+   and it must not mention any test-set result.", evaluation_params=[LLMTestCaseParams.INPUT,
+   LLMTestCaseParams.ACTUAL_OUTPUT], threshold=0.6, model=judge, async_mode=True)`;
+   `input = json.dumps(summary["ranking"], sort_keys=True)`, `actual_output =
+   summary["decision"]["rationale"]`. Same cassette `start` as test 2.
+Narrow every `JsonValue` with `isinstance` before use (strict mypy, no `Any`).
+
+### 5. Tests in the main suite
+
+- `tests/test_integration_cassette.py`: add `test_judge_slot_is_content_keyed`: system starting
+  with `JUDGE_SYSTEM` + `"\nSchema: {\"title\": \"Verdicts\"}"` → slot starts with
+  `"Verdicts__judge__"`, equal for equal prompts, different for different user text.
+- `tests/test_integration_judge.py` (new): fake `acompletion` returning a `ModelResponse` with
+  content `'{"verdict": "yes"}'` and usage (3, 2): `StatlabJudge("m", fake)`;
+  `await judge.a_generate("p", schema=<small pydantic model titled Verdict>)` returns the content;
+  the fake saw `model="m"`, the system message contains `JUDGE_SYSTEM` and `"Verdict"`,
+  `response_format == {"type": "json_object"}`; counters `calls == 1`, tokens 3/2.
+  `generate("p")` raises `RuntimeError`; non-text prompt raises `TypeError`;
+  `await offline_acompletion()` raises `RuntimeError("judge unavailable offline")`;
+  a non-`ModelResponse` answer raises `RuntimeError("judge: unexpected response")`.
+
+### 6. Checks (implementer)
+
+- `make test-fast TESTS="tests/test_integration_cassette.py tests/test_integration_judge.py"`
+- `.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm offline -k "S01 or S04"`
+  → behaviour/soft pass; `test_tools_match_expectation` passes where `tools_used` is set (else
+  skipped); the two LLM-judged tests skip. Report the per-test outcomes.
+- `git status --short` must show no new untracked files besides the owned ones (DeepEval may
+  create a local folder such as `.deepeval`; report it, do not delete or ignore it yourself).
+- Ruff check, Ruff format --check, mypy on the six owned files (literal paths).
+Never run `record` or `live`.
+
+Stop and report on: mypy errors from deepeval's types needing `Any`/ignores; DeepEval import
+emitting network calls or writing files; any metric constructor rejecting `model=judge`.
+
+Main acceptance: `make check`; offline suite; then (user yes) one paid `record` run and a free
+`replay` run.
+
+### Addendum 89c-A (review corrections, 2026-10-28)
+
+1. **DeepEval import warning (unit suite).** Python 3.14 `DeprecationWarning:
+   'asyncio.iscoroutinefunction' is deprecated` raised inside `deepeval/tracing/tracing.py`
+   (via `DeepEvalBaseLLM.__init_subclass__`). Third-party, not ours. `pyproject.toml`
+   `[tool.pytest.ini_options]` `filterwarnings` becomes
+   `["error", "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:deepeval"]`
+   (module regex scoped to deepeval; our code keeps `error`). If a *different* DeepEval warning
+   appears next, stop and report it; do not widen the filter.
+2. **mypy no-untyped-call** on `class StatlabJudge(DeepEvalBaseLLM)` (deepeval's untyped
+   `__init_subclass__`). `pyproject.toml` `[tool.mypy]` gains
+   `untyped_calls_exclude = ["deepeval"]` (mypy's scoped option; no ignore comments).
+3. **No imports from conftest.** Move `Suite`, `judged_mode`, `champion_summary`,
+   `tools_called` (and `final_status` from `test_judged.py`) into `integration/session.py`
+   (public, unchanged bodies); `conftest.py` and `test_judged.py` import them from there.
+   Tests 2 and 3 taking `suite: Suite` (to call `provider.start`) is accepted.
+4. Accepted as implemented: the `args` guard in `a_generate`, `offline_acompletion -> object`,
+   `-p no:deepeval` staying in `integration/pytest.ini`, RUF100 noqa removal, Ruff format.
+Owned files now also include `pyproject.toml` and `integration/session.py`.
+Then run all §6 checks (unit judge/cassette tests, offline `-k "S01 or S04"` with per-test
+outcomes, `git status --short`, Ruff/format/mypy on the eight owned files).
+
+### Addendum 89c-B (review correction, 2026-10-28)
+
+New collection error: `SyntaxError: 'return' in a 'finally' block` in
+`deepeval/evaluate/execute/loop.py:816`. Python 3.14 (PEP 765) emits a `SyntaxWarning` there, and
+the unit suite's `filterwarnings = ["error"]` turns it into an error during import. Resolution:
+**DeepEval is never imported by the unit suite.**
+1. Move `tests/test_integration_judge.py` to `integration/tests/test_judge_unit.py` (content
+   unchanged; `git mv` not required, the file is untracked). It runs in the integration suite,
+   which keeps default warning filters and needs no services (it does not request `suite`).
+2. Revert Addendum 89c-A item 1: unit-suite `filterwarnings` back to `["error"]`.
+   (`untyped_calls_exclude = ["deepeval"]` stays.)
+3. `tests/test_integration_cassette.py` must not import deepeval (it imports only
+   `integration.cassette`, which does not); confirm with `grep`.
+Checks: `make test-fast TESTS="tests/test_integration_cassette.py"`;
+`.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm offline -k "judge_unit or S01 or S04"`
+with per-test outcomes; `git status --short`; Ruff/format/mypy on the owned `.py` files.
+
+### Addendum 89c-C (review correction, 2026-10-28)
+
+`LLMTestCaseParams` is deprecated in deepeval 4.3.2 (DeprecationWarning from our import).
+`test_judged.py`: import and use `SingleTurnParams` instead (`SingleTurnParams.INPUT`,
+`SingleTurnParams.ACTUAL_OUTPUT`; verified: `GEval.evaluation_params: List[SingleTurnParams]`).
+The remaining DeepEval-internal warnings (tracing DeprecationWarning, loop.py SyntaxWarning) are
+third-party and accepted in the integration suite. Checks: Ruff/format/mypy on
+`integration/tests/test_judged.py`; offline `-k "judge_unit or S01"` passes; the log no longer
+contains `LLMTestCaseParams`.
+
+### 89c acceptance receipt (2026-10-28)
+
+Corrections: 89c-A (mypy `untyped_calls_exclude = ["deepeval"]`; helpers moved to
+`integration/session.py`), 89c-B (DeepEval never imported by the unit suite: judge unit tests in
+`integration/tests/test_judge_unit.py`; unit `filterwarnings` stays `["error"]`), 89c-C
+(`SingleTurnParams`). Full offline suite under pytest: exit 0, 49 passed, 56 skipped (judged
+metrics skip offline; tool check skips without `tools_used`): behaviour 20/20 PASS,
+`test_tools_match_expectation` PASS for S02, S03, S19, S20, judge unit tests 5/5. Remaining
+warnings are DeepEval-internal (tracing DeprecationWarning, loop.py SyntaxWarning).
+`make check` exit 0: 3355 passed, 1 designed skip, coverage 100.00 %, mypy "no issues found in
+224 source files", Ruff clean, "234 files already formatted". LLM-judged metrics unverified
+until the paid record run.
