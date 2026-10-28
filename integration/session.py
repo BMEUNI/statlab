@@ -19,6 +19,7 @@ import httpx
 from statlab.llm.client import LlmClient
 from statlab.persistence.models import RunStatus
 
+from integration.cassette import CassetteProvider
 from integration.checks import (
     CheckResult,
     expectation_checks,
@@ -326,13 +327,13 @@ class SuiteServices:
     mcp: McpProcess
     driver: Driver
     budget: Budget
-    provider: OfflineProvider | None
+    provider: OfflineProvider | CassetteProvider | None
     live: bool
 
 
 @asynccontextmanager
 async def open_services(
-    workspace: Workspace, *, mode: str, budget_usd: float
+    workspace: Workspace, *, mode: str, budget_usd: float, cassettes: Path
 ) -> AsyncIterator[SuiteServices]:
     token = secrets.token_urlsafe(32)
     mcp = McpProcess(data_dir=workspace.data_dir, token=token, log_path=workspace.mcp_log)
@@ -348,7 +349,15 @@ async def open_services(
             db_path=workspace.db_path.resolve(),
             api_port=api_port,
         )
-        provider = OfflineProvider(rich=mode == "offline-rich") if mode != "live" else None
+        provider: OfflineProvider | CassetteProvider | None
+        if mode == "record":
+            provider = CassetteProvider(mode="record", root=cassettes)
+        elif mode == "replay":
+            provider = CassetteProvider(mode="replay", root=cassettes)
+        elif mode == "live":
+            provider = None
+        else:
+            provider = OfflineProvider(rich=mode == "offline-rich")
         llm_client = LlmClient(settings, acompletion=provider) if provider is not None else None
         server = ApiServer(settings=settings, llm_client=llm_client)
         api = server
@@ -359,7 +368,10 @@ async def open_services(
             await server.start()
 
         driver = Driver(
-            base_url=base_url, workspace=workspace, restart=restart, cheap=mode == "live"
+            base_url=base_url,
+            workspace=workspace,
+            restart=restart,
+            cheap=mode in ("live", "record", "replay"),
         )
         await driver.sign_in()
         budget = Budget(workspace.db_path, budget_usd)
@@ -369,7 +381,7 @@ async def open_services(
             driver=driver,
             budget=budget,
             provider=provider,
-            live=mode == "live",
+            live=mode in ("live", "record"),
         )
     finally:
         if driver is not None:

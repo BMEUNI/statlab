@@ -2,7 +2,7 @@
 status: planned
 dependencies: [88]
 completion_date: null
-implementation_notes: "89a accepted 2026-10-27 (pytest suite, behaviour parity); 89b-89d pending"
+implementation_notes: "89a accepted 2026-10-27 (pytest parity); 89b accepted 2026-10-28 (cassettes); 89c-89d pending"
 ---
 
 # Chunk 89 — integration scenarios as a pytest + DeepEval suite with record/replay
@@ -342,3 +342,195 @@ WHATS_NEXT). After chunk 90: S16 under pytest 5/5 PASS. Final `make check` (with
 exit 0: 3348 passed, 1 designed skip, coverage 100.00 % (14106 statements, 3998 branches), mypy
 "no issues found in 219 source files", Ruff "All checks passed!", "229 files already formatted".
 Paid modes not run.
+
+## Stage 89b (detailed spec) — record/replay cassettes
+
+Goal: `--llm record` runs the real provider and saves every LLM answer; `--llm replay` serves
+those answers with no network and no spend. Prerequisite: 89a committed (`d8e6fd0`), chunk 90
+(`7e7fac2`).
+
+Key decision (investigated 2026-10-28): prompts contain random IDs (`<prefix>_<16 hex>`,
+`persistence/ids.py:36`; artifacts `a_<16 hex>`) and run-to-run values (fit timings), so a
+prompt-hash key never matches on replay. Answers are matched by **slot + occurrence** instead:
+- `title` = the output schema title. Every request's system message ends with
+  `"\nSchema: " + <schema JSON>` (`llm/client.py:594-597`); parse after the last occurrence
+  (same as `OfflineProvider`, `integration/offline_llm.py:560-565`).
+- `node`, `candidate`: `DomainRuntime.decide` user messages start with the canonical
+  state-summary JSON followed by `"\n\n"` (`llm/prompts.py:54-67`, compact JSON has no raw
+  newline). Parse `user.split("\n\n", 1)[0]` with `json.loads`; if it is a dict, `node =
+  obj.get("node")` when a `str`, `candidate = obj["candidate"]["public_id"]` when `obj.get(
+  "candidate")` is a dict with a `str` `public_id`. Any parse failure or other shape → `None`
+  (setup assistant, chat control, gates, rewind calls).
+- `slot = f"{title}__{node or '-'}__{candidate or '-'}"`; `n` = per-scenario count of
+  successful answers for that slot, starting at 0. Calls of one slot are sequential
+  (one node/candidate at a time), so `n` is deterministic; parallel candidates have distinct
+  slots.
+- Counter increments only after a successful answer (record) or a served answer (replay), so a
+  provider error retried by `recover_call` re-uses the same `n`, and replay serves the eventual
+  success directly.
+- Drift (advisory): `prompt_sha256` = SHA-256 of the canonical JSON of `messages` after
+  replacing every `\b[a-z]{1,3}_[0-9a-f]{16}\b` with `<id>`. Replay compares it with the
+  recording; a mismatch is recorded as drift, never fails the answer.
+
+Owned files: `integration/cassette.py` (new), `integration/session.py`,
+`integration/tests/conftest.py`, `tests/test_integration_cassette.py` (new), `Makefile`.
+Not alone. No product code change.
+
+### 1. `integration/cassette.py` (new)
+
+Docstring: `"""Record/replay of LLM answers at the LlmClient acompletion seam (chunk 89b)."""`
+Imports: stdlib (`hashlib`, `json`, `re`, `collections.abc` `AsyncIterator`, `Awaitable`,
+`Callable`, `dataclasses`, `pathlib.Path`, `typing.Literal`), `litellm`,
+`from litellm import ModelResponse`, `from litellm.types.utils import ModelResponseStream`.
+
+- `_ID: Final = re.compile(r"\b[a-z]{1,3}_[0-9a-f]{16}\b")`.
+- `def slot_of(messages: list[dict[str, str]]) -> str` — as above; raises
+  `RuntimeError("cassette: request has no schema")` when the marker is missing.
+- `def prompt_sha256(messages: list[dict[str, str]]) -> str` — as above
+  (`json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`).
+- `class _Replayed`: async-iterable stream over stored chunk dicts:
+  `__init__(self, chunks: list[dict[str, object]])`, `__aiter__` yields
+  `ModelResponseStream(**chunk)` in order, `async def aclose(self) -> None: return None`
+  (the client requires a callable `aclose`, `client.py:481-483`).
+- `@dataclass class CassetteProvider`: fields `mode: Literal["record", "replay"]`,
+  `root: Path`, `scenario_id: str | None = None`, `counts: dict[str, int]` (default empty),
+  `drift: list[str]` (default empty), `acompletion: Callable[..., Awaitable[object]] =
+  litellm.acompletion` (test seam).
+  - `def start(self, scenario_id: str) -> None`: set `scenario_id`, clear `counts` and `drift`.
+  - `async def __call__(self, **kwargs: object) -> object`:
+    1. `scenario_id is None` → `RuntimeError("cassette: no active scenario")`.
+    2. `messages` validated exactly like `OfflineProvider.__call__` (`offline_llm.py:546-557`,
+       same error text with `cassette:` prefix); `slot = slot_of(messages)`;
+       `n = counts.get(slot, 0)`; `path = root / scenario_id / f"{slot}__{n}.json"`.
+    3. replay: missing file → `RuntimeError(f"cassette miss: {scenario_id} {slot} #{n}; re-record")`;
+       read JSON; if `stored["prompt_sha256"] != prompt_sha256(messages)` append
+       `f"{slot} #{n}"` to `drift`; `counts[slot] = n + 1`; if `stored["stream"]` return
+       `_Replayed(stored["chunks"])`, else `ModelResponse(**stored["response"])`.
+    4. record: `raw = await self.acompletion(**kwargs)` (exceptions propagate, nothing
+       stored); if `kwargs.get("stream") is True`: collect every chunk of `raw` with
+       `async for` into a list, then `await raw.aclose()` if it has a callable `aclose`;
+       payload `{"stream": True, "chunks": [c.model_dump() for c in chunks]}` and the return
+       value is `_Replayed(<those dicts>)`; else payload `{"stream": False, "response":
+       raw.model_dump()}` (raw must be a `ModelResponse`, else
+       `RuntimeError("cassette: unexpected response type")`) and the return value is `raw`.
+       Add to payload `"slot"`, `"n"`, `"model": kwargs["model"]`, `"prompt_sha256"`,
+       `"messages"`. Never store any other kwarg (keys, base URLs, headers). Write with
+       `path.parent.mkdir(parents=True, exist_ok=True)` and `path.write_text(json.dumps(payload,
+       indent=1, default=str), encoding="utf-8")`; then `counts[slot] = n + 1`; return.
+
+### 2. `integration/session.py`
+
+- `open_services`: `mode` may now also be `record` or `replay`. Provider:
+  `OfflineProvider(rich=...)` for `offline`/`offline-rich`; `CassetteProvider(mode=mode,
+  root=cassettes)` for `record`/`replay` (new keyword `cassettes: Path` on `open_services`);
+  `None` for `live`. `LlmClient(settings, acompletion=provider)` whenever provider is not
+  `None`. Driver `cheap = mode in ("live", "record", "replay")` (replay must send the same
+  cheap contract as the recording). `SuiteServices.live = mode in ("live", "record")` (G7
+  real spend). `SuiteServices.provider` type becomes `OfflineProvider | CassetteProvider |
+  None`.
+- `run_scenarios.py` is unchanged (old runner keeps live/offline only); pass
+  `cassettes=Path("integration/.cache/cassettes")` there too so its call compiles.
+
+### 3. `integration/tests/conftest.py`
+
+- `--llm` choices add `record`, `replay`; usage error text lists all five.
+- `--cassettes` option, default `Path("integration/.cache/cassettes")` (gitignored), passed to
+  `open_services`.
+- `scenario_record` step 3: `OfflineProvider` → set `.scenario` (as today);
+  `CassetteProvider` → `provider.start(scenario.id)`. After `run_one` and only for a
+  `CassetteProvider` in replay mode: append
+  `CheckResult("H-drift", "replayed prompts match the recording", "soft", not provider.drift,
+  ", ".join(provider.drift))` to `record.checks` (import `CheckResult` from
+  `integration.checks`).
+
+### 4. `tests/test_integration_cassette.py` (new; main suite)
+
+Helpers: `system(title)` returns `f"rules\nSchema: {json.dumps({'title': title})}"`;
+`decide_user(node, candidate)` returns the canonical state summary
+`json.dumps({"candidate": {"public_id": candidate} if candidate else None, "node": node},
+sort_keys=True, separators=(",", ":"))` + `"\n\n[]\n\nquestion"`; a fake async `acompletion`
+returning a fixed `ModelResponse(model="m", choices=[{"message": {"role": "assistant",
+"content": "{\"a\": 1}"}, "finish_reason": "stop", "index": 0}], usage={"prompt_tokens": 3,
+"completion_tokens": 2, "total_tokens": 5, "prompt_tokens_details": {"cached_tokens": 1}})`
+and counting calls; a fake streaming one returning an async-iterable with `aclose` over two
+`ModelResponseStream` chunks (content "ab", "c") and a usage-only chunk.
+Tests (all `@pytest.mark.asyncio` where async):
+1. `test_slot_of_decide_and_other_calls`: decide message → `"T__fit__c_02"`; shared node
+   (candidate `None`) → `"T__intake__-"`; non-JSON user text → `"T__-__-"`; missing schema →
+   `RuntimeError` match `"no schema"`.
+2. `test_prompt_hash_ignores_random_ids`: two message lists differing only in
+   `r_0123456789abcdef` vs `r_fedcba9876543210` → equal hashes; differing in other text →
+   different.
+3. `test_record_then_replay_round_trip` (`tmp_path`): record provider with the fake; `start("S01")`;
+   call twice with the same decide messages, `stream=False`, `api_key="sk-secret"`; files
+   `S01/T__fit__c_01__0.json`, `__1.json` exist; no file contains `"sk-secret"`; replay provider
+   (fake `acompletion` that raises if called) after `start("S01")` returns two responses whose
+   `choices[0].message.content == '{"a": 1}'` and `usage.prompt_tokens == 3`; `drift == []`.
+4. `test_replay_stream_and_drift`: record a `stream=True` call; replay with messages whose user
+   text changed → returned object iterates to the same 3 chunks (contents "ab", "c", then
+   usage), has `aclose`, and `drift == ["T__fit__c_01 #0"]`.
+5. `test_replay_miss_and_no_scenario`: replay on empty dir → `RuntimeError` match
+   `"cassette miss: S01 T__fit__c_01 #0"`; provider without `start` → match `"no active scenario"`.
+6. `test_record_error_does_not_advance`: fake raising `ConnectionError` once then answering:
+   first call raises, second succeeds and is stored as `#0`; `counts == {"T__fit__c_01": 1}`.
+
+### 5. `Makefile`
+
+Add `itest-replay` → `$(PY) -m pytest -c integration/pytest.ini integration/tests --llm replay`.
+No record/live target (paid; run by hand after a fresh user yes).
+
+### 6. Checks (implementer)
+
+- `make test-fast TESTS="tests/test_integration_cassette.py"`
+- `.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm offline -k S01`
+- `.venv/bin/python -m pytest -c integration/pytest.ini integration/tests --llm replay -k S01`
+  → expected to FAIL S01 behaviour with a `cassette miss` (no recording yet); report the
+  failure text; this proves the miss path end to end. Do not run `record` or `live`.
+- Ruff check, Ruff format --check, mypy on the five owned files (literal paths).
+
+Stop and report on: `ModelResponse(**dump)` or `ModelResponseStream(**dump)` not round-tripping
+(test 3/4); mypy needing `Any`/ignores for litellm types; anything requiring a product change.
+
+Main acceptance: `make check`; offline suite unchanged; the paid record + free replay pair waits
+for the user's explicit yes (planned after 89c so one recording covers judge calls too).
+
+### Addendum 89b-A (review corrections, 2026-10-28)
+
+1. **Stream chunks are stored in a reduced, typed form** (litellm's `ModelResponseStream.__init__`
+   rejects `**dict[str, object]` under mypy). Record: for each chunk store
+   `{"content": <str | None>, "usage": <None | {"prompt_tokens": int, "completion_tokens": int,
+   "total_tokens": int, "cached_tokens": int}>}` where `content = chunk.choices[0].delta.content`
+   when `chunk.choices` else `None`, and `usage` from `getattr(chunk, "usage", None)` when it is
+   a litellm `Usage` (`cached_tokens = usage.prompt_tokens_details.cached_tokens` when details
+   are present and the value is an `int`, else 0). The payload key stays `"chunks"`; add
+   `"model": kwargs["model"]` (already stored). `_Replayed(chunks, model)` builds, per stored
+   chunk, exactly like `OfflineProvider`'s `_Stream` (`integration/offline_llm.py:89-117`):
+   content not `None` → `ModelResponseStream(choices=[StreamingChoices(index=0,
+   delta=Delta(content=content))], model=model)`; usage not `None` → `ModelResponseStream(
+   choices=[], model=model, usage=Usage(prompt_tokens=..., completion_tokens=...,
+   total_tokens=..., prompt_tokens_details=PromptTokensDetails(cached_tokens=...)))`. Reasoning
+   text is not kept (the client reads only `delta.content` and usage). Validate stored types
+   with `isinstance` and raise `RuntimeError("cassette: malformed recording")` on mismatch.
+   Record mode returns `_Replayed(<reduced chunks>, model)` too.
+2. `integration/run_scenarios.py:53-54`: set `.scenario` only when
+   `isinstance(services.provider, OfflineProvider)` (the old runner never builds a cassette).
+3. A cassette miss must be visible in `api.log`: before raising, log it with
+   `logging.getLogger(__name__).error(<same message>)`. (`LlmClient` logs only the exception
+   class.)
+4. `tests/test_integration_cassette.py`: no `typing.Any`. Annotate replay results as `object`
+   and narrow with `assert isinstance(first, ModelResponse)` / `hasattr(result, "aclose")` +
+   `isinstance(result, AsyncIterable)` before use. Test 4 additionally asserts the replayed
+   chunks are `ModelResponseStream` with contents `["ab", "c"]` and the last chunk's
+   `usage.prompt_tokens`. Add to test 5: `caplog` contains the miss message at ERROR.
+Checks: §6 again (cassette tests, offline S01, replay S01 expected miss — now confirm
+`grep "cassette miss: S01" integration/out/<newest>-replay/api.log` finds it), Ruff/format/mypy on
+the five owned files.
+
+### 89b acceptance receipt (2026-10-28)
+
+Correction: Addendum 89b-A (typed reduced stream chunks, old-runner provider narrowing, miss
+logged at ERROR, no `Any` in tests). Focused: 6 cassette tests pass; offline S01 under pytest
+2 passed; replay S01 fails as designed with `ERROR integration.cassette cassette miss: S01
+IntakeDecision__intake__- #0; re-record` in `api.log`. `make check` exit 0: 3354 passed,
+1 designed skip, coverage 100.00 %, mypy "no issues found in 221 source files", Ruff clean,
+"231 files already formatted". Paid record run not done (after 89c, needs user yes).

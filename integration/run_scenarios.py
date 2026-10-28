@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from integration.model import Scenario, load_scenarios
+from integration.offline_llm import OfflineProvider
 from integration.session import (
     ScenarioRecord,
     make_workspace,
@@ -39,13 +40,18 @@ async def _suite(scenarios: tuple[Scenario, ...], args: argparse.Namespace) -> i
     if args.verbose:
         logging.getLogger("statlab").setLevel(logging.DEBUG)
     records: list[ScenarioRecord] = []
-    async with open_services(workspace, mode=args.llm, budget_usd=args.budget_usd) as services:
+    async with open_services(
+        workspace,
+        mode=args.llm,
+        budget_usd=args.budget_usd,
+        cassettes=Path("integration/.cache/cassettes"),
+    ) as services:
         stop = False
         for scenario in scenarios:
             if stop:
                 records.append(ScenarioRecord(scenario))
                 continue
-            if services.provider is not None:
+            if isinstance(services.provider, OfflineProvider):
                 services.provider.scenario = scenario
             record = await run_one(
                 scenario,
